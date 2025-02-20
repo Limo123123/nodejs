@@ -1,14 +1,30 @@
-const express = require("express");
+const express = require('express');
 const app = express();
+const port = 80;
+
+let currentColor = '#FFFFFF'; // Standardfarbe: Weiß
 
 // Middleware für JSON-Parsing
 app.use(express.json());
 
-// Einfache API-Route
-app.get("/api/hello", (req, res) => {
-  res.json({ message: "👋 Hallo von der Node.js API!" });
+// Endpunkt, um die aktuelle Farbe abzurufen
+app.get('/api/limolights/color', (req, res) => {
+  res.json({ color: currentColor });
 });
 
-// Starte den Server auf Port 3000
-const PORT = 81;
-app.listen(PORT, () => console.log(`🚀 API läuft auf http://localhost:${PORT}`));
+// Endpunkt, um die Farbe zu setzen
+app.post('/api/limolights/color', (req, res) => {
+  const { color } = req.body;
+
+  // Einfaches Validieren des Farbcodes (Hex-Code)
+  if (typeof color === 'string' && /^#[0-9A-F]{6}$/i.test(color)) {
+    currentColor = color;
+    res.json({ message: 'Farbe erfolgreich gesetzt!', color: currentColor });
+  } else {
+    res.status(400).json({ message: 'Ungültiger Farbcode. Verwende ein Hex-Code (z. B. #FF5733).' });
+  }
+});
+
+app.listen(port, () => {
+  console.log(`Server läuft auf http://localhost:${port}`);
+});
