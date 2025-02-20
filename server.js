@@ -1,6 +1,14 @@
 const express = require('express');
 const app = express();
-const port = 80;
+const fs = require('fs');
+const https = require('https');
+const port = 443;
+
+// Lade das SSL-Zertifikat und den privaten Schlüssel
+const privateKey = fs.readFileSync('/etc/letsencrypt/live/deine-domain.de/privkey.pem', 'utf8');
+const certificate = fs.readFileSync('/etc/letsencrypt/live/deine-domain.de/fullchain.pem', 'utf8');
+const credentials = { key: privateKey, cert: certificate };
+
 
 let currentColor = '#FFFFFF'; // Standardfarbe: Weiß
 
