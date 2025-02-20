@@ -3,6 +3,7 @@ const app = express();
 const fs = require('fs');
 const https = require('https');
 const http = require('http');
+const cors = require('cors'); // Importiere CORS
 const port = 443;
 
 // Lade das SSL-Zertifikat und den privaten Schlüssel 
@@ -15,6 +16,11 @@ let currentColor = '#FFFFFF';
 
 // Middleware für JSON-Parsing
 app.use(express.json());
+
+// CORS aktivieren
+app.use(cors({
+  origin: 'https://git.slimo.v6.rocks'  // Erlaube nur diesen Ursprung
+}));
 
 // Endpunkt, um die aktuelle Farbe abzurufen
 app.get('/api/limolights/color', (req, res) => {
@@ -37,4 +43,4 @@ app.post('/api/limolights/color', (req, res) => {
 // HTTPS Server starten
 https.createServer(credentials, app).listen(port, () => {
   console.log(`Server läuft auf https://localhost:${port}`);
-});
+})
