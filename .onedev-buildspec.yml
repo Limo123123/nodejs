@@ -1,6 +1,7 @@
 version: 38
 jobs:
 - name: Generate NPM Package
+  jobExecutor: Local-Pi5
   steps:
   - !CheckoutStep
     name: Get Repo
@@ -20,9 +21,13 @@ jobs:
         npm install
         npm run build
         ls
-        sudo zip -r latest.zip .
+        zip -r latest.zip .
         curl -X POST http://@secret:IP PI4@:4000/deploy
     useTTY: true
+    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+  - !PublishSiteStep
+    name: Publish ZIP
+    artifacts: latest.zip
     condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
   retryCondition: never
   maxRetries: 3
