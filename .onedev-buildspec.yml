@@ -19,8 +19,10 @@ jobs:
         apt-get update && apt-get install -y zip
 
         npm install
+        npm install express
         npm run build
         ls
+        rm -rf .git
         zip -r latest.zip .
     useTTY: true
     condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
