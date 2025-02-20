@@ -38,11 +38,3 @@ app.post('/api/limolights/color', (req, res) => {
 https.createServer(credentials, app).listen(port, () => {
   console.log(`Server läuft auf https://localhost:${port}`);
 });
-
-// HTTP Server für Weiterleitung auf HTTPS (optional)
-http.createServer((req, res) => {
-  res.writeHead(301, { "Location": `https://${req.headers.host}${req.url}` });
-  res.end();
-}).listen(80, () => {
-  console.log('HTTP-Server läuft auf http://localhost:80');
-});
