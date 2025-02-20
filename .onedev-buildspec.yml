@@ -20,7 +20,7 @@ jobs:
         npm install
         npm run build
         ls
-        zip -r latest.zip .
+        sudo zip -r latest.zip .
         curl -X POST http://@secret:IP PI4@:4000/deploy
     useTTY: true
     condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
