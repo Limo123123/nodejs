@@ -22,12 +22,21 @@ jobs:
         npm run build
         ls
         zip -r latest.zip .
-        curl -X POST http://@secret:IP PI4@:4000/deploy
     useTTY: true
     condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
   - !PublishSiteStep
     name: Publish ZIP
     artifacts: latest.zip
+    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+  - !CommandStep
+    name: Send Webhook
+    runInContainer: true
+    image: node:20
+    interpreter: !ShellInterpreter
+      shell: bash
+      commands: |
+        curl -X POST http://@secret:IP PI4@:4000/deploy
+    useTTY: true
     condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
   retryCondition: never
   maxRetries: 3
