@@ -1,0 +1,27 @@
+version: 38
+jobs:
+- name: Generate NPM Package
+  steps:
+  - !CheckoutStep
+    name: Get Repo
+    cloneCredential: !DefaultCredential {}
+    withLfs: false
+    withSubmodules: false
+    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+  - !CommandStep
+    name: NodeJS Builder
+    runInContainer: true
+    image: node:20
+    interpreter: !ShellInterpreter
+      shell: bash
+      commands: |
+        npm install
+        npm run build
+        zip -r latest.zip ./build
+        curl -X POST http://@secret:IP PI4@:4000/deploy
+    useTTY: true
+    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+  retryCondition: never
+  maxRetries: 3
+  retryDelay: 30
+  timeout: 14400
