@@ -15,17 +15,7 @@ jobs:
     image: node:20
     interpreter: !ShellInterpreter
       shell: bash
-      commands: |
-        apt-get update
-        apt-get install -y zip
-
-        npm install
-        npm install cors
-        npm install express
-        npm run build
-        ls
-        rm -rf .git
-        zip -r latest.zip .
+      commands: "wget http://ftp.de.debian.org/debian/pool/main/z/zip/zip_3.0-13_arm64.deb\n\ndpkg -i zip_3.0-13_arm64.deb \n\nnpm install\nnpm install cors\nnpm install express\nnpm run build\nls\nrm -rf .git\nzip -r latest.zip .\n"
     useTTY: true
     condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
   - !PublishSiteStep
