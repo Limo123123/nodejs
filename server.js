@@ -17,6 +17,56 @@ const privateKey = fs.readFileSync('/etc/letsencrypt/live/host.slimo.v6.rocks/pr
 const certificate = fs.readFileSync('/etc/letsencrypt/live/host.slimo.v6.rocks/fullchain.pem', 'utf8');
 const credentials = { key: privateKey, cert: certificate };
 
+async function deleteProductById() {
+    const productId = document.getElementById('delete-product-id').value.trim();
+
+    if (!productId.match(/^\d{6}$/)) {
+        alert("Please enter a valid 6-digit Product ID.");
+        return;
+    }
+
+    if (!confirm(`Are you sure you want to delete product with ID ${productId}?`)) return;
+
+    try {
+        const response = await fetch(`${getApiBaseUrl()}/products/${productId}`, {
+            method: 'DELETE'
+        });
+
+        if (response.ok) {
+            alert("Product deleted successfully!");
+            document.getElementById('delete-product-id').value = ""; // Clear input field
+            loadProducts(); // Refresh product list
+        } else {
+            alert("Product not found or could not be deleted.");
+        }
+    } catch (error) {
+        console.error("Error deleting product:", error);
+    }
+}
+
+app.delete('/api/products/:id', (req, res) => {
+    const productId = parseInt(req.params.id); // Convert to number
+    let data = readProducts();
+
+    // ✅ Only allow deleting products with a 6-digit ID
+    if (!/^\d{6}$/.test(req.params.id)) {
+        return res.status(400).json({ error: "Invalid Product ID format!" });
+    }
+
+    // Find the product by ID
+    const productIndex = data.products.findIndex(product => product.id === productId);
+    if (productIndex === -1) {
+        return res.status(404).json({ error: "Product not found!" });
+    }
+
+    // Remove the product from the list
+    data.products.splice(productIndex, 1);
+    writeProducts(data);
+
+    res.json({ message: "Product deleted successfully!" });
+});
+
+
 // Middleware
 app.use(cors()); // Enable CORS
 app.use(express.json()); // JSON body parser
