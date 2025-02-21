@@ -18,12 +18,7 @@ const certificate = fs.readFileSync('/etc/letsencrypt/live/host.slimo.v6.rocks/f
 const credentials = { key: privateKey, cert: certificate };
 
 // Middleware
-app.use(cors({
-  origin: ['https://git.slimo.v6.rocks', 'http://mexico-utilize.gl.at.ply.gg:18468'], // Allow frontend
-  methods: ['GET', 'POST'], // Allow only necessary methods
-  allowedHeaders: ['Content-Type']
-}));
-
+app.use(cors()); // Enable CORS
 app.use(express.json()); // JSON body parser
 
 // ✅ Ensure products.json exists
