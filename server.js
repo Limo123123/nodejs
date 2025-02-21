@@ -1,46 +1,69 @@
 const express = require('express');
-const app = express();
 const fs = require('fs');
 const https = require('https');
 const http = require('http');
-const cors = require('cors'); // Importiere CORS
-const port = 443;
+const cors = require('cors');
+const path = require('path');
 
-// Lade das SSL-Zertifikat und den privaten Schlüssel 
+const app = express();
+const HTTP_PORT = 80;  // HTTP
+const HTTPS_PORT = 443; // HTTPS
+
+// Path to products.json in /var/www/
+const PRODUCTS_FILE = '/var/www/products.json';
+
+// Load SSL certificate
 const privateKey = fs.readFileSync('/etc/letsencrypt/live/host.slimo.v6.rocks/privkey.pem', 'utf8');
 const certificate = fs.readFileSync('/etc/letsencrypt/live/host.slimo.v6.rocks/fullchain.pem', 'utf8');
 const credentials = { key: privateKey, cert: certificate };
 
-// Standardfarbe
-let currentColor = '#FFFFFF'; 
+// Middleware
+app.use(cors()); // Enable CORS
+app.use(express.json()); // JSON body parser
 
-// Middleware für JSON-Parsing
-app.use(express.json());
+// ✅ Ensure products.json exists
+if (!fs.existsSync(PRODUCTS_FILE)) {
+    fs.writeFileSync(PRODUCTS_FILE, JSON.stringify({ products: [] }, null, 2));
+}
 
-// CORS aktivieren
-app.use(cors({
-  origin: 'https://git.slimo.v6.rocks'  // Erlaube nur diesen Ursprung
-}));
+// ✅ Read products.json
+const readProducts = () => JSON.parse(fs.readFileSync(PRODUCTS_FILE));
 
-// Endpunkt, um die aktuelle Farbe abzurufen
-app.get('/api/limolights/color', (req, res) => {
-  res.json({ color: currentColor });
+// ✅ Write to products.json
+const writeProducts = (data) => fs.writeFileSync(PRODUCTS_FILE, JSON.stringify(data, null, 2));
+
+// ✅ GET: Fetch all products
+app.get('/api/products', (req, res) => {
+    try {
+        res.json(readProducts());
+    } catch (error) {
+        res.status(500).json({ error: "Error reading products file!" });
+    }
 });
 
-// Endpunkt, um die Farbe zu setzen
-app.post('/api/limolights/color', (req, res) => {
-  const { color } = req.body;
+// ✅ POST: Add a new product
+app.post('/api/products', (req, res) => {
+    const { name, image_url, price } = req.body;
+    if (!name || !image_url || !price) {
+        return res.status(400).json({ error: "All fields are required!" });
+    }
 
-  // Validierung des Hex-Farbcodes
-  if (typeof color === 'string' && /^#[0-9A-F]{6}$/i.test(color)) {
-    currentColor = color;
-    res.json({ message: 'Farbe erfolgreich gesetzt!', color: currentColor });
-  } else {
-    res.status(400).json({ message: 'Ungültiger Farbcode. Verwende ein Hex-Code (z. B. #FF5733).' });
-  }
+    try {
+        const data = readProducts();
+        const newProduct = { id: Date.now(), name, image_url, price };
+        data.products.push(newProduct);
+        writeProducts(data);
+        res.status(201).json({ message: "Product added!", product: newProduct });
+    } catch (error) {
+        res.status(500).json({ error: "Error writing to products file!" });
+    }
 });
 
-// HTTPS Server starten
-https.createServer(credentials, app).listen(port, () => {
-  console.log(`Server läuft auf https://localhost:${port}`);
-})
+// ✅ Start both HTTP & HTTPS servers
+http.createServer(app).listen(HTTP_PORT, () => {
+    console.log(`HTTP Server running on port ${HTTP_PORT}`);
+});
+
+https.createServer(credentials, app).listen(HTTPS_PORT, () => {
+    console.log(`HTTPS Server running on port ${HTTPS_PORT}`);
+});
