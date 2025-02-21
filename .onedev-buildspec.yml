@@ -16,7 +16,8 @@ jobs:
     interpreter: !ShellInterpreter
       shell: bash
       commands: |
-        apt-get update && apt-get install -y zip
+        apt-get update
+        apt-get install -y zip
 
         npm install
         npm install cors
