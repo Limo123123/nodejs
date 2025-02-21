@@ -93,21 +93,34 @@ app.get('/api/products', (req, res) => {
 
 // ✅ POST: Add a new product
 app.post('/api/products', (req, res) => {
-    const { name, image_url, price } = req.body;
+    let { name, image_url, price } = req.body;
+
     if (!name || !image_url || !price) {
         return res.status(400).json({ error: "All fields are required!" });
     }
 
-    try {
-        const data = readProducts();
-        const newProduct = { id: Date.now(), name, image_url, price };
-        data.products.push(newProduct);
-        writeProducts(data);
-        res.status(201).json({ message: "Product added!", product: newProduct });
-    } catch (error) {
-        res.status(500).json({ error: "Error writing to products file!" });
+    // ✅ Ensure price is a valid number
+    price = parseFloat(price);
+    if (isNaN(price) || price < 0) {
+        return res.status(400).json({ error: "Invalid price! Enter a valid number." });
     }
+
+    const data = readProducts();
+
+    // ✅ Generate a unique 6-digit ID
+    let newId;
+    do {
+        newId = Math.floor(100000 + Math.random() * 900000); // Random 6-digit number
+    } while (data.products.some(product => product.id === newId)); // Ensure ID is unique
+
+    const newProduct = { id: newId, name, image_url, price };
+
+    data.products.push(newProduct);
+    writeProducts(data);
+
+    res.status(201).json({ message: "Product added!", product: newProduct });
 });
+
 
 // ✅ Start both HTTP & HTTPS servers
 http.createServer(app).listen(HTTP_PORT, () => {
