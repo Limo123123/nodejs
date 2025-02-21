@@ -99,9 +99,15 @@ app.post('/api/products', (req, res) => {
         return res.status(400).json({ error: "All fields are required!" });
     }
 
-    // ✅ Ensure price is a valid number
-    price = parseFloat(price);
-    if (isNaN(price) || price < 0) {
+    // ✅ Ensure price starts with "$"
+    price = price.trim();
+    if (!price.startsWith('$')) {
+        price = `$${price}`;
+    }
+
+    // ✅ Ensure price is a valid number (after removing "$")
+    const numericPrice = parseFloat(price.replace(/[^0-9.]/g, ''));
+    if (isNaN(numericPrice) || numericPrice < 0) {
         return res.status(400).json({ error: "Invalid price! Enter a valid number." });
     }
 
@@ -113,7 +119,7 @@ app.post('/api/products', (req, res) => {
         newId = Math.floor(100000 + Math.random() * 900000); // Random 6-digit number
     } while (data.products.some(product => product.id === newId)); // Ensure ID is unique
 
-    const newProduct = { id: newId, name, image_url, price };
+    const newProduct = { id: newId, name, image_url, price }; // ✅ Save price with "$"
 
     data.products.push(newProduct);
     writeProducts(data);
