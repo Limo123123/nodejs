@@ -1,4 +1,4 @@
-version: 38
+version: 39
 jobs:
 - name: Generate NPM Package
   jobExecutor: Local-Pi5
@@ -31,6 +31,25 @@ jobs:
       commands: |
         curl -X POST http://@secret:IP PI4@:4000/deploy
     useTTY: true
+    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+  retryCondition: never
+  maxRetries: 3
+  retryDelay: 30
+  timeout: 14400
+- name: Push to Github
+  steps:
+  - !CheckoutStep
+    name: Get Code
+    cloneCredential: !DefaultCredential {}
+    withLfs: false
+    withSubmodules: false
+    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+  - !PushRepository
+    name: Push to Github
+    remoteUrl: https://github.com/Limo123123/nodejs.git
+    userName: Limo123123
+    passwordSecret: gh
+    force: true
     condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
   retryCondition: never
   maxRetries: 3
