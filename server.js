@@ -10,12 +10,7 @@ const HTTP_PORT = 80;  // HTTP
 const HTTPS_PORT = 443; // HTTPS
 
 // Path to products.json in /var/www/
-const PRODUCTS_FILE = '/var/www/products.json';
-
-// Load SSL certificate
-const privateKey = fs.readFileSync('/etc/letsencrypt/live/host.slimo.v6.rocks/privkey.pem', 'utf8');
-const certificate = fs.readFileSync('/etc/letsencrypt/live/host.slimo.v6.rocks/fullchain.pem', 'utf8');
-const credentials = { key: privateKey, cert: certificate };
+const PRODUCTS_FILE = 'products.json';
 
 async function deleteProductById() {
     const productId = document.getElementById('delete-product-id').value.trim();
@@ -133,6 +128,6 @@ http.createServer(app).listen(HTTP_PORT, () => {
     console.log(`HTTP Server running on port ${HTTP_PORT}`);
 });
 
-https.createServer(credentials, app).listen(HTTPS_PORT, () => {
+https.createServer(app).listen(HTTPS_PORT, () => {
     console.log(`HTTPS Server running on port ${HTTPS_PORT}`);
 });
