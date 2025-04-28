@@ -12,6 +12,11 @@
     "type": "git",
     "url": "https://git.slimo.v6.rocks/nodejs"
   },
+  "dependencies": {
+  "cors": "^2.8.5",
+  "express": "^4.21.2"
+  }
+
   "keywords": [],
   "author": "",
   "license": "GPL-3.0-only",
