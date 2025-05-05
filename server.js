@@ -1,14 +1,12 @@
 const express = require('express');
 const fs = require('fs');
 const http = require('http');
-const https = require('https');
 const cors = require('cors');
-const path = require('path');
 const { MongoClient } = require('mongodb');
 
 // MongoDB Setup
 const mongoUser = 'git';
-const mongoPassword = 'c72JfwytnPVD0YHv'; // Note that this will only have Access to special databases and Collections
+const mongoPassword = 'psw'; // Note that this will only have Access to special databases and Collections 
 const mongoUri = `mongodb+srv://${mongoUser}:${mongoPassword}@limodb.kbacr5r.mongodb.net/?retryWrites=true&w=majority&appName=LimoDB`;
 const mongoDbName = 'shop';
 const mongoCollectionName = 'products';
@@ -16,7 +14,6 @@ const mongoCollectionName = 'products';
 // App Setup
 const app = express();
 const HTTP_PORT = 80;
-const HTTPS_PORT = 443;
 const PRODUCTS_FILE = 'products.json';
 
 // Middleware
@@ -31,6 +28,7 @@ MongoClient.connect(mongoUri)
         productsCollection = db.collection(mongoCollectionName);
         console.log("✅ MongoDB verbunden.");
         syncFromMongoToFile(); // Initial-Backup bei Start
+        syncFromFileToMongo(); // Sicherstellen, dass JSON-Produkte in MongoDB sind
     })
     .catch(err => {
         console.error("❌ MongoDB Fehler:", err);
@@ -60,9 +58,22 @@ async function syncFromMongoToFile() {
 async function syncFromFileToMongo() {
     const localProducts = readProductsFile().products;
 
-    await productsCollection.deleteMany({});
-    if (localProducts.length > 0) {
+    // Wenn MongoDB leer ist, fügen wir alle Produkte aus der JSON-Datei hinzu
+    const mongoCount = await productsCollection.countDocuments();
+    if (mongoCount === 0 && localProducts.length > 0) {
         await productsCollection.insertMany(localProducts);
+        console.log("🔄 Produkte aus der JSON-Datei in MongoDB hinzugefügt.");
+    } else {
+        // Überprüfen, ob Produkte aus der JSON-Datei in MongoDB fehlen
+        for (let product of localProducts) {
+            const existingProduct = await productsCollection.findOne({ id: product.id });
+
+            // Wenn das Produkt nicht in der MongoDB existiert, füge es hinzu
+            if (!existingProduct) {
+                await productsCollection.insertOne(product);
+                console.log(`📦 Produkt mit ID ${product.id} aus der JSON-Datei in MongoDB hinzugefügt.`);
+            }
+        }
     }
     console.log("🔄 Produkte aus Datei in MongoDB aktualisiert.");
 }
