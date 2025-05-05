@@ -6,7 +6,7 @@ const { MongoClient } = require('mongodb');
 
 // MongoDB Setup
 const mongoUser = 'git';
-const mongoPassword = 'psw'; // Note that this will only have Access to special databases and Collections 
+const mongoPassword = 'c72JfwytnPVD0YHv'; // Note that this will only have Access to special databases and Collections 
 const mongoUri = `mongodb+srv://${mongoUser}:${mongoPassword}@limodb.kbacr5r.mongodb.net/?retryWrites=true&w=majority&appName=LimoDB`;
 const mongoDbName = 'shop';
 const mongoCollectionName = 'products';
