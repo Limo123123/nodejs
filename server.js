@@ -116,4 +116,6 @@ app.delete('/api/products/:id', async (req, res) => {
 });
 
 /* ---------- Server starten ---------- */
-http.createServer(app).listen(HTTP_PORT,_
+http.createServer(app).listen(HTTP_PORT, () => {
+    console.log(`HTTP Server running on port ${HTTP_PORT}`);
+});
