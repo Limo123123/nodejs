@@ -1,133 +1,119 @@
 const express = require('express');
 const fs = require('fs');
-const https = require('https');
 const http = require('http');
+const https = require('https');
 const cors = require('cors');
 const path = require('path');
+const { MongoClient } = require('mongodb');
 
+// MongoDB Setup
+const mongoUser = 'git';
+const mongoPassword = 'c72JfwytnPVD0YHv'; // Note that this will only have Access to special databases and Collections
+const mongoUri = `mongodb+srv://${mongoUser}:${mongoPassword}@limodb.kbacr5r.mongodb.net/?retryWrites=true&w=majority&appName=LimoDB`;
+const mongoDbName = 'shop';
+const mongoCollectionName = 'products';
+
+// App Setup
 const app = express();
-const HTTP_PORT = 80;  // HTTP
-const HTTPS_PORT = 443; // HTTPS
-
-// Path to products.json in /var/www/
+const HTTP_PORT = 80;
+const HTTPS_PORT = 443;
 const PRODUCTS_FILE = 'products.json';
 
-async function deleteProductById() {
-    const productId = document.getElementById('delete-product-id').value.trim();
-
-    if (!productId.match(/^\d{6}$/)) {
-        alert("Please enter a valid 6-digit Product ID.");
-        return;
-    }
-
-    if (!confirm(`Are you sure you want to delete product with ID ${productId}?`)) return;
-
-    try {
-        const response = await fetch(`${getApiBaseUrl()}/products/${productId}`, {
-            method: 'DELETE'
-        });
-
-        if (response.ok) {
-            alert("Product deleted successfully!");
-            document.getElementById('delete-product-id').value = ""; // Clear input field
-            loadProducts(); // Refresh product list
-        } else {
-            alert("Product not found or could not be deleted.");
-        }
-    } catch (error) {
-        console.error("Error deleting product:", error);
-    }
-}
-
-app.delete('/api/products/:id', (req, res) => {
-    const productId = parseInt(req.params.id); // Convert to number
-    let data = readProducts();
-
-    // ✅ Only allow deleting products with a 6-digit ID
-    if (!/^\d{6}$/.test(req.params.id)) {
-        return res.status(400).json({ error: "Invalid Product ID format!" });
-    }
-
-    // Find the product by ID
-    const productIndex = data.products.findIndex(product => product.id === productId);
-    if (productIndex === -1) {
-        return res.status(404).json({ error: "Product not found!" });
-    }
-
-    // Remove the product from the list
-    data.products.splice(productIndex, 1);
-    writeProducts(data);
-
-    res.json({ message: "Product deleted successfully!" });
-});
-
-
 // Middleware
-app.use(cors()); // Enable CORS
-app.use(express.json()); // JSON body parser
+app.use(cors());
+app.use(express.json());
 
-// ✅ Ensure products.json exists
-if (!fs.existsSync(PRODUCTS_FILE)) {
-    fs.writeFileSync(PRODUCTS_FILE, JSON.stringify({ products: [] }, null, 2));
+// MongoDB Client
+let db, productsCollection;
+MongoClient.connect(mongoUri)
+    .then(client => {
+        db = client.db(mongoDbName);
+        productsCollection = db.collection(mongoCollectionName);
+        console.log("✅ MongoDB verbunden.");
+        syncFromMongoToFile(); // Initial-Backup bei Start
+    })
+    .catch(err => {
+        console.error("❌ MongoDB Fehler:", err);
+    });
+
+/* ---------- Hilfsfunktionen ---------- */
+
+// Schreibe Produkte in JSON-Datei
+function writeProductsFile(products) {
+    fs.writeFileSync(PRODUCTS_FILE, JSON.stringify({ products }, null, 2));
 }
 
-// ✅ Read products.json
-const readProducts = () => JSON.parse(fs.readFileSync(PRODUCTS_FILE));
+// Lese JSON-Datei
+function readProductsFile() {
+    if (!fs.existsSync(PRODUCTS_FILE)) return { products: [] };
+    return JSON.parse(fs.readFileSync(PRODUCTS_FILE));
+}
 
-// ✅ Write to products.json
-const writeProducts = (data) => fs.writeFileSync(PRODUCTS_FILE, JSON.stringify(data, null, 2));
+// MongoDB → JSON (Backup bei Start)
+async function syncFromMongoToFile() {
+    const mongoProducts = await productsCollection.find().toArray();
+    writeProductsFile(mongoProducts);
+    console.log("📦 Produkte aus MongoDB gesichert.");
+}
 
-// ✅ GET: Fetch all products
-app.get('/api/products', (req, res) => {
+// JSON → MongoDB (wenn Datei sich ändert)
+async function syncFromFileToMongo() {
+    const localProducts = readProductsFile().products;
+
+    await productsCollection.deleteMany({});
+    if (localProducts.length > 0) {
+        await productsCollection.insertMany(localProducts);
+    }
+    console.log("🔄 Produkte aus Datei in MongoDB aktualisiert.");
+}
+
+// Alle Produkte
+app.get('/api/products', async (req, res) => {
     try {
-        res.json(readProducts());
-    } catch (error) {
-        res.status(500).json({ error: "Error reading products file!" });
+        const products = await productsCollection.find().toArray();
+        res.json({ products });
+    } catch (err) {
+        res.status(500).json({ error: "Fehler beim Abrufen!" });
     }
 });
 
-// ✅ POST: Add a new product
-app.post('/api/products', (req, res) => {
+// Produkt hinzufügen
+app.post('/api/products', async (req, res) => {
     let { name, image_url, price } = req.body;
+    if (!name || !image_url || !price) return res.status(400).json({ error: "Alle Felder erforderlich!" });
 
-    if (!name || !image_url || !price) {
-        return res.status(400).json({ error: "All fields are required!" });
-    }
-
-    // ✅ Ensure price starts with "$"
     price = price.trim();
-    if (!price.startsWith('$')) {
-        price = `$${price}`;
-    }
-
-    // ✅ Ensure price is a valid number (after removing "$")
+    if (!price.startsWith('$')) price = `$${price}`;
     const numericPrice = parseFloat(price.replace(/[^0-9.]/g, ''));
-    if (isNaN(numericPrice) || numericPrice < 0) {
-        return res.status(400).json({ error: "Invalid price! Enter a valid number." });
+    if (isNaN(numericPrice)) return res.status(400).json({ error: "Ungültiger Preis!" });
+
+    const newId = Math.floor(100000 + Math.random() * 900000);
+    const product = { id: newId, name, image_url, price };
+
+    try {
+        await productsCollection.insertOne(product);
+        await syncFromMongoToFile(); // Optional: Datei aktualisieren
+        res.status(201).json({ message: "Produkt hinzugefügt!", product });
+    } catch (err) {
+        res.status(500).json({ error: "Fehler beim Hinzufügen!" });
     }
-
-    const data = readProducts();
-
-    // ✅ Generate a unique 6-digit ID
-    let newId;
-    do {
-        newId = Math.floor(100000 + Math.random() * 900000); // Random 6-digit number
-    } while (data.products.some(product => product.id === newId)); // Ensure ID is unique
-
-    const newProduct = { id: newId, name, image_url, price }; // ✅ Save price with "$"
-
-    data.products.push(newProduct);
-    writeProducts(data);
-
-    res.status(201).json({ message: "Product added!", product: newProduct });
 });
 
+// Produkt löschen
+app.delete('/api/products/:id', async (req, res) => {
+    const productId = parseInt(req.params.id);
+    if (!/^\d{6}$/.test(req.params.id)) return res.status(400).json({ error: "Ungültige ID!" });
 
-// ✅ Start both HTTP & HTTPS servers
-http.createServer(app).listen(HTTP_PORT, () => {
-    console.log(`HTTP Server running on port ${HTTP_PORT}`);
+    try {
+        const result = await productsCollection.deleteOne({ id: productId });
+        if (result.deletedCount === 0) return res.status(404).json({ error: "Produkt nicht gefunden!" });
+
+        await syncFromMongoToFile(); // Optional: Datei aktualisieren
+        res.json({ message: "Produkt gelöscht!" });
+    } catch (err) {
+        res.status(500).json({ error: "Fehler beim Löschen!" });
+    }
 });
 
-https.createServer(app).listen(HTTPS_PORT, () => {
-    console.log(`HTTPS Server running on port ${HTTPS_PORT}`);
-});
+/* ---------- Server starten ---------- */
+http.createServer(app).listen(HTTP_PORT,_
