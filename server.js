@@ -61,7 +61,7 @@ async function syncFromFileToMongo() {
 async function upgradeProductsSchema() {
     const all = await productsCollection.find().toArray();
     for (const p of all) {
-        if (!p.stock || !p.default_stock) {
+        if (p.stock === undefined || p.default_stock === undefined)
             await productsCollection.updateOne(
                 { id: p.id },
                 { $set: { stock: 20, default_stock: 20 } }
