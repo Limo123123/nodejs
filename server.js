@@ -10,9 +10,9 @@ const HTTP_PORT = 80;
 const PRODUCTS_FILE = 'products.json';
 const TIMEZONE = 'Europe/Berlin';
 
-// MongoDB Setup
+// MongoDB-Konfiguration
 const mongoUser = 'git';
-const mongoPassword = 'c72JfwytnPVD0YHv'; // dein Passwort
+const mongoPassword = 'c72JfwytnPVD0YHv';
 const mongoUri = `mongodb+srv://${mongoUser}:${mongoPassword}@limodb.kbacr5r.mongodb.net/?retryWrites=true&w=majority&appName=LimoDB`;
 const mongoDbName = 'shop';
 const mongoCollectionName = 'products';
@@ -22,7 +22,7 @@ app.use(express.json());
 
 let productsCollection;
 
-// Hilfsfunktionen
+// --- Hilfsfunktionen ---
 function writeProductsFile(products) {
   fs.writeFileSync(PRODUCTS_FILE, JSON.stringify({ products }, null, 2));
 }
@@ -32,61 +32,76 @@ function readProductsFile() {
   return JSON.parse(fs.readFileSync(PRODUCTS_FILE));
 }
 
-async function syncFromMongoToFile() {
-  const mongoProducts = await productsCollection.find().toArray();
-  writeProductsFile(mongoProducts);
-  console.log("📦 Produkte aus MongoDB gesichert.");
-}
+/**
+ * Bidirektionaler Sync:
+ * - Fehlt ein Produkt in MongoDB, wird es eingefügt.
+ * - Fehlt ein Produkt lokal, wird es aus MongoDB kopiert.
+ * - Beide Datensätze werden gemerged, in products.json geschrieben und per upsert in MongoDB zurückgeschrieben.
+ */
+async function syncLocalAndRemote() {
+  const local = readProductsFile().products;
+  const remote = await productsCollection.find().toArray();
 
-async function syncFromFileToMongo() {
-  const localProducts = readProductsFile().products;
-  for (const prod of localProducts) {
-    const exists = await productsCollection.findOne({ id: prod.id });
-    if (!exists) {
+  const localMap = new Map(local.map(p => [p.id, p]));
+  const remoteMap = new Map(remote.map(p => [p.id, p]));
+
+  const merged = [];
+  const allIds = new Set([...localMap.keys(), ...remoteMap.keys()]);
+
+  for (const id of allIds) {
+    let prod;
+    if (localMap.has(id) && remoteMap.has(id)) {
+      // Beide haben das Produkt: wir nehmen das Remote-Objekt (DB enthält aktuellste stock-Werte)
+      prod = remoteMap.get(id);
+    } else if (localMap.has(id)) {
+      // Nur lokal vorhanden → ab in die DB
+      prod = localMap.get(id);
       await productsCollection.insertOne(prod);
-      console.log(`➕ Neues Produkt übernommen: ${prod.name}`);
+    } else {
+      // Nur remote vorhanden → ab in die lokale Liste
+      prod = remoteMap.get(id);
     }
+
+    // Schema-Felder sicherstellen
+    if (prod.stock === undefined) prod.stock = 20;
+    if (prod.default_stock === undefined) prod.default_stock = prod.stock;
+
+    // Upsert zurück in DB, um ggf. Schema-Felder hinzuzufügen
+    await productsCollection.updateOne(
+      { id: prod.id },
+      { $set: prod },
+      { upsert: true }
+    );
+
+    merged.push(prod);
   }
-  console.log("🔄 Produkte aus Datei in MongoDB aktualisiert.");
+
+  // Lokale JSON-Datei auf den neuesten Stand bringen
+  writeProductsFile(merged);
+  console.log(`🔄 Bidirektionaler Sync abgeschlossen für ${merged.length} Produkt(e).`);
 }
 
-// Schema-Upgrade: nur wenn undefined
-async function upgradeProductsSchema() {
-  const all = await productsCollection.find().toArray();
-  for (const p of all) {
-    if (p.stock === undefined || p.default_stock === undefined) {
-      await productsCollection.updateOne(
-        { id: p.id },
-        { $set: { stock: 20, default_stock: 20 } }
-      );
-      console.log(`⬆️ Produkt ${p.id} Schema upgegraded.`);
-    }
-  }
-  console.log("✅ Schema-Upgrade abgeschlossen.");
-}
-
-// Reset-Funktion
+// Reset: stock ← default_stock
 async function resetProductStock() {
-  await productsCollection.updateMany({}, [
-    { $set: { stock: "$default_stock" } }
-  ]);
-  console.log("♻️ Lagerbestand zurückgesetzt!");
-  await syncFromMongoToFile();
+  await productsCollection.updateMany(
+    {},
+    [{ $set: { stock: "$default_stock" } }]
+  );
+  console.log("♻️ Lagerbestand auf default_stock zurückgesetzt.");
+  await syncLocalAndRemote(); // Backup + DB-Update
 }
 
-// Initialisierung
+// --- Server-Init ---
 MongoClient.connect(mongoUri, { useUnifiedTopology: true })
   .then(async client => {
     const db = client.db(mongoDbName);
     productsCollection = db.collection(mongoCollectionName);
     console.log("✅ MongoDB verbunden.");
 
-    // Erstmal Schema-Upgrade & Sync
-    await upgradeProductsSchema();
-    await syncFromMongoToFile();
-    await syncFromFileToMongo();
+    // 1) Bidirektionaler Sync (lokal ↔ remote)
+    await syncLocalAndRemote();
 
-    // Starte HTTP-Server
+    // 2) HTTP-Server starten
     http.createServer(app).listen(HTTP_PORT, () => {
       console.log(`🌐 HTTP-Server läuft auf Port ${HTTP_PORT}`);
     });
@@ -96,7 +111,7 @@ MongoClient.connect(mongoUri, { useUnifiedTopology: true })
     process.exit(1);
   });
 
-// Automatischer Reset um 00:00 Europe/Berlin
+// Täglicher Reset um 00:00 Europe/Berlin
 setInterval(() => {
   const now = new Date().toLocaleString('de-DE', { timeZone: TIMEZONE });
   const time = now.split(', ')[1];
@@ -105,25 +120,24 @@ setInterval(() => {
   }
 }, 1000);
 
-// Endpoints
+// --- API-Endpunkte ---
 
-// Alle Produkte lesen
+// Alle Produkte
 app.get('/api/products', async (req, res) => {
   try {
     const products = await productsCollection.find().toArray();
     res.json({ products });
-  } catch (e) {
+  } catch {
     res.status(500).json({ error: "Fehler beim Abrufen!" });
   }
 });
 
-// Neues Produkt anlegen
+// Neues Produkt
 app.post('/api/products', async (req, res) => {
   let { name, image_url, price, stock } = req.body;
   if (!name || !image_url || !price) {
     return res.status(400).json({ error: "Alle Felder erforderlich!" });
   }
-
   price = price.trim();
   if (!price.startsWith('$')) price = `$${price}`;
   const numericPrice = parseFloat(price.replace(/[^0-9.]/g, ''));
@@ -143,7 +157,7 @@ app.post('/api/products', async (req, res) => {
 
   try {
     await productsCollection.insertOne(prod);
-    await syncFromMongoToFile();
+    await syncLocalAndRemote();
     res.status(201).json({ message: "Produkt hinzugefügt!", product: prod });
   } catch {
     res.status(500).json({ error: "Fehler beim Hinzufügen!" });
@@ -161,14 +175,14 @@ app.delete('/api/products/:id', async (req, res) => {
     if (result.deletedCount === 0) {
       return res.status(404).json({ error: "Produkt nicht gefunden!" });
     }
-    await syncFromMongoToFile();
+    await syncLocalAndRemote();
     res.json({ message: "Produkt gelöscht!" });
   } catch {
     res.status(500).json({ error: "Fehler beim Löschen!" });
   }
 });
 
-// Reset via API
+// Reset per API
 app.patch('/api/products/reset', async (req, res) => {
   try {
     await resetProductStock();
@@ -178,12 +192,12 @@ app.patch('/api/products/reset', async (req, res) => {
   }
 });
 
-// Manueller Schema-Upgrade via API
-app.post('/api/products/upgrade-schema', async (req, res) => {
+// Manueller Sync-Trigger
+app.post('/api/products/sync', async (req, res) => {
   try {
-    await upgradeProductsSchema();
-    res.json({ message: "Schema-Upgrade durchgeführt." });
+    await syncLocalAndRemote();
+    res.json({ message: "Bidirektionaler Sync durchgeführt." });
   } catch {
-    res.status(500).json({ error: "Fehler beim Schema-Upgrade." });
+    res.status(500).json({ error: "Fehler beim Sync." });
   }
 });
