@@ -1,0 +1,15 @@
+# .github/workflows/reset-stock.yml
+name: Reset Product Stock
+
+on:
+  schedule:
+    - cron: '50 23 * * *' # Täglich 23:50 Uhr UTC (00:50 Europe/Berlin)
+  workflow_dispatch:
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Auf Backend zugreifen und Reset ausführen
+        run: |
+          curl -X PATCH https://nodejs-ykji.onrender.com/api/products/reset
