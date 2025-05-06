@@ -61,7 +61,7 @@ function readProductsFile() {
 async function syncLocalAndRemote() {
   console.log('🔄 Startet bidirektionalen Sync...');
   try {
-    const localProducts = readProductsFile().products;
+    const localProducts = readProductsFile().products; // readProductsFile liefert bereits gefilterte, gültige Produkte
     let remoteProducts = await productsCollection.find().toArray();
     // Filtere remote Produkte ohne gültige ID (ID >= 100000)
     const validRemoteProducts = remoteProducts.filter(p => p && typeof p.id === 'number' && Number.isInteger(p.id) && p.id >= 100000);
@@ -308,7 +308,7 @@ app.post('/api/products', async (req, res) => {
 app.delete('/api/products/:id', async (req, res) => {
   console.log('DELETE /api/products/:id erhalten für ID:', req.params.id);
   const id = parseInt(req.params.id, 10);
-  if (!/^\d{6}$/.test(req.params.id) || isNaN(id)) {
+  if (!/^\d{6}$/.test(req.params.id) || isNaN(id)) { // Prüfe auch auf NaN nach parseInt
       console.warn('DELETE /api/products/:id: Ungültiges ID-Format oder NaN:', req.params.id);
       return res.status(400).json({ error: 'Ungültiges ID-Format! Muss 6 Ziffern sein.' });
   }
@@ -320,12 +320,12 @@ app.delete('/api/products/:id', async (req, res) => {
            return res.status(404).json({ error: 'Produkt nicht gefunden!' });
        }
    } catch (findErr) {
-        console.error(`DELETE /api/products/:id: Fehler bei der Prüfung auf Produkt-Existenz ${id}:`, findErr);
+        console.error(`DELETE /api/products/:id: Fehler bei der Prüfung auf Produkt-Existenz ${id} vor dem Löschen:`, findErr);
         return res.status(500).json({ error: 'Fehler bei der Datenbankprüfung vor dem Löschen.' });
    }
 
   try {
-    const result = await productsCollection.deleteOne({ id: id });
+    const result = await productsCollection.deleteOne({ id: id }); // Lösche nach 'id', nicht '_id'
     console.log(`DELETE /api/products/:id: Produkt mit ID ${id} gelöscht. Ergebnis:`, result);
     await syncLocalAndRemote(); // Warte auf Sync nach dem Löschen
     res.json({ message: `Produkt mit ID ${id} erfolgreich gelöscht!` });
@@ -387,6 +387,109 @@ app.patch('/api/products/:id', async (req, res) => {
 });
 
 
+// NEU: POST Endpoint für den Kaufabschluss
+app.post('/api/purchase', async (req, res) => {
+    console.log('POST /api/purchase erhalten. Warenkorb:', req.body.cart);
+    const cart = req.body.cart;
+
+    if (!Array.isArray(cart) || cart.length === 0) {
+        console.warn('POST /api/purchase: Leerer oder ungültiger Warenkorb erhalten.');
+        return res.status(400).json({ error: 'Warenkorb ist leer oder ungültig.' });
+    }
+
+    const updates = [];
+    const errors = [];
+
+    // 1. Bestand prüfen (transaktional sicherer wäre eine MongoDB Transaktion, aber für dieses Beispiel reicht dieser Ansatz)
+    try {
+        for (const item of cart) {
+            // Grundlegende Validierung des Warenkorb-Items
+            if (!item || typeof item.id !== 'number' || !Number.isInteger(item.id) || item.id < 100000 ||
+                typeof item.quantity !== 'number' || !Number.isInteger(item.quantity) || item.quantity <= 0) {
+                console.warn('POST /api/purchase: Ungültiges Item im Warenkorb:', item);
+                errors.push(`Ungültiges Produkt im Warenkorb gefunden.`);
+                continue; // Überspringe dieses Item, aber prüfe den Rest
+            }
+
+            const product = await productsCollection.findOne({ id: item.id });
+
+            if (!product) {
+                console.warn(`POST /api/purchase: Produkt mit ID ${item.id} im Warenkorb nicht in DB gefunden.`);
+                errors.push(`Produkt "${item.name || item.id}" nicht gefunden.`);
+                continue;
+            }
+
+            const currentStock = (typeof product.stock === 'number' && Number.isInteger(product.stock) && product.stock >= 0) ? product.stock : 0;
+
+            if (item.quantity > currentStock) {
+                console.warn(`POST /api/purchase: Nicht genügend Bestand für Produkt ${item.id}. Benötigt: ${item.quantity}, Verfügbar: ${currentStock}`);
+                errors.push(`Nicht genügend Bestand für "${product.name || product.id}". Verfügbar: ${currentStock}`);
+                // WICHTIG: Wenn ein Artikel nicht gekauft werden kann, schlägt der gesamte Kauf fehl
+                // oder du müsstest den Benutzer fragen, ob er den Rest kaufen will.
+                // Für jetzt lassen wir den gesamten Kauf fehlschlagen.
+                // Breche die Prüfung ab und melde den Fehler
+                break; // Beende die Schleife nach dem ersten Fehler
+            }
+
+            // Wenn die Prüfung bestanden ist, bereite das Update vor
+            updates.push({
+                id: item.id,
+                quantity: item.quantity
+            });
+        }
+
+        // Wenn Fehler bei der Prüfung aufgetreten sind, gib Fehler zurück
+        if (errors.length > 0) {
+             // Gib nur den ersten Fehler zurück oder fasse sie zusammen
+             const errorMessage = errors[0]; // Oder errors.join(', ')
+             console.error('POST /api/purchase: Bestandsprüfung fehlgeschlagen.');
+             return res.status(400).json({ error: errorMessage });
+        }
+
+        // 2. Bestand reduzieren (wenn alle Prüfungen bestanden sind)
+        console.log('POST /api/purchase: Bestandsprüfung bestanden. Reduziere Bestand...');
+        const bulkOperations = updates.map(update => ({
+            updateOne: {
+                filter: { id: update.id, stock: { $gte: update.quantity } }, // Zusätzlicher Check, dass Stock immer noch ausreicht
+                update: { $inc: { stock: -update.quantity } }
+            }
+        }));
+
+        if (bulkOperations.length > 0) {
+             const bulkWriteResult = await productsCollection.bulkWrite(bulkOperations);
+
+             // Prüfe, ob alle Updates erfolgreich waren (matchedCount == modifiedCount == Anzahl der Operationen)
+             if (bulkWriteResult.matchedCount !== updates.length || bulkWriteResult.modifiedCount !== updates.length) {
+                 console.error('POST /api/purchase: Fehler beim Bulk Write Update. Nicht alle Produkte aktualisiert.');
+                 // Dies könnte passieren, wenn der Stock zwischen Prüfung und Update gesunken ist
+                 // Hier müsste man komplexere Logik implementieren (z.B. Transaktionen, Rollback)
+                 // Für jetzt geben wir einen Fehler zurück
+                 return res.status(500).json({ error: 'Fehler beim Aktualisieren des Lagerbestands während des Kaufs. Bitte versuchen Sie es erneut.' });
+             }
+             console.log(`POST /api/purchase: Bestand für ${bulkWriteResult.modifiedCount} Produkte erfolgreich reduziert.`);
+
+        } else {
+             console.warn('POST /api/purchase: Keine Produkte zum Aktualisieren im Warenkorb (nach Filterung/Prüfung).');
+        }
+
+
+        // 3. Sync nach erfolgreichem Kauf
+        // Führe Sync im Hintergrund aus
+        syncLocalAndRemote().catch(syncErr => {
+            console.error('POST /api/purchase: Fehler beim Hintergrund-Sync nach Kauf:', syncErr);
+        });
+
+
+        res.json({ message: 'Kauf erfolgreich abgeschlossen!' });
+
+    } catch (err) {
+        console.error('POST /api/purchase: Unerwarteter Fehler während des Kaufs:', err);
+        res.status(500).json({ error: 'Ein unerwarteter Fehler ist beim Kauf aufgetreten.' });
+    }
+});
+
+
+// PATCH Lagerbestand zurücksetzen (Endpoint beibehalten)
 app.patch('/api/products/reset', async (req, res) => {
   console.log('API-Endpoint /api/products/reset aufgerufen.');
   try {
@@ -398,6 +501,7 @@ app.patch('/api/products/reset', async (req, res) => {
   }
 });
 
+// POST Manuelle Synchronisation triggern (Endpoint beibehalten)
 app.post('/api/products/sync', async (req, res) => {
    console.log('API-Endpoint /api/products/sync aufgerufen.');
   try {
