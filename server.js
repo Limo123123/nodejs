@@ -185,7 +185,7 @@ app.get('/api/products', async (req, res) => {
     // Sicherstellen, dass stock und default_stock immer vorhanden sind, falls DB inkonsistent ist
     const sanitizedProducts = products.map(p => ({
         ...p,
-        stock: p.stock ?? 0, // Standardwert 0, wenn stock fehlt
+        stock: p.stock ?? 20, // Standardwert 0, wenn stock fehlt
         default_stock: p.default_stock ?? p.stock ?? 0 // Fallback
     }));
     res.json({ products: sanitizedProducts });
