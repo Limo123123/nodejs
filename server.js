@@ -22,7 +22,7 @@ app.use(express.json());
 
 let productsCollection;
 
-// --- Hilfsfunktionen ---
+// Hilfsfunktionen
 function writeProductsFile(products) {
   fs.writeFileSync(PRODUCTS_FILE, JSON.stringify({ products }, null, 2));
 }
@@ -33,10 +33,7 @@ function readProductsFile() {
 }
 
 /**
- * Bidirektionaler Sync:
- * - Fehlt ein Produkt in MongoDB, wird es eingefügt.
- * - Fehlt ein Produkt lokal, wird es aus MongoDB kopiert.
- * - Beide Datensätze werden gemerged, in products.json geschrieben und per upsert in MongoDB zurückgeschrieben.
+ * Bidirektionaler Sync zwischen local JSON und MongoDB
  */
 async function syncLocalAndRemote() {
   const local = readProductsFile().products;
@@ -51,14 +48,11 @@ async function syncLocalAndRemote() {
   for (const id of allIds) {
     let prod;
     if (localMap.has(id) && remoteMap.has(id)) {
-      // Beide haben das Produkt: wir nehmen das Remote-Objekt (DB enthält aktuellste stock-Werte)
-      prod = remoteMap.get(id);
+      prod = remoteMap.get(id); // verwende remote für aktuelle stock-Werte
     } else if (localMap.has(id)) {
-      // Nur lokal vorhanden → ab in die DB
       prod = localMap.get(id);
       await productsCollection.insertOne(prod);
     } else {
-      // Nur remote vorhanden → ab in die lokale Liste
       prod = remoteMap.get(id);
     }
 
@@ -66,138 +60,124 @@ async function syncLocalAndRemote() {
     if (prod.stock === undefined) prod.stock = 20;
     if (prod.default_stock === undefined) prod.default_stock = prod.stock;
 
-    // Upsert zurück in DB, um ggf. Schema-Felder hinzuzufügen
+    // upsert ohne _id-Feld
+    const { _id, ...data } = prod;
     await productsCollection.updateOne(
       { id: prod.id },
-      { $set: prod },
+      { $set: data },
       { upsert: true }
     );
 
     merged.push(prod);
   }
 
-  // Lokale JSON-Datei auf den neuesten Stand bringen
   writeProductsFile(merged);
-  console.log(`🔄 Bidirektionaler Sync abgeschlossen für ${merged.length} Produkt(e).`);
+  console.log(`🔄 Bidirektionaler Sync abgeschlossen: ${merged.length} Produkt(e).`);
 }
 
-// Reset: stock ← default_stock
+/**
+ * Reset stock auf default_stock
+ */
 async function resetProductStock() {
   await productsCollection.updateMany(
     {},
-    [{ $set: { stock: "$default_stock" } }]
+    [{ $set: { stock: '$default_stock' } }]
   );
-  console.log("♻️ Lagerbestand auf default_stock zurückgesetzt.");
-  await syncLocalAndRemote(); // Backup + DB-Update
+  console.log('♻️ Lagerbestand auf default_stock zurückgesetzt.');
+  await syncLocalAndRemote();
 }
 
-// --- Server-Init ---
-MongoClient.connect(mongoUri, { useUnifiedTopology: true })
+// Server-Init
+MongoClient.connect(mongoUri)
   .then(async client => {
     const db = client.db(mongoDbName);
     productsCollection = db.collection(mongoCollectionName);
-    console.log("✅ MongoDB verbunden.");
+    console.log('✅ MongoDB verbunden.');
 
-    // 1) Bidirektionaler Sync (lokal ↔ remote)
     await syncLocalAndRemote();
 
-    // 2) HTTP-Server starten
     http.createServer(app).listen(HTTP_PORT, () => {
       console.log(`🌐 HTTP-Server läuft auf Port ${HTTP_PORT}`);
     });
   })
   .catch(err => {
-    console.error("❌ MongoDB-Verbindung fehlgeschlagen:", err);
+    console.error('❌ MongoDB-Verbindung fehlgeschlagen:', err);
     process.exit(1);
   });
 
-// Täglicher Reset um 00:00 Europe/Berlin
+// Täglicher Reset 00:00 Europe/Berlin
 setInterval(() => {
   const now = new Date().toLocaleString('de-DE', { timeZone: TIMEZONE });
   const time = now.split(', ')[1];
-  if (time === '00:00:00') {
-    resetProductStock();
-  }
+  if (time === '00:00:00') resetProductStock();
 }, 1000);
 
-// --- API-Endpunkte ---
-
-// Alle Produkte
+// API-Endpunkte
 app.get('/api/products', async (req, res) => {
   try {
     const products = await productsCollection.find().toArray();
     res.json({ products });
   } catch {
-    res.status(500).json({ error: "Fehler beim Abrufen!" });
+    res.status(500).json({ error: 'Fehler beim Abrufen!' });
   }
 });
 
-// Neues Produkt
 app.post('/api/products', async (req, res) => {
   let { name, image_url, price, stock } = req.body;
   if (!name || !image_url || !price) {
-    return res.status(400).json({ error: "Alle Felder erforderlich!" });
+    return res.status(400).json({ error: 'Alle Felder erforderlich!' });
   }
+
   price = price.trim();
   if (!price.startsWith('$')) price = `$${price}`;
   const numericPrice = parseFloat(price.replace(/[^0-9.]/g, ''));
   if (isNaN(numericPrice)) {
-    return res.status(400).json({ error: "Ungültiger Preis!" });
+    return res.status(400).json({ error: 'Ungültiger Preis!' });
   }
 
   const newId = Math.floor(100000 + Math.random() * 900000);
-  const prod = {
-    id: newId,
-    name,
-    image_url,
-    price,
-    stock: stock ?? 20,
-    default_stock: stock ?? 20
-  };
+  const prod = { id: newId, name, image_url, price, stock: stock ?? 20, default_stock: stock ?? 20 };
 
   try {
     await productsCollection.insertOne(prod);
     await syncLocalAndRemote();
-    res.status(201).json({ message: "Produkt hinzugefügt!", product: prod });
+    res.status(201).json({ message: 'Produkt hinzugefügt!', product: prod });
   } catch {
-    res.status(500).json({ error: "Fehler beim Hinzufügen!" });
+    res.status(500).json({ error: 'Fehler beim Hinzufügen!' });
   }
 });
 
-// Produkt löschen
 app.delete('/api/products/:id', async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (!/^\d{6}$/.test(req.params.id)) {
-    return res.status(400).json({ error: "Ungültige ID!" });
+    return res.status(400).json({ error: 'Ungültige ID!' });
   }
   try {
     const result = await productsCollection.deleteOne({ id });
     if (result.deletedCount === 0) {
-      return res.status(404).json({ error: "Produkt nicht gefunden!" });
+      return res.status(404).json({ error: 'Produkt nicht gefunden!' });
     }
     await syncLocalAndRemote();
-    res.json({ message: "Produkt gelöscht!" });
+    res.json({ message: 'Produkt gelöscht!' });
   } catch {
-    res.status(500).json({ error: "Fehler beim Löschen!" });
+    res.status(500).json({ error: 'Fehler beim Löschen!' });
   }
 });
 
-// Reset per API
 app.patch('/api/products/reset', async (req, res) => {
   try {
     await resetProductStock();
-    res.json({ message: "Bestand zurückgesetzt." });
+    res.json({ message: 'Bestand zurückgesetzt.' });
   } catch {
-    res.status(500).json({ error: "Fehler beim Zurücksetzen." });
+    res.status(500).json({ error: 'Fehler beim Zurücksetzen.' });
   }
 });
 
-// Manueller Sync-Trigger
 app.post('/api/products/sync', async (req, res) => {
   try {
     await syncLocalAndRemote();
-    res.json({ message: "Bidirektionaler Sync durchgeführt." });
+    res.json({ message: 'Bidirektionaler Sync durchgeführt.' });
   } catch {
-    res.status(500).json({ error: "Fehler beim Sync." });
+    res.status(500).json({ error: 'Fehler beim Sync.' });
   }
 });
