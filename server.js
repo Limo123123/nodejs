@@ -10,7 +10,7 @@ const HTTP_PORT = 80;
 const PRODUCTS_FILE = 'products.json';
 const TIMEZONE = 'Europe/Berlin';
 
-// MongoDB-Konfiguration
+// MongoDB config
 const mongoUser = 'git';
 const mongoPassword = 'c72JfwytnPVD0YHv';
 const mongoUri = `mongodb+srv://${mongoUser}:${mongoPassword}@limodb.kbacr5r.mongodb.net/?retryWrites=true&w=majority&appName=LimoDB`;
@@ -22,7 +22,6 @@ app.use(express.json());
 
 let productsCollection;
 
-// Hilfsfunktionen
 function writeProductsFile(products) {
   fs.writeFileSync(PRODUCTS_FILE, JSON.stringify({ products }, null, 2));
 }
@@ -33,61 +32,69 @@ function readProductsFile() {
 }
 
 /**
- * Bidirektionaler Sync zwischen local JSON und MongoDB
+ * Bidirektionaler Sync:
+ * 1) Stelle sicher, dass alle lokalen Produkte in MongoDB existieren
+ * 2) Erweitere die lokale Liste um Produkte, die nur in MongoDB sind
+ * 3) Bewahre die ursprüngliche Reihenfolge der lokalen Einträge
  */
 async function syncLocalAndRemote() {
-  const local = readProductsFile().products;
-  const remote = await productsCollection.find().toArray();
+  const localProducts = readProductsFile().products;
+  const remoteProducts = await productsCollection.find().toArray();
 
-  const localMap = new Map(local.map(p => [p.id, p]));
-  const remoteMap = new Map(remote.map(p => [p.id, p]));
+  // Maps für schnellen Lookup
+  const localMap = new Map(localProducts.map(p => [p.id, p]));
+  const remoteMap = new Map(remoteProducts.map(p => [p.id, p]));
 
-  const merged = [];
-  const allIds = new Set([...localMap.keys(), ...remoteMap.keys()]);
-
-  for (const id of allIds) {
-    let prod;
-    if (localMap.has(id) && remoteMap.has(id)) {
-      prod = remoteMap.get(id); // verwende remote für aktuelle stock-Werte
-    } else if (localMap.has(id)) {
-      prod = localMap.get(id);
-      await productsCollection.insertOne(prod);
-    } else {
-      prod = remoteMap.get(id);
+  // 1) Insert fehlende lokale Produkte in MongoDB
+  for (const local of localProducts) {
+    if (!remoteMap.has(local.id)) {
+      await productsCollection.insertOne(local);
     }
+  }
 
-    // Schema-Felder sicherstellen
-    if (prod.stock === undefined) prod.stock = 20;
-    if (prod.default_stock === undefined) prod.default_stock = prod.stock;
+  // 2) Erstelle merged-Liste in folgender Reihenfolge:
+  //    - Zuerst lokale Einträge in Originalreihenfolge
+  //    - Dann alle remote-only Einträge in ihrer ID-Sortierung
+  const merged = [];
+  for (const local of localProducts) {
+    // Schema-Felder
+    if (local.stock === undefined) local.stock = 20;
+    if (local.default_stock === undefined) local.default_stock = local.stock;
+    merged.push(local);
+  }
+  // Remote-only
+  const remoteOnly = remoteProducts
+    .filter(p => !localMap.has(p.id))
+    .sort((a, b) => a.id - b.id);
+  for (const p of remoteOnly) {
+    if (p.stock === undefined) p.stock = 20;
+    if (p.default_stock === undefined) p.default_stock = p.stock;
+    merged.push(p);
+  }
 
-    // upsert ohne _id-Feld
+  // 3) Schreibe merged in JSON
+  writeProductsFile(merged);
+  console.log(`🔄 Lokale products.json auf ${merged.length} Einträge aktualisiert.`);
+
+  // 4) Upsert merged in MongoDB (nur Daten, ohne _id)
+  for (const prod of merged) {
     const { _id, ...data } = prod;
     await productsCollection.updateOne(
       { id: prod.id },
       { $set: data },
       { upsert: true }
     );
-
-    merged.push(prod);
   }
-
-  writeProductsFile(merged);
-  console.log(`🔄 Bidirektionaler Sync abgeschlossen: ${merged.length} Produkt(e).`);
+  console.log(`🔄 MongoDB auf ${merged.length} Einträge synchronisiert.`);
 }
 
-/**
- * Reset stock auf default_stock
- */
 async function resetProductStock() {
-  await productsCollection.updateMany(
-    {},
-    [{ $set: { stock: '$default_stock' } }]
-  );
+  await productsCollection.updateMany({}, [{ $set: { stock: '$default_stock' } }]);
   console.log('♻️ Lagerbestand auf default_stock zurückgesetzt.');
   await syncLocalAndRemote();
 }
 
-// Server-Init
+// Init
 MongoClient.connect(mongoUri)
   .then(async client => {
     const db = client.db(mongoDbName);
@@ -105,14 +112,14 @@ MongoClient.connect(mongoUri)
     process.exit(1);
   });
 
-// Täglicher Reset 00:00 Europe/Berlin
+// Täglicher Reset um 00:00 Europe/Berlin
 setInterval(() => {
   const now = new Date().toLocaleString('de-DE', { timeZone: TIMEZONE });
   const time = now.split(', ')[1];
   if (time === '00:00:00') resetProductStock();
 }, 1000);
 
-// API-Endpunkte
+// API
 app.get('/api/products', async (req, res) => {
   try {
     const products = await productsCollection.find().toArray();
@@ -124,16 +131,12 @@ app.get('/api/products', async (req, res) => {
 
 app.post('/api/products', async (req, res) => {
   let { name, image_url, price, stock } = req.body;
-  if (!name || !image_url || !price) {
-    return res.status(400).json({ error: 'Alle Felder erforderlich!' });
-  }
+  if (!name || !image_url || !price) return res.status(400).json({ error: 'Alle Felder erforderlich!' });
 
   price = price.trim();
   if (!price.startsWith('$')) price = `$${price}`;
   const numericPrice = parseFloat(price.replace(/[^0-9.]/g, ''));
-  if (isNaN(numericPrice)) {
-    return res.status(400).json({ error: 'Ungültiger Preis!' });
-  }
+  if (isNaN(numericPrice)) return res.status(400).json({ error: 'Ungültiger Preis!' });
 
   const newId = Math.floor(100000 + Math.random() * 900000);
   const prod = { id: newId, name, image_url, price, stock: stock ?? 20, default_stock: stock ?? 20 };
@@ -149,14 +152,10 @@ app.post('/api/products', async (req, res) => {
 
 app.delete('/api/products/:id', async (req, res) => {
   const id = parseInt(req.params.id, 10);
-  if (!/^\d{6}$/.test(req.params.id)) {
-    return res.status(400).json({ error: 'Ungültige ID!' });
-  }
+  if (!/^[0-9]{6}$/.test(req.params.id)) return res.status(400).json({ error: 'Ungültige ID!' });
   try {
     const result = await productsCollection.deleteOne({ id });
-    if (result.deletedCount === 0) {
-      return res.status(404).json({ error: 'Produkt nicht gefunden!' });
-    }
+    if (result.deletedCount === 0) return res.status(404).json({ error: 'Produkt nicht gefunden!' });
     await syncLocalAndRemote();
     res.json({ message: 'Produkt gelöscht!' });
   } catch {
