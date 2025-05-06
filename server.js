@@ -305,6 +305,19 @@ app.post('/api/products', async (req, res) => {
   }
 });
 
+// WICHTIG: Setze die /reset Route VOR die /:id Route
+app.patch('/api/products/reset', async (req, res) => {
+  console.log('API-Endpoint /api/products/reset aufgerufen.');
+  try {
+    await resetProductStock();
+    res.json({ message: 'Lagerbestand auf Standardwerte zurückgesetzt.' });
+  } catch (err) {
+    console.error('Fehler beim Zurücksetzen des Lagerbestands via API:', err);
+    res.status(500).json({ error: 'Fehler beim Zurücksetzen.' });
+  }
+});
+
+
 app.delete('/api/products/:id', async (req, res) => {
   console.log('DELETE /api/products/:id erhalten für ID:', req.params.id);
   const id = parseInt(req.params.id, 10);
@@ -462,7 +475,7 @@ app.post('/api/purchase', async (req, res) => {
              if (bulkWriteResult.matchedCount !== updates.length || bulkWriteResult.modifiedCount !== updates.length) {
                  console.error('POST /api/purchase: Fehler beim Bulk Write Update. Nicht alle Produkte aktualisiert.');
                  // Dies könnte passieren, wenn der Stock zwischen Prüfung und Update gesunken ist
-                 // Hier müsste man komplexere Logik implementieren (z.B. Transaktionen, Rollback)
+                 // Hier müsste man komplexere Logistik implementieren (z.B. Transaktionen, Rollback)
                  // Für jetzt geben wir einen Fehler zurück
                  return res.status(500).json({ error: 'Fehler beim Aktualisieren des Lagerbestands während des Kaufs. Bitte versuchen Sie es erneut.' });
              }
@@ -488,18 +501,6 @@ app.post('/api/purchase', async (req, res) => {
     }
 });
 
-
-// PATCH Lagerbestand zurücksetzen (Endpoint beibehalten)
-app.patch('/api/products/reset', async (req, res) => {
-  console.log('API-Endpoint /api/products/reset aufgerufen.');
-  try {
-    await resetProductStock();
-    res.json({ message: 'Lagerbestand auf Standardwerte zurückgesetzt.' });
-  } catch (err) {
-    console.error('Fehler beim Zurücksetzen des Lagerbestands via API:', err);
-    res.status(500).json({ error: 'Fehler beim Zurücksetzen.' });
-  }
-});
 
 // POST Manuelle Synchronisation triggern (Endpoint beibehalten)
 app.post('/api/products/sync', async (req, res) => {
