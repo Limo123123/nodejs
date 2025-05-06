@@ -35,7 +35,7 @@ function readProductsFile() {
  * Bidirektionaler Sync zwischen local JSON und MongoDB
  */
 async function syncLocalAndRemote() {
-  // 1) Lade lokale und remote
+  // 1) Lade lokale und remote Produkte
   const localProducts = readProductsFile().products;
   // initial fetch
   let remoteProducts = await productsCollection.find().toArray();
@@ -58,15 +58,16 @@ async function syncLocalAndRemote() {
 
   // 4) Merge-Liste erstellen in Reihenfolge
   const merged = [];
-  // a) Alle lokalen in Original-Reihenfolge
+  // a) Alle lokalen Produkte in Original-Reihenfolge
   for (const local of localProducts) {
     const item = { ...newRemoteMap.get(local.id) };
-    // Schema-Felder
+    // Schema-Felder (Stock und Default-Stock)
     if (item.stock === undefined) item.stock = 20;
     if (item.default_stock === undefined) item.default_stock = item.stock;
     merged.push(item);
   }
-  // b) Alle remote-only nach ID sortiert
+
+  // b) Alle remote-only Produkte nach ID sortiert
   const remoteOnly = remoteProducts
     .filter(p => !localProducts.find(l => l.id === p.id))
     .sort((a, b) => a.id - b.id)
@@ -78,7 +79,7 @@ async function syncLocalAndRemote() {
     merged.push(p);
   }
 
-  // 5) Schreibe merged in JSON
+  // 5) Schreibe merged Produkte in JSON
   writeProductsFile(merged);
   console.log(`🔄 Lokale products.json auf ${merged.length} Einträge aktualisiert.`);
 
@@ -100,7 +101,7 @@ async function resetProductStock() {
   await syncLocalAndRemote();
 }
 
-// Init
+// Init MongoDB-Verbindung
 MongoClient.connect(mongoUri)
   .then(async client => {
     const db = client.db(mongoDbName);
@@ -109,6 +110,7 @@ MongoClient.connect(mongoUri)
 
     await syncLocalAndRemote();
 
+    // HTTP Server starten
     http.createServer(app).listen(HTTP_PORT, () => {
       console.log(`🌐 HTTP-Server läuft auf Port ${HTTP_PORT}`);
     });
@@ -125,7 +127,7 @@ setInterval(() => {
   if (time === '00:00:00') resetProductStock();
 }, 1000);
 
-// API
+// API Endpoints
 app.get('/api/products', async (req, res) => {
   try {
     const products = await productsCollection.find().toArray();
