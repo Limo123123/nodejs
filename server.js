@@ -32,51 +32,57 @@ function readProductsFile() {
 }
 
 /**
- * Bidirektionaler Sync:
- * 1) Stelle sicher, dass alle lokalen Produkte in MongoDB existieren
- * 2) Erweitere die lokale Liste um Produkte, die nur in MongoDB sind
- * 3) Bewahre die ursprüngliche Reihenfolge der lokalen Einträge
+ * Bidirektionaler Sync zwischen local JSON und MongoDB
  */
 async function syncLocalAndRemote() {
+  // 1) Lade lokale und remote
   const localProducts = readProductsFile().products;
-  const remoteProducts = await productsCollection.find().toArray();
+  // initial fetch
+  let remoteProducts = await productsCollection.find().toArray();
 
-  // Maps für schnellen Lookup
-  const localMap = new Map(localProducts.map(p => [p.id, p]));
+  // Map für existenz-check
   const remoteMap = new Map(remoteProducts.map(p => [p.id, p]));
 
-  // 1) Insert fehlende lokale Produkte in MongoDB
+  // 2) Füge lokale Produkte hinzu, die in MongoDB fehlen
   for (const local of localProducts) {
     if (!remoteMap.has(local.id)) {
       await productsCollection.insertOne(local);
     }
   }
 
-  // 2) Erstelle merged-Liste in folgender Reihenfolge:
-  //    - Zuerst lokale Einträge in Originalreihenfolge
-  //    - Dann alle remote-only Einträge in ihrer ID-Sortierung
+  // 3) Re-fetch remote nach Einfügungen
+  remoteProducts = await productsCollection.find().toArray();
+
+  // Rebuild map
+  const newRemoteMap = new Map(remoteProducts.map(p => [p.id, p]));
+
+  // 4) Merge-Liste erstellen in Reihenfolge
   const merged = [];
+  // a) Alle lokalen in Original-Reihenfolge
   for (const local of localProducts) {
+    const item = { ...newRemoteMap.get(local.id) };
     // Schema-Felder
-    if (local.stock === undefined) local.stock = 20;
-    if (local.default_stock === undefined) local.default_stock = local.stock;
-    merged.push(local);
+    if (item.stock === undefined) item.stock = 20;
+    if (item.default_stock === undefined) item.default_stock = item.stock;
+    merged.push(item);
   }
-  // Remote-only
+  // b) Alle remote-only nach ID sortiert
   const remoteOnly = remoteProducts
-    .filter(p => !localMap.has(p.id))
-    .sort((a, b) => a.id - b.id);
+    .filter(p => !localProducts.find(l => l.id === p.id))
+    .sort((a, b) => a.id - b.id)
+    .map(p => ({ ...p }));
+
   for (const p of remoteOnly) {
     if (p.stock === undefined) p.stock = 20;
     if (p.default_stock === undefined) p.default_stock = p.stock;
     merged.push(p);
   }
 
-  // 3) Schreibe merged in JSON
+  // 5) Schreibe merged in JSON
   writeProductsFile(merged);
   console.log(`🔄 Lokale products.json auf ${merged.length} Einträge aktualisiert.`);
 
-  // 4) Upsert merged in MongoDB (nur Daten, ohne _id)
+  // 6) Upsert merged in MongoDB ohne _id
   for (const prod of merged) {
     const { _id, ...data } = prod;
     await productsCollection.updateOne(
