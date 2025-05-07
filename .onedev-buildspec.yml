@@ -44,6 +44,19 @@ jobs:
     withLfs: false
     withSubmodules: false
     condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+  - !CommandStep
+    name: Fast Changes
+    runInContainer: true
+    image: debian:latest
+    interpreter: !ShellInterpreter
+      shell: bash
+      commands: |
+        # Suche und ersetze alle relevanten Pfade im Code
+        find . -type f -exec sed -i -e 's|/limo-games/~site/|/limowebsite/|g' \
+                                      -e 's|git.slimo.v6.rocks|/limowebsite/|g' \
+                                      -e 's|https://git.slimo.v6.rocks|/limowebsite/|g' {} \;
+    useTTY: true
+    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
   - !PushRepository
     name: Push to Github
     remoteUrl: https://github.com/Limo123123/nodejs.git
