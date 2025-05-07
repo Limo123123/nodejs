@@ -90,97 +90,104 @@ async function generateUniqueId() {
     return newId;
 }
 
+async function insertProductWithUniqueIdRetry(productData, maxRetries = 5) {
+    let retries = 0;
+    let success = false;
+    let currentProductData = { ...productData }; // Kopie für Modifikationen
+
+    if (typeof currentProductData.id !== 'number' || currentProductData.id < 100000) {
+        console.warn(`   ⚠️ Produkt "${currentProductData.name}" hat keine gültige ID, generiere eine...`);
+        currentProductData.id = await generateUniqueId(); // generateUniqueId prüft schon auf Existenz
+    }
+
+    while (retries < maxRetries && !success) {
+        try {
+            // Entferne _id vor dem Einfügen, falls es existiert (MongoDB generiert es)
+            delete currentProductData._id; 
+            await productsCollection.insertOne(currentProductData);
+            console.log(`   ✅ Produkt "${currentProductData.name}" (ID: ${currentProductData.id}) erfolgreich eingefügt.`);
+            success = true;
+            return currentProductData; // Gib das erfolgreich eingefügte Produkt zurück
+        } catch (error) {
+            if (error.code === 11000) { // Duplicate key error
+                retries++;
+                console.warn(`   ⚠️ ID-Kollision für "${currentProductData.name}" mit ID ${currentProductData.id}. Versuch ${retries}/${maxRetries}. Generiere neue ID...`);
+                if (retries < maxRetries) {
+                    currentProductData.id = await generateUniqueId(); // Neue ID holen
+                } else {
+                    console.error(`   ❌ Produkt "${currentProductData.name}" konnte nach ${maxRetries} Versuchen nicht eingefügt werden (persistente ID-Kollision).`);
+                    throw error; // Fehler nach max. Versuchen weiterwerfen
+                }
+            } else {
+                console.error(`   ❌ Unerwarteter Fehler beim Einfügen von Produkt "${currentProductData.name}" (ID: ${currentProductData.id}):`, error);
+                throw error; // Anderen Fehler direkt weiterwerfen
+            }
+        }
+    }
+    if (!success) {
+        // Sollte eigentlich nicht erreicht werden, wenn throw error oben greift
+        throw new Error(`Konnte Produkt "${currentProductData.name}" nach Retries nicht einfügen.`);
+    }
+}
+
+
 async function syncLocalAndRemote() {
   console.log('🔄 Startet Anreicherung und Synchronisation lokaler und Remote-Produkte...');
   try {
     let localProductsInput = readProductsFile().products;
     let remoteProducts = await productsCollection.find().toArray();
-    // Erstelle eine Map der remote Produkte für schnellen Zugriff anhand der ID
-    // Beachte, dass remote Produkte bereits eine _id von MongoDB haben könnten
     const remoteMap = new Map(remoteProducts.map(p => p.id ? [p.id, p] : [null, p]));
 
     console.log(`   Lokal initial: ${localProductsInput.length} Produkte, Remote initial: ${remoteProducts.length} Produkte.`);
 
-    const dbOperations = []; // Sammelt alle DB Operationen (Inserts, Updates)
-
-    // 1. Verarbeite lokale Produkte: Weise IDs zu, wenn fehlend, und bereite für DB vor
+    // Produkte einzeln verarbeiten, um ID-Kollisionen besser zu handhaben
     for (const localProd of localProductsInput) {
         if (!localProd || typeof localProd.name !== 'string' || !localProd.name.trim()) {
-            console.warn("   ⚠️ Ignoriere fehlerhaftes lokales Produkt (Name fehlt/ungültig oder Objekt ist null):", localProd);
+            console.warn("   ⚠️ Ignoriere fehlerhaftes lokales Produkt (Name fehlt/ungültig):", localProd);
             continue;
         }
 
-        let targetId = localProd.id;
-        let isNewProduct = false;
-
-        // A. Lokales Produkt hat keine gültige ID oder existiert remote nicht unter dieser ID
-        if (!targetId || typeof targetId !== 'number' || !Number.isInteger(targetId) || targetId < 100000 || !remoteMap.has(targetId)) {
-            // Auch wenn eine ID da ist, aber < 100000 oder nicht in Remote, behandle als neues Produkt oder generiere ID neu
-            if (remoteMap.has(targetId) && targetId >=100000) {
-                 // Produkt mit dieser gültigen ID existiert schon remote, überspringe Insert, evtl. später Update
-                 // console.log(`   ℹ️ Lokales Produkt mit ID ${targetId} existiert bereits remote.`);
-            } else {
-                try {
-                    console.log(`   ✨ Lokales Produkt "${localProd.name}" (ID: ${targetId || 'keine'}) wird neu ID zugewiesen oder ist neu.`);
-                    targetId = await generateUniqueId();
-                    isNewProduct = true;
-                } catch (idGenError) {
-                    console.error(`   ❌ Fehler bei ID-Generierung für "${localProd.name}": ${idGenError.message}. Produkt wird übersprungen.`);
-                    continue;
-                }
-            }
+        const localId = localProd.id;
+        // Prüfe, ob das Produkt (basierend auf seiner ursprünglichen lokalen ID, falls gültig) bereits remote existiert
+        if (localId && typeof localId === 'number' && localId >= 100000 && remoteMap.has(localId)) {
+            // console.log(`   ℹ️ Lokales Produkt "${localProd.name}" (ID: ${localId}) existiert bereits remote. Überspringe Insert.`);
+            // Hier könnte man eine Update-Logik einbauen, falls sich lokale Daten geändert haben
+            continue;
         }
-        
-        // Produkt für DB vorbereiten (entweder neu oder existierendes lokales, das ggf. remote fehlt)
-        // Nur wenn es neu ist (isNewProduct) oder wenn es eine lokale ID hat, die remote nicht existiert (im Loop oben schon gehandhabt)
-        // und die ID gültig ist.
-        if (isNewProduct || (localProd.id && typeof localProd.id === 'number' && localProd.id >= 100000 && !remoteMap.has(localProd.id)) ) {
-            const productDataForDb = {
-                id: targetId, // Entweder die neu generierte oder die existierende lokale gültige ID
-                name: localProd.name.trim(),
-                price: localProd.price && typeof localProd.price === 'string' ? localProd.price.trim() : "$0.00",
-                image_url: localProd.image_url && typeof localProd.image_url === 'string' ? localProd.image_url.trim() : "https://via.placeholder.com/150?text=Kein+Bild",
-                stock: (typeof localProd.stock === 'number' && Number.isInteger(localProd.stock) && localProd.stock >= 0) ? localProd.stock : 20,
-                default_stock: (typeof localProd.default_stock === 'number' && Number.isInteger(localProd.default_stock) && localProd.default_stock >= 0) 
-                                 ? localProd.default_stock 
-                                 : ((typeof localProd.stock === 'number' && Number.isInteger(localProd.stock) && localProd.stock >= 0) ? localProd.stock : 20),
-            };
-            // _id darf nicht manuell gesetzt werden, MongoDB generiert das.
-            // Wenn localProd._id existiert, sollte es entfernt werden, falls man ein Update mit Upsert machen würde.
-            // Hier verwenden wir insertOne, also ist es nicht kritisch, aber sauberer ohne.
-            delete productDataForDb._id; 
 
-            dbOperations.push({ insertOne: { document: productDataForDb } });
-            console.log(`   ➕ Lokales Produkt "${productDataForDb.name}" (ID: ${productDataForDb.id}) für DB-Insert vorbereitet.`);
-        }
-    }
+        // Wenn Produkt nicht remote existiert oder lokale ID ungültig/fehlend ist, versuche es einzufügen
+        const productDataForDb = {
+            // ID wird von insertProductWithUniqueIdRetry gesetzt/generiert, falls localProd.id ungültig
+            id: (typeof localId === 'number' && localId >= 100000) ? localId : undefined, 
+            name: localProd.name.trim(),
+            price: localProd.price && typeof localProd.price === 'string' ? localProd.price.trim() : "$0.00",
+            image_url: localProd.image_url && typeof localProd.image_url === 'string' ? localProd.image_url.trim() : "https://via.placeholder.com/150?text=Kein+Bild",
+            stock: (typeof localProd.stock === 'number' && Number.isInteger(localProd.stock) && localProd.stock >= 0) ? localProd.stock : 20,
+            default_stock: (typeof localProd.default_stock === 'number' && Number.isInteger(localProd.default_stock) && localProd.default_stock >= 0) 
+                             ? localProd.default_stock 
+                             : ((typeof localProd.stock === 'number' && Number.isInteger(localProd.stock) && localProd.stock >= 0) ? localProd.stock : 20),
+        };
 
-    // 2. Führe Batch-Insert in DB aus
-    if (dbOperations.length > 0) {
-        console.log(`   📨 Führe ${dbOperations.length} Insert-Operationen in MongoDB aus...`);
         try {
-            const bulkResult = await productsCollection.bulkWrite(dbOperations, { ordered: false });
-            console.log(`   ✅ MongoDB mit ${bulkResult.insertedCount} lokalen Produkten ergänzt.`);
-        } catch (bulkError) {
-            console.error(`   ❌ Fehler beim MongoDB BulkWrite für Inserts:`, bulkError.message);
-            if (bulkError.writeErrors) {
-                bulkError.writeErrors.forEach(err => console.error(`     Detail: Index ${err.index}, Code ${err.code}, Msg: ${err.errmsg}`));
-            }
+            await insertProductWithUniqueIdRetry(productDataForDb);
+        } catch (insertError) {
+            console.error(`   ❌ Endgültiger Fehler beim Versuch, Produkt "${productDataForDb.name}" einzufügen: ${insertError.message}`);
+            // Fahre mit dem nächsten Produkt fort
         }
-    } else {
-        console.log('   ℹ️ Keine neuen lokalen Produkte zum Hinzufügen in MongoDB gefunden.');
     }
+    
+    console.log('   Alle lokalen Produkte verarbeitet.');
 
-    // 3. Hole alle Produkte (jetzt inkl. der ggf. neu hinzugefügten) von MongoDB als "Source of Truth"
+    // Hole alle Produkte von MongoDB als "Source of Truth"
     const finalRemoteProducts = await productsCollection.find().toArray();
     
-    // 4. Bereinige und standardisiere die finalen Produkte für die lokale JSON-Datei
     const productsForJsonFile = finalRemoteProducts.map(p => {
+        // ... (Rest der Standardisierungslogik für JSON bleibt gleich) ...
         if (!p || typeof p.id !== 'number' || !Number.isInteger(p.id) || p.id < 100000) {
             console.warn("   ⚠️ Ignoriere fehlerhaftes Produkt aus DB für JSON (ungültige ID oder fehlt):", p ? p.id : "Produkt ist null/undefined");
             return null;
         }
-        return { // Stelle sicher, dass alle benötigten Felder für die JSON existieren
+        return {
             id: p.id,
             name: p.name || "Unbenanntes Produkt",
             price: p.price || "$0.00",
@@ -193,9 +200,8 @@ async function syncLocalAndRemote() {
     }).filter(p => p !== null);
 
     productsForJsonFile.sort((a, b) => a.id - b.id);
-
     writeProductsFile(productsForJsonFile);
-    console.log(`🔄 Lokale products.json auf ${productsForJsonFile.length} Einträge aktualisiert (basierend auf MongoDB).`);
+    console.log(`🔄 Lokale products.json auf ${productsForJsonFile.length} Einträge aktualisiert.`);
     console.log(`✅ Synchronisation abgeschlossen.`);
 
   } catch (error) {
