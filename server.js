@@ -32,8 +32,8 @@ function writeProductsFile(products) {
         price: p.price,
         image_url: p.image_url,
         stock: (typeof p.stock === 'number' && Number.isInteger(p.stock) && p.stock >= 0) ? p.stock : 20,
-        default_stock: (typeof p.default_stock === 'number' && Number.isInteger(p.default_stock) && p.default_stock >= 0) 
-                         ? p.default_stock 
+        default_stock: (typeof p.default_stock === 'number' && Number.isInteger(p.default_stock) && p.default_stock >= 0)
+                         ? p.default_stock
                          : ((typeof p.stock === 'number' && Number.isInteger(p.stock) && p.stock >= 0) ? p.stock : 20)
     }));
     fs.writeFileSync(PRODUCTS_FILE, JSON.stringify({ products: productsToWrite }, null, 2));
@@ -68,12 +68,13 @@ async function generateUniqueId() {
     let newId;
     let idExists = true;
     let attempts = 0;
-    const maxAttempts = 1000; // Erhöht für größere Datenmengen, um Kollisionen zu reduzieren
+    const maxAttempts = 1000; // Erhöht für größere Datenmengen
 
     while (idExists && attempts < maxAttempts) {
         newId = Math.floor(100000 + Math.random() * 900000);
         try {
-            const existingProduct = await productsCollection.findOne({ id: newId }, { projection: { _id: 1 } }); // Effizienter Check
+            // Prüfe nur, ob ein Dokument mit dieser ID existiert, ohne das ganze Dokument zu laden
+            const existingProduct = await productsCollection.findOne({ id: newId }, { projection: { _id: 1 } });
             if (!existingProduct) {
                 idExists = false;
             }
@@ -87,6 +88,7 @@ async function generateUniqueId() {
         console.error(`   ❌ Konnte nach ${maxAttempts} Versuchen keine eindeutige ID generieren.`);
         throw new Error('Fehler bei der ID-Generierung, zu viele Kollisionen.');
     }
+    console.log(`   🔑 Neue eindeutige ID generiert: ${newId}`);
     return newId;
 }
 
@@ -95,15 +97,16 @@ async function insertProductWithUniqueIdRetry(productData, maxRetries = 5) {
     let success = false;
     let currentProductData = { ...productData }; // Kopie für Modifikationen
 
-    if (typeof currentProductData.id !== 'number' || currentProductData.id < 100000) {
+    // Wenn keine gültige ID übergeben wurde, generiere eine
+    if (!currentProductData.id || typeof currentProductData.id !== 'number' || currentProductData.id < 100000) {
         console.warn(`   ⚠️ Produkt "${currentProductData.name}" hat keine gültige ID, generiere eine...`);
-        currentProductData.id = await generateUniqueId(); // generateUniqueId prüft schon auf Existenz
+        // generateUniqueId prüft schon auf Existenz, aber eine Race Condition ist möglich
+        currentProductData.id = await generateUniqueId();
     }
 
     while (retries < maxRetries && !success) {
         try {
-            // Entferne _id vor dem Einfügen, falls es existiert (MongoDB generiert es)
-            delete currentProductData._id; 
+            delete currentProductData._id; // MongoDB generiert _id
             await productsCollection.insertOne(currentProductData);
             console.log(`   ✅ Produkt "${currentProductData.name}" (ID: ${currentProductData.id}) erfolgreich eingefügt.`);
             success = true;
@@ -113,7 +116,8 @@ async function insertProductWithUniqueIdRetry(productData, maxRetries = 5) {
                 retries++;
                 console.warn(`   ⚠️ ID-Kollision für "${currentProductData.name}" mit ID ${currentProductData.id}. Versuch ${retries}/${maxRetries}. Generiere neue ID...`);
                 if (retries < maxRetries) {
-                    currentProductData.id = await generateUniqueId(); // Neue ID holen
+                    // Generiere eine komplett neue ID für den nächsten Versuch
+                    currentProductData.id = await generateUniqueId();
                 } else {
                     console.error(`   ❌ Produkt "${currentProductData.name}" konnte nach ${maxRetries} Versuchen nicht eingefügt werden (persistente ID-Kollision).`);
                     throw error; // Fehler nach max. Versuchen weiterwerfen
@@ -124,10 +128,14 @@ async function insertProductWithUniqueIdRetry(productData, maxRetries = 5) {
             }
         }
     }
+     // Dieser Teil sollte nur erreicht werden, wenn maxRetries erreicht wurde und der letzte Versuch auch fehlschlug
     if (!success) {
-        // Sollte eigentlich nicht erreicht werden, wenn throw error oben greift
-        throw new Error(`Konnte Produkt "${currentProductData.name}" nach Retries nicht einfügen.`);
+       console.error(`   ❌ Konnte Produkt "${productData.name}" nach ${maxRetries} Retries nicht einfügen.`);
+       // Werfe den letzten Fehler erneut oder einen generischen Fehler
+       throw new Error(`Einfügen von Produkt "${productData.name}" nach ${maxRetries} Versuchen fehlgeschlagen.`);
     }
+    // Wird eigentlich nicht erreicht, da return oder throw im Loop passiert
+    return null;
 }
 
 
@@ -141,9 +149,15 @@ async function syncLocalAndRemote() {
     console.log(`   Lokal initial: ${localProductsInput.length} Produkte, Remote initial: ${remoteProducts.length} Produkte.`);
 
     // Produkte einzeln verarbeiten, um ID-Kollisionen besser zu handhaben
+    let productsProcessedCount = 0;
+    let productsInsertedCount = 0;
+    let productsSkippedCount = 0;
+
     for (const localProd of localProductsInput) {
+        productsProcessedCount++;
         if (!localProd || typeof localProd.name !== 'string' || !localProd.name.trim()) {
-            console.warn("   ⚠️ Ignoriere fehlerhaftes lokales Produkt (Name fehlt/ungültig):", localProd);
+            console.warn(`   ⚠️ Ignoriere fehlerhaftes lokales Produkt (Index ${productsProcessedCount}): Name fehlt/ungültig.`);
+            productsSkippedCount++;
             continue;
         }
 
@@ -151,38 +165,38 @@ async function syncLocalAndRemote() {
         // Prüfe, ob das Produkt (basierend auf seiner ursprünglichen lokalen ID, falls gültig) bereits remote existiert
         if (localId && typeof localId === 'number' && localId >= 100000 && remoteMap.has(localId)) {
             // console.log(`   ℹ️ Lokales Produkt "${localProd.name}" (ID: ${localId}) existiert bereits remote. Überspringe Insert.`);
-            // Hier könnte man eine Update-Logik einbauen, falls sich lokale Daten geändert haben
-            continue;
+            continue; // Produkt existiert schon, nichts zu tun für Insert
         }
 
         // Wenn Produkt nicht remote existiert oder lokale ID ungültig/fehlend ist, versuche es einzufügen
         const productDataForDb = {
-            // ID wird von insertProductWithUniqueIdRetry gesetzt/generiert, falls localProd.id ungültig
-            id: (typeof localId === 'number' && localId >= 100000) ? localId : undefined, 
+            id: (typeof localId === 'number' && localId >= 100000) ? localId : undefined,
             name: localProd.name.trim(),
             price: localProd.price && typeof localProd.price === 'string' ? localProd.price.trim() : "$0.00",
             image_url: localProd.image_url && typeof localProd.image_url === 'string' ? localProd.image_url.trim() : "https://via.placeholder.com/150?text=Kein+Bild",
             stock: (typeof localProd.stock === 'number' && Number.isInteger(localProd.stock) && localProd.stock >= 0) ? localProd.stock : 20,
-            default_stock: (typeof localProd.default_stock === 'number' && Number.isInteger(localProd.default_stock) && localProd.default_stock >= 0) 
-                             ? localProd.default_stock 
+            default_stock: (typeof localProd.default_stock === 'number' && Number.isInteger(localProd.default_stock) && localProd.default_stock >= 0)
+                             ? localProd.default_stock
                              : ((typeof localProd.stock === 'number' && Number.isInteger(localProd.stock) && localProd.stock >= 0) ? localProd.stock : 20),
         };
 
         try {
             await insertProductWithUniqueIdRetry(productDataForDb);
+            productsInsertedCount++;
         } catch (insertError) {
-            console.error(`   ❌ Endgültiger Fehler beim Versuch, Produkt "${productDataForDb.name}" einzufügen: ${insertError.message}`);
+            // Fehler wurde schon in insertProductWithUniqueIdRetry geloggt
+            console.error(`   ❌ Fehler beim finalen Versuch, Produkt (ursprünglich Index ${productsProcessedCount}, Name: "${productDataForDb.name}") einzufügen.`);
+            productsSkippedCount++;
             // Fahre mit dem nächsten Produkt fort
         }
     }
-    
-    console.log('   Alle lokalen Produkte verarbeitet.');
+
+    console.log(`   Lokale Produkte verarbeitet: ${productsProcessedCount} gesamt, ${productsInsertedCount} eingefügt/versucht, ${productsSkippedCount} übersprungen/fehlerhaft.`);
 
     // Hole alle Produkte von MongoDB als "Source of Truth"
     const finalRemoteProducts = await productsCollection.find().toArray();
-    
+
     const productsForJsonFile = finalRemoteProducts.map(p => {
-        // ... (Rest der Standardisierungslogik für JSON bleibt gleich) ...
         if (!p || typeof p.id !== 'number' || !Number.isInteger(p.id) || p.id < 100000) {
             console.warn("   ⚠️ Ignoriere fehlerhaftes Produkt aus DB für JSON (ungültige ID oder fehlt):", p ? p.id : "Produkt ist null/undefined");
             return null;
@@ -193,8 +207,8 @@ async function syncLocalAndRemote() {
             price: p.price || "$0.00",
             image_url: p.image_url || "https://via.placeholder.com/150?text=Kein+Bild",
             stock: (typeof p.stock === 'number' && Number.isInteger(p.stock) && p.stock >= 0) ? p.stock : 20,
-            default_stock: (typeof p.default_stock === 'number' && Number.isInteger(p.default_stock) && p.default_stock >= 0) 
-                             ? p.default_stock 
+            default_stock: (typeof p.default_stock === 'number' && Number.isInteger(p.default_stock) && p.default_stock >= 0)
+                             ? p.default_stock
                              : ((typeof p.stock === 'number' && Number.isInteger(p.stock) && p.stock >= 0) ? p.stock : 20),
         };
     }).filter(p => p !== null);
@@ -214,20 +228,20 @@ async function resetProductStock() {
   try {
     const result = await productsCollection.updateMany(
       { id: { $type: 'number', $gte: 100000 } },
-      [ 
+      [
         {
           $set: {
             stock: {
               $cond: {
                 if: {
                   $and: [
-                    { $ne: [{ $type: "$default_stock" }, "missing"] }, 
+                    { $ne: [{ $type: "$default_stock" }, "missing"] },
                     { $in: [{$type: "$default_stock"}, ["int", "long", "double"]] }, // Akzeptiert verschiedene numerische Typen
-                    { $gte: ["$default_stock", 0] }                   
+                    { $gte: ["$default_stock", 0] }
                   ]
                 },
-                then: "$default_stock", 
-                else: 20                
+                then: "$default_stock",
+                else: 20
               }
             }
           }
@@ -235,10 +249,10 @@ async function resetProductStock() {
       ]
     );
     console.log(`♻️ Lagerbestand für ${result.modifiedCount} Produkte auf default_stock zurückgesetzt (Matched: ${result.matchedCount}).`);
-    await syncLocalAndRemote();
+    await syncLocalAndRemote(); // Sync nach Reset
   } catch (error) {
     console.error('❌ Fehler beim Zurücksetzen des Lagerbestands:', error);
-    throw error;
+    throw error; // Fehler weiterwerfen für API Endpoint
   }
 }
 // --- ENDE NEUE/ANGEPASSTE FUNKTIONEN ---
@@ -284,10 +298,12 @@ setInterval(() => {
 }, 10000); // Prüfe alle 10 Sekunden
 
 
-// API Endpoints
+// --- API Endpoints ---
+
+// Reihenfolge wichtig: Spezifische Routen vor allgemeinen mit Parametern
 app.patch('/api/products/reset', async (req, res) => {
   console.log('API-Endpoint /api/products/reset aufgerufen.');
-  // Hier sollte eine Admin-Autorisierung stattfinden!
+  // !!! HIER ADMIN-AUTORISIERUNG EINFÜGEN !!!
   try {
     await resetProductStock();
     res.json({ message: 'Lagerbestand auf Standardwerte zurückgesetzt.' });
@@ -297,19 +313,30 @@ app.patch('/api/products/reset', async (req, res) => {
   }
 });
 
+app.post('/api/products/sync', async (req, res) => {
+   console.log('API-Endpoint /api/products/sync aufgerufen.');
+   // !!! HIER ADMIN-AUTORISIERUNG EINFÜGEN !!!
+  try {
+    await syncLocalAndRemote();
+    res.json({ message: 'Bidirektionaler Sync manuell durchgeführt.' });
+  } catch (err) {
+    console.error('Fehler beim manuellen Sync via API:', err);
+    res.status(500).json({ error: 'Fehler beim Sync.' });
+  }
+});
+
+// Allgemeine Produkt-Routen
 app.get('/api/products', async (req, res) => {
   try {
-    const products = await productsCollection.find().toArray();
+    // Hole nur Produkte mit gültiger ID aus der DB für die Anzeige
+    const products = await productsCollection.find({ id: { $type: 'number', $gte: 100000 } }).toArray();
     const sanitizedProducts = products.map(p => {
-        if (!p || typeof p.id !== 'number' || !Number.isInteger(p.id) || p.id < 100000) {
-            return null;
-        }
         const sanitizedProduct = { ...p };
         sanitizedProduct.stock = (typeof sanitizedProduct.stock === 'number' && Number.isInteger(sanitizedProduct.stock) && sanitizedProduct.stock >= 0) ? sanitizedProduct.stock : 0;
         sanitizedProduct.default_stock = (typeof sanitizedProduct.default_stock === 'number' && Number.isInteger(sanitizedProduct.default_stock) && sanitizedProduct.default_stock >= 0) ? sanitizedProduct.default_stock : 20;
-        delete sanitizedProduct._id; // _id nicht ans Frontend senden
+        delete sanitizedProduct._id;
         return sanitizedProduct;
-    }).filter(p => p !== null);
+    });
 
     sanitizedProducts.sort((a, b) => a.id - b.id);
     res.json({ products: sanitizedProducts });
@@ -323,6 +350,7 @@ app.post('/api/products', async (req, res) => {
   console.log('POST /api/products erhalten:', req.body);
   let { name, image_url, price, stock } = req.body;
 
+  // ... (Validierungen für name, image_url, price) ...
   if (!name || typeof name !== 'string' || name.trim() === '') return res.status(400).json({ error: 'Produktname ist erforderlich!' });
   if (!image_url || typeof image_url !== 'string' || image_url.trim() === '') return res.status(400).json({ error: 'Bild-URL ist erforderlich!' });
   if (!price || typeof price !== 'string' || price.trim() === '') return res.status(400).json({ error: 'Preis ist erforderlich!' });
@@ -344,7 +372,7 @@ app.post('/api/products', async (req, res) => {
   }
 
   try {
-    const newId = await generateUniqueId(); // Verwende die neue Funktion zur ID-Generierung
+    const newId = await generateUniqueId(); // ID generieren
     const prod = {
         id: newId,
         name: name.trim(),
@@ -353,16 +381,14 @@ app.post('/api/products', async (req, res) => {
         stock: initialStock,
         default_stock: initialStock
     };
-    await productsCollection.insertOne(prod);
-    console.log('POST /api/products: Produkt erfolgreich in DB eingefügt mit ID:', newId);
-    syncLocalAndRemote().catch(err => console.error("Fehler beim Sync nach Produkt-POST:", err)); // Sync im Hintergrund
-    res.status(201).json({ message: 'Produkt erfolgreich hinzugefügt!', product: prod });
+    // Verwende die Retry-Funktion auch hier für Konsistenz
+    const insertedProduct = await insertProductWithUniqueIdRetry(prod, 3); // Weniger Retries hier ok
+    console.log('POST /api/products: Produkt erfolgreich in DB eingefügt mit ID:', insertedProduct.id);
+    syncLocalAndRemote().catch(err => console.error("Fehler beim Sync nach Produkt-POST:", err));
+    res.status(201).json({ message: 'Produkt erfolgreich hinzugefügt!', product: insertedProduct });
   } catch (err) {
     console.error('POST /api/products: Fehler beim Hinzufügen des Produkts:', err);
-    if (err.message.includes("ID-Generierung")) { // Spezifischer Fehler von generateUniqueId
-        return res.status(500).json({ error: err.message });
-    }
-    res.status(500).json({ error: 'Fehler beim Hinzufügen des Produkts!' });
+    res.status(500).json({ error: err.message || 'Fehler beim Hinzufügen des Produkts!' });
   }
 });
 
@@ -387,6 +413,7 @@ app.delete('/api/products/:id', async (req, res) => {
   }
 });
 
+// Muss nach /api/products/reset stehen!
 app.patch('/api/products/:id', async (req, res) => {
   console.log('PATCH /api/products/:id für ID:', req.params.id, 'Body:', req.body);
   const id = parseInt(req.params.id, 10);
@@ -418,6 +445,7 @@ app.patch('/api/products/:id', async (req, res) => {
   }
 });
 
+// Purchase Endpoint
 app.post('/api/purchase', async (req, res) => {
     console.log('POST /api/purchase erhalten. Warenkorb:', req.body.cart);
     const cart = req.body.cart;
@@ -426,7 +454,7 @@ app.post('/api/purchase', async (req, res) => {
     }
 
     const errors = [];
-    const productChecks = []; // Promises für die Produktprüfungen
+    const productChecks = [];
 
     for (const item of cart) {
         if (!item || typeof item.id !== 'number' || item.id < 100000 || typeof item.quantity !== 'number' || item.quantity <= 0) {
@@ -436,46 +464,41 @@ app.post('/api/purchase', async (req, res) => {
         productChecks.push(
             productsCollection.findOne({ id: item.id }).then(product => {
                 if (!product) {
-                    errors.push(`Produkt "${item.name || item.id}" nicht gefunden.`);
-                    return null; // Signalisiert Fehler
+                    errors.push(`Produkt "${item.name || item.id}" nicht gefunden.`); return null;
                 }
                 const currentStock = (typeof product.stock === 'number' && product.stock >= 0) ? product.stock : 0;
                 if (item.quantity > currentStock) {
-                    errors.push(`Nicht genügend Bestand für "${product.name || product.id}". Verfügbar: ${currentStock}, benötigt: ${item.quantity}.`);
-                    return null; // Signalisiert Fehler
+                    errors.push(`Nicht genügend Bestand für "${product.name || product.id}". Verfügbar: ${currentStock}, benötigt: ${item.quantity}.`); return null;
                 }
-                return { id: item.id, quantityToDecrement: item.quantity }; // Gültiges Update-Objekt
+                return { id: item.id, quantityToDecrement: item.quantity };
             })
         );
     }
+     if (errors.length > 0) { // Fehler schon bei der initialen Item-Validierung
+         console.error('POST /api/purchase: Validierungsfehler im Warenkorb (Item-Struktur).');
+         return res.status(400).json({ error: errors.join('; ') });
+     }
 
     try {
         const results = await Promise.all(productChecks);
-        if (errors.length > 0) { // Wenn schon Validierungsfehler bei Item-Struktur waren
-            console.error('POST /api/purchase: Validierungsfehler im Warenkorb.');
-            return res.status(400).json({ error: errors.join('; ') });
+        const validationErrors = errors.filter(e => e); // Sammle Fehler aus den Promises (und ggf. initiale)
+        if (validationErrors.length > 0) {
+            console.error('POST /api/purchase: Bestandsprüfung fehlgeschlagen.');
+            return res.status(400).json({ error: validationErrors.join('; ') });
         }
 
         const validUpdates = results.filter(r => r !== null);
-        if (validUpdates.length !== cart.length) { // Wenn einer der async Checks fehlgeschlagen ist (Produkt nicht da, Stock nicht genug)
-            console.error('POST /api/purchase: Bestandsprüfung für einige Produkte fehlgeschlagen.');
-             // errors enthält jetzt die spezifischen Fehlermeldungen aus den Promises
-            return res.status(400).json({ error: errors.join('; ') || "Unbekannter Bestandsfehler."});
-        }
-        
-        // Alle Prüfungen bestanden, jetzt Bestand reduzieren
         console.log('POST /api/purchase: Bestandsprüfung bestanden. Reduziere Bestand für', validUpdates.length, 'Produkttypen.');
         if (validUpdates.length > 0) {
             const bulkOperations = validUpdates.map(update => ({
                 updateOne: {
-                    filter: { id: update.id, stock: { $gte: update.quantityToDecrement } }, // Finale Sicherheitsprüfung
+                    filter: { id: update.id, stock: { $gte: update.quantityToDecrement } },
                     update: { $inc: { stock: -update.quantityToDecrement } }
                 }
             }));
             const bulkWriteResult = await productsCollection.bulkWrite(bulkOperations);
             if (bulkWriteResult.modifiedCount !== validUpdates.length) {
-                console.error('POST /api/purchase: Fehler beim Bulk Write. Nicht alle Bestände konnten aktualisiert werden (Race Condition?).');
-                // Hier wäre ein Rollback-Mechanismus in einer echten Anwendung wichtig
+                console.error('POST /api/purchase: Fehler beim Bulk Write. Race Condition?');
                 return res.status(500).json({ error: 'Konflikt beim Aktualisieren des Lagerbestands. Bitte erneut versuchen.' });
             }
             console.log(`POST /api/purchase: Bestand für ${bulkWriteResult.modifiedCount} Produkte erfolgreich reduziert.`);
@@ -484,23 +507,13 @@ app.post('/api/purchase', async (req, res) => {
         syncLocalAndRemote().catch(syncErr => console.error('POST /api/purchase: Fehler beim Hintergrund-Sync:', syncErr));
         res.json({ message: 'Kauf erfolgreich abgeschlossen!' });
 
-    } catch (err) { // Fängt Fehler von Promise.all oder andere unerwartete Fehler
-        console.error('POST /api/purchase: Unerwarteter Fehler während des Kaufs:', err);
+    } catch (err) {
+        console.error('POST /api/purchase: Unerwarteter Fehler:', err);
         res.status(500).json({ error: 'Ein unerwarteter Fehler ist beim Kauf aufgetreten.' });
     }
 });
 
-app.post('/api/products/sync', async (req, res) => {
-   console.log('API-Endpoint /api/products/sync aufgerufen.');
-  try {
-    await syncLocalAndRemote();
-    res.json({ message: 'Bidirektionaler Sync manuell durchgeführt.' });
-  } catch (err) {
-    console.error('Fehler beim manuellen Sync via API:', err);
-    res.status(500).json({ error: 'Fehler beim Sync.' });
-  }
-});
-
+// Fallback für unbekannte Routen
 app.use((req, res) => {
     res.status(404).send('Endpoint nicht gefunden');
 });
