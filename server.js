@@ -140,27 +140,38 @@ async function resetProductStock() {
   console.log('♻️ Startet Zurücksetzen des Lagerbestands auf default_stock...');
   try {
     const result = await productsCollection.updateMany(
-        { id: { $type: 'number', $gte: 100000 } }, 
-        [{ 
-            $set: {
-                 stock: {
-                     $cond: {
-                         if: { $and: [ { $exists: ["$default_stock"] }, { $type: ["$default_stock", "number"] }, { $gte: ["$default_stock", 0] } ] },
-                         then: "$default_stock",
-                         else: 20 
-                     }
-                 }
-             }
-        }]
+      // Filter: Optional, nur Produkte mit gültiger ID (dieser Teil ist OK)
+      { id: { $type: 'number', $gte: 100000 } },
+      [ // Aggregation Pipeline für das Update
+        {
+          $set: {
+            stock: {
+              $cond: {
+                if: {
+                  // Bedingung: default_stock existiert, ist eine Zahl UND ist >= 0
+                  $and: [
+                    { $ne: [{ $type: "$default_stock" }, "missing"] }, // Prüft, ob das Feld existiert
+                    { $eq: [{ $type: "$default_stock" }, "int"] },     // Prüft, ob der Typ eine Ganzzahl ist
+                                                                        // oder "long" oder "double" je nach Datentyp in DB
+                                                                        // Für Flexibilität kann man auch { $in: [{$type: "$default_stock"}, ["int", "long", "double"]] } verwenden
+                    { $gte: ["$default_stock", 0] }                   // Prüft, ob der Wert >= 0 ist
+                  ]
+                },
+                then: "$default_stock", // Wenn Bedingung wahr, nimm default_stock
+                else: 20                // Sonst nimm 20
+              }
+            }
+          }
+        }
+      ]
     );
-    console.log(`♻️ Lagerbestand auf ${result.modifiedCount} Produkte auf default_stock zurückgesetzt (Matched: ${result.matchedCount}).`);
-    await syncLocalAndRemote(); 
+    console.log(`♻️ Lagerbestand für ${result.modifiedCount} Produkte auf default_stock zurückgesetzt (Matched: ${result.matchedCount}).`);
+    await syncLocalAndRemote();
   } catch (error) {
     console.error('❌ Fehler beim Zurücksetzen des Lagerbestands:', error);
-    // Wichtig: Fehler hier werfen, damit der aufrufende API-Endpunkt ihn fangen kann
-    throw error; 
+    throw error; // Fehler weiterwerfen
   }
-}
+};
 
 
 // Init MongoDB-Verbindung
