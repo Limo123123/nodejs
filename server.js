@@ -140,26 +140,28 @@ async function resetProductStock() {
   console.log('♻️ Startet Zurücksetzen des Lagerbestands auf default_stock...');
   try {
     const result = await productsCollection.updateMany(
-        // Filter: Optional, nur Produkte mit gültiger ID
-        { id: { $type: 'number', $gte: 100000 } }, // Filtert ungültige IDs in der DB vor dem Reset
-        [{ // Aggregation Pipeline
+        { id: { $type: 'number', $gte: 100000 } }, 
+        [{ 
             $set: {
                  stock: {
                      $cond: {
                          if: { $and: [ { $exists: ["$default_stock"] }, { $type: ["$default_stock", "number"] }, { $gte: ["$default_stock", 0] } ] },
                          then: "$default_stock",
-                         else: 20 // Standardwert, wenn default_stock fehlt oder ungültig ist
+                         else: 20 
                      }
                  }
              }
         }]
     );
     console.log(`♻️ Lagerbestand auf ${result.modifiedCount} Produkte auf default_stock zurückgesetzt (Matched: ${result.matchedCount}).`);
-    await syncLocalAndRemote(); // Nach dem Reset die lokale Datei aktualisieren
+    await syncLocalAndRemote(); 
   } catch (error) {
     console.error('❌ Fehler beim Zurücksetzen des Lagerbestands:', error);
+    // Wichtig: Fehler hier werfen, damit der aufrufende API-Endpunkt ihn fangen kann
+    throw error; 
   }
 }
+
 
 // Init MongoDB-Verbindung
 MongoClient.connect(mongoUri)
@@ -489,15 +491,22 @@ app.post('/api/purchase', async (req, res) => {
 });
 
 
-// PATCH Lagerbestand zurücksetzen (Endpoint beibehalten)
+// PATCH Lagerbestand zurücksetzen (Endpoint beibehalten und wird jetzt genutzt)
 app.patch('/api/products/reset', async (req, res) => {
   console.log('API-Endpoint /api/products/reset aufgerufen.');
+  // HIER SOLLTE EINE ADMIN-AUTORISIERUNG STATTFINDEN!
+  // Z.B. Überprüfung eines Admin-Tokens, Session, etc.
+  // Für dieses Beispiel lassen wir es erstmal ohne, aber in Produktion ist das kritisch.
+  // if (!isAdmin(req)) { // Hypothetische isAdmin Funktion
+  //    return res.status(403).json({ error: "Zugriff verweigert. Nur für Admins." });
+  // }
+
   try {
     await resetProductStock();
     res.json({ message: 'Lagerbestand auf Standardwerte zurückgesetzt.' });
   } catch (err) {
     console.error('Fehler beim Zurücksetzen des Lagerbestands via API:', err);
-    res.status(500).json({ error: 'Fehler beim Zurücksetzen.' });
+    res.status(500).json({ error: 'Fehler beim Zurücksetzen des Lagerbestands auf dem Server.' }); // Genauere Fehlermeldung
   }
 });
 
