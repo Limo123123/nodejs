@@ -337,6 +337,25 @@ app.delete('/api/products/:id', async (req, res) => {
   }
 });
 
+// PATCH Lagerbestand zurücksetzen (Endpoint beibehalten und wird jetzt genutzt)
+app.patch('/api/products/reset', async (req, res) => {
+  console.log('API-Endpoint /api/products/reset aufgerufen.');
+  // HIER SOLLTE EINE ADMIN-AUTORISIERUNG STATTFINDEN!
+  // Z.B. Überprüfung eines Admin-Tokens, Session, etc.
+  // Für dieses Beispiel lassen wir es erstmal ohne, aber in Produktion ist das kritisch.
+  // if (!isAdmin(req)) { // Hypothetische isAdmin Funktion
+  //    return res.status(403).json({ error: "Zugriff verweigert. Nur für Admins." });
+  // }
+
+  try {
+    await resetProductStock();
+    res.json({ message: 'Lagerbestand auf Standardwerte zurückgesetzt.' });
+  } catch (err) {
+    console.error('Fehler beim Zurücksetzen des Lagerbestands via API:', err);
+    res.status(500).json({ error: 'Fehler beim Zurücksetzen des Lagerbestands auf dem Server.' }); // Genauere Fehlermeldung
+  }
+});
+
 app.patch('/api/products/:id', async (req, res) => {
   console.log('PATCH /api/products/:id erhalten für ID:', req.params.id, 'Body:', req.body);
   const id = parseInt(req.params.id, 10);
@@ -488,26 +507,6 @@ app.post('/api/purchase', async (req, res) => {
         console.error('POST /api/purchase: Unerwarteter Fehler während des Kaufs:', err);
         res.status(500).json({ error: 'Ein unerwarteter Fehler ist beim Kauf aufgetreten.' });
     }
-});
-
-
-// PATCH Lagerbestand zurücksetzen (Endpoint beibehalten und wird jetzt genutzt)
-app.patch('/api/products/reset', async (req, res) => {
-  console.log('API-Endpoint /api/products/reset aufgerufen.');
-  // HIER SOLLTE EINE ADMIN-AUTORISIERUNG STATTFINDEN!
-  // Z.B. Überprüfung eines Admin-Tokens, Session, etc.
-  // Für dieses Beispiel lassen wir es erstmal ohne, aber in Produktion ist das kritisch.
-  // if (!isAdmin(req)) { // Hypothetische isAdmin Funktion
-  //    return res.status(403).json({ error: "Zugriff verweigert. Nur für Admins." });
-  // }
-
-  try {
-    await resetProductStock();
-    res.json({ message: 'Lagerbestand auf Standardwerte zurückgesetzt.' });
-  } catch (err) {
-    console.error('Fehler beim Zurücksetzen des Lagerbestands via API:', err);
-    res.status(500).json({ error: 'Fehler beim Zurücksetzen des Lagerbestands auf dem Server.' }); // Genauere Fehlermeldung
-  }
 });
 
 // POST Manuelle Synchronisation triggern (Endpoint beibehalten)
