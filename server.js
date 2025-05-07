@@ -19,6 +19,9 @@ const mongoCollectionName = 'products';
 
 app.use(cors());
 app.use(express.json());
+// In server.js, nach app = express();
+app.use(express.json({ limit: '50mb' })); // Erhöhe Limit z.B. auf 50MB
+app.use(express.urlencoded({ limit: '50mb', extended: true })); // Auch für urlencoded
 
 let productsCollection;
 
