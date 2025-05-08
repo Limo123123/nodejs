@@ -81,12 +81,10 @@ app.use(session({
     resave: true, saveUninitialized: false,
     store: MongoStore.create({ mongoUrl: mongoUri, dbName: mongoDbName, collectionName: 'sessions', ttl: 14 * 24 * 60 * 60 }),
     cookie: {
-        // Setze secure: true nur in Produktion (HTTPS), oder wenn explizit über Env Var gesetzt
-        // Nutze req.protocol (über trust proxy) oder NODE_ENV
-        secure: true, 
+        secure: process.env.NODE_ENV === 'production', // Sollte jetzt true sein auf Render
         httpOnly: true,
         maxAge: 14 * 24 * 60 * 60 * 1000, 
-        sameSite: 'lax' // Zurück zu 'Lax' - besserer Standard, funktioniert gut mit korrektem CORS Origin
+        sameSite: 'lax' // Oder 'none', wenn cross-site nötig ist und secure funktioniert
     }
 }));
 
