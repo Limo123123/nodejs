@@ -23,7 +23,7 @@ const MongoStore = require('connect-mongo');
 
 const app = express();
 const HTTP_PORT = process.env.PORT || 80; // PORT wird von Render gesetzt
-const SEED_PRODUCTS_FILE = 'products_seed.json'; // Umbenennen! Rohdaten ohne IDs
+const SEED_PRODUCTS_FILE = 'products.json'; // Umbenennen! Rohdaten ohne IDs
 const TIMEZONE = 'Europe/Berlin';
 
 // --- Konfiguration aus Umgebungsvariablen ---
