@@ -44,7 +44,13 @@ if (!mongoUri) { console.error('!!! FEHLER: Keine MongoDB URI gefunden! Server s
 
 // --- Middleware ---
 console.log(`CORS Konfiguration: Erlaube Origin: ${allowedOrigin}`);
-app.use(cors({ origin: allowedOrigin, credentials: true }));
+// app.use(cors({ origin: allowedOrigin, credentials: true }));
+// CORS-Konfiguration - Explizit alle Origins erlauben (NUR FÜR ENTWICKLUNG/TEST)
+console.warn("!!! CORS Konfiguration: Erlaube Anfragen von ALLEN Origins ('*'). Nur für Entwicklung/Tests verwenden! !!!");
+app.use(cors({
+    origin: '*', // Erlaube jede Domain
+    credentials: true // Wichtig, damit Cookies (für Sessions) gesendet werden können
+}));
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true, parameterLimit: 50000 }));
 app.use(session({
