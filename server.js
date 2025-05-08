@@ -79,7 +79,7 @@ app.use(session({
     resave: true, saveUninitialized: false,
     store: MongoStore.create({ mongoUrl: mongoUri, dbName: mongoDbName, collectionName: 'sessions', ttl: 14 * 24 * 60 * 60 }),
     cookie: {
-    secure: true, // Muss true sein für SameSite=None
+    secure: false, // Muss true sein für SameSite=None
     httpOnly: true,
     maxAge: 14 * 24 * 60 * 60 * 1000, 
     sameSite: 'none' // TESTWEISE
