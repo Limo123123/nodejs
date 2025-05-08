@@ -44,6 +44,8 @@ const frontendDevUrl = 'https://limo123123.github.io'; // Dein lokaler Live Serv
 if (!sessionSecret) { console.error('!!! FEHLER: Kein SESSION_SECRET! Server stoppt.'); process.exit(1); }
 if (!mongoUri) { console.error('!!! FEHLER: Keine MongoDB URI! Server stoppt.'); process.exit(1); }
 
+app.set('trust proxy', 1);
+
 // --- Middleware ---
 // CORS GANZ OBEN!
 const allowedOrigins = [
