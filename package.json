@@ -1,25 +1,24 @@
 {
-  "name": "api",
+  "name": "limazon-server",
   "version": "1.0.0",
-  "description": "Lol, this is just an API for an Server",
+  "description": "Backend for Limazon Shop",
   "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node server.js",
-    "build": "echo 'None Build, but It's Working'"
+    "dev": "nodemon server.js" 
   },
-  "repository": {
-    "type": "git",
-    "url": "https://git.slimo.v6.rocks/nodejs"
-  },
-  "dependencies": {
-  "cors": "^2.8.5",
-  "express": "^4.21.2",
-  "mongodb": "^6.3.0"
-  },
-
   "keywords": [],
   "author": "",
-  "license": "GPL-3.0-only",
-  "type": "commonjs"
+  "license": "ISC",
+  "dependencies": {
+    "bcrypt": "^5.1.1",         
+    "connect-mongo": "^5.1.0", 
+    "cors": "^2.8.5",
+    "express": "^4.19.2",        
+    "express-session": "^1.18.0", 
+    "mongodb": "^6.5.0"         
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"       
+  }
 }
