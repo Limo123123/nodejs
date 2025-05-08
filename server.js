@@ -44,8 +44,6 @@ const frontendDevUrl = 'https://limo123123.github.io'; // Dein lokaler Live Serv
 if (!sessionSecret) { console.error('!!! FEHLER: Kein SESSION_SECRET! Server stoppt.'); process.exit(1); }
 if (!mongoUri) { console.error('!!! FEHLER: Keine MongoDB URI! Server stoppt.'); process.exit(1); }
 
-app.set('trust proxy', 1);
-
 // --- Middleware ---
 // CORS GANZ OBEN!
 const allowedOrigins = [
@@ -82,11 +80,13 @@ app.use(session({
     store: MongoStore.create({ mongoUrl: mongoUri, dbName: mongoDbName, collectionName: 'sessions', ttl: 14 * 24 * 60 * 60 }),
     cookie: {
         secure: process.env.NODE_ENV === 'production', // Sollte jetzt true sein auf Render
-        httpOnly: true,
+        httpOnly: false,
         maxAge: 14 * 24 * 60 * 60 * 1000, 
         sameSite: 'lax' // Oder 'none', wenn cross-site nötig ist und secure funktioniert
     }
 }));
+
+app.set('trust proxy', 1); // trust first proxy
 
 // --- Datenbank Variablen ---
 let db;
