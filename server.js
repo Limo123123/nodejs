@@ -1,21 +1,51 @@
-// server.js - Ansatz: MongoDB als einzige Quelle der Wahrheit
+// server.js
+const path = require('path'); // Nötig, um den Pfad zur Datei zu bauen
+const dotenv = require('dotenv');
+
+// Lade Umgebungsvariablen aus der spezifischen Datei
+// Render stellt Secret Files unter /etc/secrets/ bereit
+const pathToSecretEnv = '/etc/secrets/secret.env'; 
+
+// Lade die Datei NUR, wenn sie existiert (wichtig für lokale Entwicklung vs. Render)
+// In lokaler Entwicklung könnte die Datei im Root liegen oder gar nicht.
+const localPathToSecretEnv = path.resolve(__dirname, 'secret.env'); // Pfad im Projektverzeichnis
+
+let configPath;
+if (fs.existsSync(pathToSecretEnv)) { // Prüfe zuerst den Render-Pfad
+    configPath = pathToSecretEnv;
+    console.log(`Lade Umgebungsvariablen aus Render Secret File: ${configPath}`);
+} else if (fs.existsSync(localPathToSecretEnv)) { // Dann den lokalen Pfad
+    configPath = localPathToSecretEnv;
+    console.log(`Lade Umgebungsvariablen aus lokaler Datei: ${configPath}`);
+} else {
+     console.warn(`Keine Secret File unter ${pathToSecretEnv} oder ${localPathToSecretEnv} gefunden. Verwende nur System-Umgebungsvariablen.`);
+}
+
+if (configPath) {
+    const result = dotenv.config({ path: configPath });
+    if (result.error) {
+        console.error('Fehler beim Laden der Secret File:', result.error);
+        // Optional: Prozess beenden, wenn Secrets kritisch sind und nicht geladen werden konnten
+        // process.exit(1); 
+    } else {
+        console.log('Secret File erfolgreich geladen.');
+        // Optional: Geladene Variablen anzeigen (nur zum Debuggen, nicht in Produktion!)
+        // console.log('Geladene Variablen (Auszug):', result.parsed); 
+    }
+}
+
+
+// Jetzt erst die anderen Requires und den Rest des Codes...
 const express = require('express');
-const fs = require('fs'); // Nur noch für initiales Seed benötigt
+const fs = require('fs'); // fs wird schon oben für existsSync gebraucht
 const http = require('http');
 const cors = require('cors');
-const { MongoClient } = require('mongodb');
+const { MongoClient, ObjectId } = require('mongodb');
+const bcrypt = require('bcrypt');
+const session = require('express-session');
+const MongoStore = require('connect-mongo');
 
 const app = express();
-const HTTP_PORT = process.env.PORT || 80;
-const SEED_PRODUCTS_FILE = 'products.json'; // <- UMBENENNEN! Diese Datei enthält die Rohdaten ohne IDs etc.
-const TIMEZONE = 'Europe/Berlin'; // Für täglichen Reset
-
-// MongoDB config
-const mongoUser = process.env.MONGO_USER || 'git';
-const mongoPassword = process.env.MONGO_PASSWORD || 'c72JfwytnPVD0YHv';
-const mongoUri = process.env.MONGO_URI || `mongodb+srv://${mongoUser}:${mongoPassword}@limodb.kbacr5r.mongodb.net/?retryWrites=true&w=majority&appName=LimoDB`;
-const mongoDbName = 'shop';
-const mongoCollectionName = 'products';
 
 app.use(cors());
 app.use(express.json());
