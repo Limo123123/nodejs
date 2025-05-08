@@ -39,7 +39,7 @@ const sessionSecret = process.env.SESSION_SECRET;
 const SALT_ROUNDS = 10;
 // Frontend URLs aus Umgebungsvariable holen oder Defaults setzen
 const frontendProdUrl = process.env.FRONTEND_URL; // z.B. https://mein-limazon.onrender.com
-const frontendDevUrl = 'http://127.0.0.1:8080'; // Dein lokaler Live Server Port
+const frontendDevUrl = 'https://limo123123.github.io'; // Dein lokaler Live Server Port
 
 if (!sessionSecret) { console.error('!!! FEHLER: Kein SESSION_SECRET! Server stoppt.'); process.exit(1); }
 if (!mongoUri) { console.error('!!! FEHLER: Keine MongoDB URI! Server stoppt.'); process.exit(1); }
