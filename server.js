@@ -45,11 +45,19 @@ if (!sessionSecret) { console.error('!!! FEHLER: Kein SESSION_SECRET! Server sto
 if (!mongoUri) { console.error('!!! FEHLER: Keine MongoDB URI! Server stoppt.'); process.exit(1); }
 
 // --- Middleware ---
-const allowedOrigins = [frontendDevUrl];
-if (frontendProdUrl) {
-    allowedOrigins.push(frontendProdUrl); // Füge Produktions-URL hinzu, wenn vorhanden
-}
-console.log("Erlaubte CORS Origins:", allowedOrigins);
+// CORS GANZ OBEN!
+const allowedOrigins = [
+    process.env.FRONTEND_URL, 
+    'http://127.0.0.1:8080',
+    'https://limo123123.github.io' 
+].filter(Boolean); 
+
+app.use(cors({
+    origin: allowedOrigins, // Array direkt übergeben
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'], 
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'] 
+}));
 
 app.use(cors({
     origin: function (origin, callback) {
