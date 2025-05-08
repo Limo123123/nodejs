@@ -81,7 +81,7 @@ app.use(session({
     cookie: {
         // Setze secure: true nur in Produktion (HTTPS), oder wenn explizit über Env Var gesetzt
         // Nutze req.protocol (über trust proxy) oder NODE_ENV
-        secure: process.env.NODE_ENV === 'production', 
+        secure: false, 
         httpOnly: true,
         maxAge: 14 * 24 * 60 * 60 * 1000, 
         sameSite: 'lax' // Zurück zu 'Lax' - besserer Standard, funktioniert gut mit korrektem CORS Origin
