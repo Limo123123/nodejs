@@ -1,4 +1,4 @@
-// server.js - Finale Version mit Login, Guthaben etc.
+// server.js - Finale Version mit Login, Guthaben etc. & angepasstem Placeholder/CORS
 const path = require('path');
 const fs = require('fs');
 const dotenv = require('dotenv');
@@ -22,8 +22,8 @@ const session = require('express-session');
 const MongoStore = require('connect-mongo');
 
 const app = express();
-const HTTP_PORT = process.env.PORT || 80;
-const SEED_PRODUCTS_FILE = 'products.json';
+const HTTP_PORT = process.env.PORT || 80; // PORT wird von Render gesetzt
+const SEED_PRODUCTS_FILE = 'products_seed.json'; // Umbenennen! Rohdaten ohne IDs
 const TIMEZONE = 'Europe/Berlin';
 
 // --- Konfiguration aus Umgebungsvariablen ---
@@ -37,31 +37,31 @@ const usersCollectionName = 'users';
 const ordersCollectionName = 'orders';
 const sessionSecret = process.env.SESSION_SECRET;
 const SALT_ROUNDS = 10;
-const allowedOrigin = process.env.FRONTEND_URL || '*';
+// Frontend URLs aus Umgebungsvariable holen oder Defaults setzen
+const frontendProdUrl = process.env.FRONTEND_URL; // z.B. https://mein-limazon.onrender.com
+const frontendDevUrl = 'http://127.0.0.1:8080'; // Dein lokaler Live Server Port
 
-if (!sessionSecret) { console.error('!!! FEHLER: Kein SESSION_SECRET gefunden! Server stoppt.'); process.exit(1); }
-if (!mongoUri) { console.error('!!! FEHLER: Keine MongoDB URI gefunden! Server stoppt.'); process.exit(1); }
+if (!sessionSecret) { console.error('!!! FEHLER: Kein SESSION_SECRET! Server stoppt.'); process.exit(1); }
+if (!mongoUri) { console.error('!!! FEHLER: Keine MongoDB URI! Server stoppt.'); process.exit(1); }
 
-const allowedOrigins = [
-    process.env.FRONTEND_URL, // Deine Produktions-URL aus .env
-    'http://localhost:8080', // Falls du lokalen Server nutzt
-    'http://127.0.0.1:8080',
-    'null' // Manchmal nötig für file://, aber unsicher
-    // Füge hier weitere lokale Test-URLs hinzu, falls nötig
-].filter(Boolean); // Entfernt leere Einträge falls FRONTEND_URL nicht gesetzt ist
+// --- Middleware ---
+const allowedOrigins = [frontendDevUrl];
+if (frontendProdUrl) {
+    allowedOrigins.push(frontendProdUrl); // Füge Produktions-URL hinzu, wenn vorhanden
+}
 console.log("Erlaubte CORS Origins:", allowedOrigins);
 
 app.use(cors({
     origin: function (origin, callback) {
-        // Erlaube Anfragen ohne Origin (wie mobile Apps oder Curl) ODER wenn Origin in der Liste ist
-        if (!origin || allowedOrigins.includes(origin) || allowedOrigins.includes('*')) { // Prüfe auch auf '*' falls noch drin
+        // Erlaube Anfragen ohne Origin (Server-zu-Server, Tools) ODER wenn Origin in der Liste ist
+        if (!origin || allowedOrigins.includes(origin)) {
             callback(null, true);
         } else {
-            console.error("CORS Fehler: Origin nicht erlaubt:", origin);
-            callback(new Error('Nicht durch CORS erlaubt'));
+            console.error(`CORS Fehler: Origin ${origin} nicht erlaubt.`);
+            callback(new Error(`Origin ${origin} nicht durch CORS erlaubt`));
         }
     },
-    credentials: true 
+    credentials: true
 }));
 
 app.use(express.json({ limit: "50mb" }));
@@ -69,7 +69,7 @@ app.use(express.urlencoded({ limit: "50mb", extended: true, parameterLimit: 5000
 app.use(session({
     secret: sessionSecret,
     resave: false, saveUninitialized: false,
-    store: MongoStore.create({ mongoUrl: mongoUri, dbName: mongoDbName, collectionName: 'sessions', ttl: 14 * 24 * 60 * 60 }), // 14 Tage
+    store: MongoStore.create({ mongoUrl: mongoUri, dbName: mongoDbName, collectionName: 'sessions', ttl: 14 * 24 * 60 * 60 }),
     cookie: { secure: process.env.NODE_ENV === 'production', httpOnly: true, maxAge: 14 * 24 * 60 * 60 * 1000, sameSite: 'lax' }
 }));
 
@@ -100,7 +100,10 @@ async function seedDatabaseFromLocalJson() {
         for (const prod of parsedData.products) {
             if (!prod || typeof prod.name !== 'string' || !prod.name.trim()) { console.warn('   ⚠️ Ignoriere fehlerhaften Eintrag in Seed:', prod); continue; }
             try {
-                const newId = await generateUniqueId(); productsToSeed.push({ id: newId, name: prod.name.trim(), price: prod.price && typeof prod.price === 'string' ? prod.price.trim() : "$0.00", image_url: prod.image_url && typeof prod.image_url === 'string' ? prod.image_url.trim() : `https://placeholder.com/150x160?text=${encodeURIComponent(prod.name)}`, stock: 20, default_stock: 20 });
+                const newId = await generateUniqueId();
+                // Verwende via.placeholder.com als Fallback
+                const imageUrl = prod.image_url && typeof prod.image_url === 'string' ? prod.image_url.trim() : `https://via.placeholder.com/150x160.png?text=${encodeURIComponent(prod.name)}`;
+                productsToSeed.push({ id: newId, name: prod.name.trim(), price: prod.price && typeof prod.price === 'string' ? prod.price.trim() : "$0.00", image_url: imageUrl, stock: 20, default_stock: 20 });
             } catch (idError) { console.error(`   Fehler ID-Gen für Seed ${prod.name}: ${idError.message}`); }
         }
         if (productsToSeed.length > 0) {
@@ -141,14 +144,14 @@ MongoClient.connect(mongoUri)
   .catch(err => { console.error('❌ MongoDB-Verbindung fehlgeschlagen:', err); process.exit(1); });
 
 // --- Tägliche Aufgaben ---
-// setInterval(() => { try { const date = new Date(new Date().toLocaleString('en-US', { timeZone: TIMEZONE })); if (date.getHours() === 0 && date.getMinutes() === 0 && date.getSeconds() <= 15) { console.log('⏰ Mitternacht Reset...'); resetProductStock(); } } catch (timeErr) { console.error("Fehler Zeitprüfung Reset:", timeErr); } }, 10000); // Auskommentiert, da Reset manuell
+// setInterval(() => { try { const date = new Date(new Date().toLocaleString('en-US', { timeZone: TIMEZONE })); if (date.getHours() === 0 && date.getMinutes() === 0 && date.getSeconds() <= 15) { console.log('⏰ Mitternacht Reset...'); resetProductStock(); } } catch (timeErr) { console.error("Fehler Zeitprüfung Reset:", timeErr); } }, 10000);
 
 // --- API Endpoints ---
 
 // AUTH
-app.post('/api/auth/register', async (req, res) => { const { username, password } = req.body; if (!username || !password || typeof username !== 'string' || typeof password !== 'string' || username.length < 3 || password.length < 6) { return res.status(400).json({ error: 'User (min 3)/PW (min 6) nötig.' }); } try { const existingUser = await usersCollection.findOne({ username: username.toLowerCase() }); if (existingUser) return res.status(409).json({ error: 'Benutzername vergeben.' }); const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS); const newUser = { username: username.toLowerCase(), password: hashedPassword, balance: 5000.00, isAdmin: false, infinityMoney: false, createdAt: new Date() }; await usersCollection.insertOne(newUser); res.status(201).json({ message: 'Registrierung erfolgreich!' }); } catch (err) { res.status(500).json({ error: 'Fehler bei Registrierung.' }); } });
-app.post('/api/auth/login', async (req, res) => { const { username, password } = req.body; if (!username || !password) return res.status(400).json({ error: 'User/PW nötig.' }); try { const user = await usersCollection.findOne({ username: username.toLowerCase() }); if (!user) return res.status(401).json({ error: 'Login ungültig.' }); const match = await bcrypt.compare(password, user.password); if (match) { req.session.userId = user._id.toString(); req.session.username = user.username; req.session.isAdmin = user.isAdmin; res.json({ message: 'Login erfolgreich!', user: { username: user.username, balance: user.balance, isAdmin: user.isAdmin, infinityMoney: user.infinityMoney } }); } else { res.status(401).json({ error: 'Login ungültig.' }); } } catch (err) { res.status(500).json({ error: 'Login Fehler.' }); } });
-app.post('/api/auth/logout', (req, res) => { if (req.session) { req.session.destroy(err => { if (err) return res.status(500).json({ error: 'Logout fehlgeschlagen.' }); res.clearCookie('connect.sid'); res.json({ message: 'Logout erfolgreich!' }); }); } else { res.json({ message: 'Keine Session.' }); } });
+app.post('/api/auth/register', async (req, res) => { const { username, password } = req.body; if (!username || !password || username.length < 3 || password.length < 6) { return res.status(400).json({ error: 'User (min 3)/PW (min 6) nötig.' }); } try { const existingUser = await usersCollection.findOne({ username: username.toLowerCase() }); if (existingUser) return res.status(409).json({ error: 'Benutzername vergeben.' }); const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS); const newUser = { username: username.toLowerCase(), password: hashedPassword, balance: 5000.00, isAdmin: false, infinityMoney: false, createdAt: new Date() }; await usersCollection.insertOne(newUser); res.status(201).json({ message: 'Registrierung erfolgreich!' }); } catch (err) { res.status(500).json({ error: 'Fehler bei Registrierung.' }); } });
+app.post('/api/auth/login', async (req, res) => { const { username, password, rememberMe } = req.body; if (!username || !password) return res.status(400).json({ error: 'User/PW nötig.' }); try { const user = await usersCollection.findOne({ username: username.toLowerCase() }); if (!user) return res.status(401).json({ error: 'Login ungültig.' }); const match = await bcrypt.compare(password, user.password); if (match) { req.session.userId = user._id.toString(); req.session.username = user.username; req.session.isAdmin = user.isAdmin; if (rememberMe === true) { req.session.cookie.maxAge = 14 * 24 * 60 * 60 * 1000; console.log(`Login: Remember Me aktiv, setze maxAge auf 14 Tage.`); } else { req.session.cookie.maxAge = null; console.log("Login: Remember Me nicht aktiv, setze Session-Cookie."); } res.json({ message: 'Login erfolgreich!', user: { username: user.username, balance: user.balance, isAdmin: user.isAdmin, infinityMoney: user.infinityMoney } }); } else { res.status(401).json({ error: 'Login ungültig.' }); } } catch (err) { res.status(500).json({ error: 'Login Fehler.' }); } });
+app.post('/api/auth/logout', (req, res) => { if (req.session) { req.session.destroy(err => { if (err) return res.status(500).json({ error: 'Logout fehlgeschlagen.' }); res.clearCookie('connect.sid'); res.json({ message: 'Logout erfolgreich!' }); }); } else { res.json({ message: 'Keine aktive Session.' }); } });
 app.get('/api/auth/me', isAuthenticated, async (req, res) => { try { const user = await usersCollection.findOne({ _id: new ObjectId(req.session.userId) }, { projection: { password: 0 } }); if (!user) return res.status(404).json({ error: 'User nicht gefunden.' }); res.json(user); } catch (err) { res.status(500).json({ error: "Fehler Userdaten." }); } });
 
 // ACCOUNT
@@ -172,16 +175,16 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
     console.log(`POST /api/purchase von User ${req.session.username} | Warenkorb:`, req.body.cart); const cart = req.body.cart; if (!Array.isArray(cart) || cart.length === 0) return res.status(400).json({ error: 'Warenkorb leer/ungültig.' });
     const userId = new ObjectId(req.session.userId); let user; let totalOrderValue = 0; const errors = []; const productChecks = []; const productDataForOrder = [];
     try {
-        user = await usersCollection.findOne({ _id: userId }); if (!user) return res.status(401).json({ error: "User nicht gefunden." });
+        user = await usersCollection.findOne({ _id: userId }); if (!user) return res.status(401).json({ error: "Benutzer nicht gefunden." });
         for (const item of cart) { if (!item || typeof item.id !== 'number' || item.id < 100000 || typeof item.quantity !== 'number' || item.quantity <= 0) { errors.push(`Ungültiges Item.`); continue; } productChecks.push( productsCollection.findOne({ id: item.id }).then(pDb => { if (!pDb) { errors.push(`"${item.name || item.id}" nicht gefunden.`); return null; } const stockDb = (typeof pDb.stock === 'number' && pDb.stock >= 0) ? pDb.stock : 0; if (item.quantity > stockDb) { errors.push(`"${pDb.name}": Nur ${stockDb} da.`); return null; } const price = parseFloat((pDb.price || "$0").replace(/[^0-9.]/g,''))||0; totalOrderValue += price * item.quantity; productDataForOrder.push({ productId: pDb.id, name: pDb.name, quantity: item.quantity, price: price, image_url: pDb.image_url }); return { id: item.id, quantityToDecrement: item.quantity }; }).catch(e => { errors.push(`DB-Fehler: ${item.id}`); return null; }) ); }
-        if (errors.length > 0) return res.status(400).json({ error: errors.join('; ') }); // Frühe Fehler
+        if (errors.length > 0 && productChecks.length === 0) return res.status(400).json({ error: errors.join('; ') }); // Nur initiale Fehler
         const results = await Promise.all(productChecks); const validationErrors = errors.concat(results.filter(r => r === null).map(() => "Produktprüfung fehlgeschlagen")); if (validationErrors.length > 0) return res.status(400).json({ error: errors.join('; ') || "Bestandsfehler."});
         const currentBalance = user.balance || 0; if (!user.infinityMoney && currentBalance < totalOrderValue) return res.status(400).json({ error: `Guthaben zu gering. ($${totalOrderValue.toFixed(2)} benötigt)` });
         console.log(`Kauf OK. User: ${user.username}, Total: ${totalOrderValue.toFixed(2)}`); const validUpdates = results.filter(r => r !== null);
         if (validUpdates.length > 0) {
             const bulkProductOps = validUpdates.map(upd => ({ updateOne: { filter: { id: upd.id, stock: { $gte: upd.quantityToDecrement } }, update: { $inc: { stock: -upd.quantityToDecrement } } } })); const productUpdateResult = await productsCollection.bulkWrite(bulkProductOps);
             if (productUpdateResult.modifiedCount !== validUpdates.length) { console.error('Fehler Produkt-Stock Bulk Write!'); return res.status(500).json({ error: 'Konflikt bei Bestandsaktualisierung.' }); }
-            console.log(`   -> Bestand reduziert.`); if (!user.infinityMoney) { const balanceUpdateResult = await usersCollection.updateOne({ _id: userId, balance: { $gte: totalOrderValue } }, { $inc: { balance: -totalOrderValue } }); if (balanceUpdateResult.modifiedCount !== 1) { console.error('Fehler Guthabenabzug!'); return res.status(500).json({ error: 'Konflikt bei Guthaben.' }); } console.log(`   -> Guthaben reduziert.`); } else { console.log(`   -> Guthaben nicht reduziert (Inf).`); }
+            console.log(`   -> Bestand für ${productUpdateResult.modifiedCount} Produkte reduziert.`); if (!user.infinityMoney) { const balanceUpdateResult = await usersCollection.updateOne({ _id: userId, balance: { $gte: totalOrderValue } }, { $inc: { balance: -totalOrderValue } }); if (balanceUpdateResult.modifiedCount !== 1) { console.error('Fehler Guthabenabzug!'); return res.status(500).json({ error: 'Konflikt bei Guthaben.' }); } console.log(`   -> Guthaben reduziert.`); } else { console.log(`   -> Guthaben nicht reduziert (Inf).`); }
             try { const order = { userId: userId, username: user.username, date: new Date(), items: productDataForOrder, total: totalOrderValue }; await ordersCollection.insertOne(order); console.log(`   -> Bestellung ${order._id} gespeichert.`); } catch (orderError) { console.error("Fehler Speicher Bestellung:", orderError); }
         }
         res.json({ message: 'Kauf erfolgreich abgeschlossen!' });
