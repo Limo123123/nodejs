@@ -42,15 +42,28 @@ const allowedOrigin = process.env.FRONTEND_URL || '*';
 if (!sessionSecret) { console.error('!!! FEHLER: Kein SESSION_SECRET gefunden! Server stoppt.'); process.exit(1); }
 if (!mongoUri) { console.error('!!! FEHLER: Keine MongoDB URI gefunden! Server stoppt.'); process.exit(1); }
 
-// --- Middleware ---
-console.log(`CORS Konfiguration: Erlaube Origin: ${allowedOrigin}`);
-// app.use(cors({ origin: allowedOrigin, credentials: true }));
-// CORS-Konfiguration - Explizit alle Origins erlauben (NUR FÜR ENTWICKLUNG/TEST)
-console.warn("!!! CORS Konfiguration: Erlaube Anfragen von ALLEN Origins ('*'). Nur für Entwicklung/Tests verwenden! !!!");
+const allowedOrigins = [
+    process.env.FRONTEND_URL, // Deine Produktions-URL aus .env
+    'http://localhost:8080', // Falls du lokalen Server nutzt
+    'http://127.0.0.1:8080',
+    'null' // Manchmal nötig für file://, aber unsicher
+    // Füge hier weitere lokale Test-URLs hinzu, falls nötig
+].filter(Boolean); // Entfernt leere Einträge falls FRONTEND_URL nicht gesetzt ist
+console.log("Erlaubte CORS Origins:", allowedOrigins);
+
 app.use(cors({
-    origin: '*', // Erlaube jede Domain
-    credentials: true // Wichtig, damit Cookies (für Sessions) gesendet werden können
+    origin: function (origin, callback) {
+        // Erlaube Anfragen ohne Origin (wie mobile Apps oder Curl) ODER wenn Origin in der Liste ist
+        if (!origin || allowedOrigins.includes(origin) || allowedOrigins.includes('*')) { // Prüfe auch auf '*' falls noch drin
+            callback(null, true);
+        } else {
+            console.error("CORS Fehler: Origin nicht erlaubt:", origin);
+            callback(new Error('Nicht durch CORS erlaubt'));
+        }
+    },
+    credentials: true 
 }));
+
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true, parameterLimit: 50000 }));
 app.use(session({
