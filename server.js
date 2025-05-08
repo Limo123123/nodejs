@@ -82,6 +82,7 @@ app.use(session({
         secure: process.env.NODE_ENV === 'production', // Sollte jetzt true sein auf Render
         httpOnly: false,
         maxAge: 14 * 24 * 60 * 60 * 1000, 
+		proxy: true,
         sameSite: 'lax' // Oder 'none', wenn cross-site nötig ist und secure funktioniert
     }
 }));
