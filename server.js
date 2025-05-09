@@ -179,5 +179,90 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
     } catch (err) { console.error('POST /api/purchase Fehler:', err); res.status(500).json({ error: 'Unerwarteter Kauffehler.' }); }
 });
 
+const SELL_COOLDOWN_SECONDS = 60; // 1 Minute Cooldown
+
+app.post('/api/products/sell', isAuthenticated, async (req, res) => {
+    const { productId, sellPrice, quantity } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (typeof productId !== 'number' || productId < 100000 || 
+        typeof sellPrice !== 'number' || sellPrice < 0 ||
+        typeof quantity !== 'number' || quantity <= 0 || !Number.isInteger(quantity)) {
+        return res.status(400).json({ error: 'Ungültige Eingabe: Produkt-ID, Verkaufspreis und Menge (mind. 1) erforderlich.' });
+    }
+
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        if (!user) return res.status(404).json({ error: 'Benutzer nicht gefunden.' });
+
+        const product = await productsCollection.findOne({ id: productId });
+        if (!product) return res.status(404).json({ error: 'Produkt nicht gefunden.' });
+
+        // Cooldown-Prüfung
+        const cooldowns = user.productSellCooldowns || {};
+        const lastAttemptTimestamp = cooldowns[productId];
+        if (lastAttemptTimestamp) {
+            const cooldownEnds = new Date(lastAttemptTimestamp).getTime() + (SELL_COOLDOWN_SECONDS * 1000);
+            if (Date.now() < cooldownEnds) {
+                const timeLeft = Math.ceil((cooldownEnds - Date.now()) / 1000);
+                return res.status(429).json({ error: `Cooldown aktiv. Bitte warte noch ${timeLeft} Sekunden, bevor du dieses Produkt erneut verkaufst.` });
+            }
+        }
+
+        // Verkaufswahrscheinlichkeit berechnen (Beispiel-Logik)
+        // Preis aus String "$X.XX" in Zahl umwandeln
+        const originalPriceNumeric = parseFloat((product.price || "$0").replace(/[^0-9.]/g, '')) || 1; // Mindestens 1, um Division durch 0 zu vermeiden
+        let probability = 1.0; // 100%
+
+        if (sellPrice > originalPriceNumeric) {
+            // Wenn Verkaufspreis höher, Wahrscheinlichkeit sinkt.
+            // Je höher der Aufschlag, desto geringer die Wahrscheinlichkeit.
+            // Beispiel: 2x Preis = 50% Chance, 3x Preis = 33% Chance etc. (vereinfacht)
+            // Man könnte es komplexer machen (z.B. exponentiell fallend)
+            probability = originalPriceNumeric / sellPrice;
+            probability = Math.max(0.05, Math.min(1.0, probability)); // Min 5% Chance, Max 100%
+        } else if (sellPrice < originalPriceNumeric * 0.5) { // Wenn Preis sehr niedrig
+            probability = 1.0; // Hohe Chance bei sehr niedrigem Preis
+        }
+        // Man könnte hier auch product.stock berücksichtigen: Je mehr Stock, desto geringer die System-Kaufbereitschaft
+
+        const wasSold = Math.random() < probability;
+        let message = "";
+
+        if (wasSold) {
+            const earnings = sellPrice * quantity;
+            
+            // Guthaben aktualisieren (wenn nicht infinityMoney)
+            if (!user.infinityMoney) {
+                await usersCollection.updateOne({ _id: userId }, { $inc: { balance: earnings } });
+            }
+            // Produktbestand auf dem Server erhöhen
+            await productsCollection.updateOne({ id: productId }, { $inc: { stock: quantity } });
+            
+            message = `Erfolgreich ${quantity}x "${product.name}" für $${sellPrice.toFixed(2)}/Stk. verkauft! Du erhältst $${earnings.toFixed(2)}. Neuer Bestand: ${product.stock + quantity}.`;
+            console.log(`User ${user.username} verkaufte ${quantity}x Produkt ${productId} für ${earnings}. Probability: ${probability.toFixed(2)}`);
+            
+            // Cooldown-Timestamp für dieses Produkt entfernen (oder erfolgreich-Timestamp setzen)
+            delete cooldowns[productId]; 
+            await usersCollection.updateOne({ _id: userId }, { $set: { productSellCooldowns: cooldowns } });
+
+            res.json({ success: true, message: message, newStock: product.stock + quantity, earnings: earnings, probability: probability });
+        } else {
+            message = `Leider wurde dein Angebot für "${product.name}" (Verkaufspreis: $${sellPrice.toFixed(2)}) diesmal nicht angenommen (Chance war ca. ${(probability * 100).toFixed(0)}%). Versuche es in ${SELL_COOLDOWN_SECONDS} Sekunden erneut.`;
+            console.log(`User ${user.username} Verkaufsversuch für ${quantity}x Produkt ${productId} fehlgeschlagen. Probability: ${probability.toFixed(2)}`);
+            
+            // Cooldown setzen
+            cooldowns[productId] = new Date().toISOString();
+            await usersCollection.updateOne({ _id: userId }, { $set: { productSellCooldowns: cooldowns } });
+
+            res.status(400).json({ success: false, error: message, probability: probability }); // 400 oder einen anderen passenden Status
+        }
+
+    } catch (err) {
+        console.error("Fehler beim /api/products/sell:", err);
+        res.status(500).json({ error: "Serverfehler beim Verkaufsversuch." });
+    }
+});
+
 // Fallback für unbekannte Routen
 app.use((req, res) => { res.status(404).send('Endpoint nicht gefunden'); });
