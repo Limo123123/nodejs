@@ -25,7 +25,7 @@ const app = express();
 app.set('trust proxy', 1); // WICHTIG für secure cookies hinter Proxy
 
 const HTTP_PORT = process.env.PORT || 80;
-const SEED_PRODUCTS_FILE = 'products_seed.json';
+const SEED_PRODUCTS_FILE = 'products.json';
 const TIMEZONE = 'Europe/Berlin';
 
 // --- Konfiguration aus Umgebungsvariablen ---
