@@ -101,10 +101,10 @@ app.use(session({
     saveUninitialized: false,
     store: MongoStore.create({ mongoUrl: mongoUri, dbName: mongoDbName, collectionName: 'sessions', ttl: 14 * 24 * 60 * 60 }), // 14 Tage
     cookie: {
-        secure: process.env.NODE_ENV === 'production', // In Produktion nur HTTPS
+        secure: true, // In Produktion nur HTTPS
         httpOnly: true,
         maxAge: 14 * 24 * 60 * 60 * 1000, // 14 Tage in ms
-        sameSite: 'lax' // 'lax' ist ein guter Standard, 'none' wenn nötig und secure=true
+        sameSite: 'none' // 'lax' ist ein guter Standard, 'none' wenn nötig und secure=true
     }
 }));
 
