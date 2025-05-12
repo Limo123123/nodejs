@@ -20,7 +20,7 @@ const { MongoClient, ObjectId } = require('mongodb');
 const bcrypt = require('bcrypt');
 const session = require('express-session');
 const MongoStore = require('connect-mongo');
-const SELL_COOLDOWN_SECONDS = 60;
+const SELL_COOLDOWN_SECONDS = 59;
 
 const app = express();
 app.set('trust proxy', 1);
