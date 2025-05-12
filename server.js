@@ -250,7 +250,6 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
 });
 
 // SELL Product
-const SELL_COOLDOWN_SECONDS = 60;
 app.post('/api/products/sell', isAuthenticated, async (req, res) => {
     const { productId, sellPrice, quantity } = req.body;
     const userId = new ObjectId(req.session.userId);
