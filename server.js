@@ -21,6 +21,7 @@ const bcrypt = require('bcrypt');
 const session = require('express-session');
 const MongoStore = require('connect-mongo');
 const SELL_COOLDOWN_SECONDS = 59;
+const SELL_COOLDOWN_SECONDS_SHOW = 60;
 
 const app = express();
 app.set('trust proxy', 1);
@@ -176,7 +177,7 @@ app.post('/api/products/sell', isAuthenticated, async (req, res) => {
             responseMessage = `Angebot für "${productToSell.name}" nicht angenommen (Chance ca. ${(probability * 100).toFixed(0)}%).`;
             const cooldownEndTime = new Date(Date.now() + SELL_COOLDOWN_SECONDS * 1000); cooldowns[productId.toString()] = cooldownEndTime.toISOString();
             await usersCollection.updateOne({ _id: userId }, { $set: { productSellCooldowns: cooldowns } });
-            res.status(429).json({ success: false, error: `${responseMessage} Cooldown: ${SELL_COOLDOWN_SECONDS}s.`, probability: probability, cooldownActiveForProduct: productId, cooldownEndsAt: cooldownEndTime.toISOString(), productSellCooldowns: cooldowns });
+            res.status(429).json({ success: false, error: `${responseMessage} Cooldown: ${SELL_COOLDOWN_SECONDS_SHOW}s.`, probability: probability, cooldownActiveForProduct: productId, cooldownEndsAt: cooldownEndTime.toISOString(), productSellCooldowns: cooldowns });
         }
     } catch (err) { console.error("Fehler /api/products/sell:", err); res.status(500).json({ error: "Serverfehler Verkaufsversuch." }); }
 });
