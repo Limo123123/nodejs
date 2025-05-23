@@ -1,4 +1,4 @@
-version: 39
+version: 40
 jobs:
 - name: Generate NPM Package
   jobExecutor: Local-Pi5
@@ -8,7 +8,8 @@ jobs:
     cloneCredential: !DefaultCredential {}
     withLfs: false
     withSubmodules: false
-    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+    condition: SUCCESSFUL
+    optional: false
   - !CommandStep
     name: NodeJS Builder
     runInContainer: true
@@ -17,21 +18,13 @@ jobs:
       shell: bash
       commands: "wget http://ftp.de.debian.org/debian/pool/main/z/zip/zip_3.0-13_arm64.deb\n\ndpkg -i zip_3.0-13_arm64.deb \n\nnpm install\nnpm install cors\nnpm install express\nnpm run build\nls\nrm -rf .git\nzip -r latest.zip .\n"
     useTTY: true
-    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+    condition: SUCCESSFUL
+    optional: false
   - !PublishSiteStep
     name: Publish ZIP
     artifacts: latest.zip
-    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
-  - !CommandStep
-    name: Send Webhook
-    runInContainer: true
-    image: node:20
-    interpreter: !ShellInterpreter
-      shell: bash
-      commands: |
-        curl -X POST http://@secret:IP PI4@:4000/deploy
-    useTTY: true
-    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+    condition: SUCCESSFUL
+    optional: false
   retryCondition: never
   maxRetries: 3
   retryDelay: 30
@@ -43,14 +36,16 @@ jobs:
     cloneCredential: !DefaultCredential {}
     withLfs: false
     withSubmodules: false
-    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+    condition: SUCCESSFUL
+    optional: false
   - !PushRepository
     name: Push to Github
     remoteUrl: https://github.com/Limo123123/nodejs.git
     userName: Limo123123
     passwordSecret: gh
     force: true
-    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+    condition: SUCCESSFUL
+    optional: false
   retryCondition: never
   maxRetries: 3
   retryDelay: 30
