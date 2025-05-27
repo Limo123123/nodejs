@@ -59,8 +59,8 @@ const frontendDevUrlHttps = 'https://127.0.0.1:8080';
 // --- Glücksrad & Token Konstanten ---
 const DEFAULT_STARTING_TOKENS = 10;
 const DEFAULT_WHEEL_CREATION_COST_TOKENS = 5;
-const DOLLAR_TO_TOKEN_RATE = 100;
-const TOKEN_TO_DOLLAR_RATE = 0.008;
+const DOLLAR_TO_TOKEN_RATE = 100000;
+const TOKEN_TO_DOLLAR_RATE = 100;
 
 if (!sessionSecret) { console.error(`${LOG_PREFIX_SERVER} !!! FEHLER: Kein SESSION_SECRET in Umgebungsvariablen! Server stoppt.`); process.exit(1); }
 if (!mongoUri) { console.error(`${LOG_PREFIX_SERVER} !!! FEHLER: Keine MongoDB URI (MONGO_URI oder User/PW/Cluster) in Umgebungsvariablen! Server stoppt.`); process.exit(1); }
@@ -302,11 +302,11 @@ async function logTokenTransaction(userId, type, amount, balanceBefore, balanceA
 
 async function seedTokenCardProducts() {
     const tokenCardsData = [
-        { id: 900010, name: "Token Guthabenkarte 10", price: "$0.10", tokenValue: 10, image_url_suffix: "10_Tokens" },
-        { id: 900050, name: "Token Guthabenkarte 50", price: "$0.50", tokenValue: 50, image_url_suffix: "50_Tokens" },
-        { id: 900100, name: "Token Guthabenkarte 100", price: "$1.00", tokenValue: 100, image_url_suffix: "100_Tokens" },
-        { id: 900500, name: "Token Guthabenkarte 500", price: "$4.75", tokenValue: 500, image_url_suffix: "500_Tokens" },
-        { id: 901000, name: "Token Guthabenkarte 1000", price: "$9.00", tokenValue: 1000, image_url_suffix: "1000_Tokens" },
+        { id: 900010, name: "Token Guthabenkarte 10", price: "$10,000.00", tokenValue: 10, image_url_suffix: "10_Tokens" },
+        { id: 900050, name: "Token Guthabenkarte 50", price: "$25,000.00", tokenValue: 50, image_url_suffix: "50_Tokens" },
+        { id: 900100, name: "Token Guthabenkarte 100", price: "$48,000.00", tokenValue: 100, image_url_suffix: "100_Tokens" },
+        { id: 900500, name: "Token Guthabenkarte 500", price: "$150,000.00", tokenValue: 500, image_url_suffix: "500_Tokens" },
+        { id: 901000, name: "Token Guthabenkarte 1000", price: "$240,000.00", tokenValue: 1000, image_url_suffix: "1000_Tokens" },
     ];
     let seededCount = 0;
     for (const card of tokenCardsData) {
