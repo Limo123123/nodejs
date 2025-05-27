@@ -59,8 +59,8 @@ const frontendDevUrlHttps = 'https://127.0.0.1:8080';
 // --- Glücksrad & Token Konstanten ---
 const DEFAULT_STARTING_TOKENS = 10;
 const DEFAULT_WHEEL_CREATION_COST_TOKENS = 5;
-const DOLLAR_TO_TOKEN_RATE = 100000;
-const TOKEN_TO_DOLLAR_RATE = 100;
+const DOLLAR_TO_TOKEN_RATE = 0.004; // $1 gibt 0.004 Tokens (1 Token ~ $250, ähnlich teuerster Karte)
+const TOKEN_TO_DOLLAR_RATE = 200;    // 1 Token gibt $200 zurück
 
 if (!sessionSecret) { console.error(`${LOG_PREFIX_SERVER} !!! FEHLER: Kein SESSION_SECRET in Umgebungsvariablen! Server stoppt.`); process.exit(1); }
 if (!mongoUri) { console.error(`${LOG_PREFIX_SERVER} !!! FEHLER: Keine MongoDB URI (MONGO_URI oder User/PW/Cluster) in Umgebungsvariablen! Server stoppt.`); process.exit(1); }
