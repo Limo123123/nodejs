@@ -840,6 +840,105 @@ app.get('/api/wheels/:id', async (req, res) => {
         res.json({ wheel });
     } catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler /api/wheels/${wheelIdStr}:`, err); res.status(500).json({ error: "Fehler Laden Glücksrad." }); }
 });
+app.put('/api/wheels/:id', isAuthenticated, async (req, res) => {
+    const wheelIdStr = req.params.id;
+    const userId = new ObjectId(req.session.userId);
+    const username = req.session.username;
+    console.log(`${LOG_PREFIX_SERVER} User ${username} versucht, Rad ID: ${wheelIdStr} zu aktualisieren.`);
+
+    if (!ObjectId.isValid(wheelIdStr)) {
+        return res.status(400).json({ error: "Ungültige Glücksrad-ID." });
+    }
+    const wheelId = new ObjectId(wheelIdStr);
+
+    // Die Daten, die vom Frontend zum Aktualisieren gesendet werden
+    const { name, description, isPublic, segments, spinCost } = req.body;
+
+    // ---- Start: Validierung der Eingabedaten (ähnlich wie bei POST) ----
+    if (name !== undefined && (typeof name !== 'string' || name.length < 3 || name.length > 50)) {
+        return res.status(400).json({ error: "Name (3-50 Zeichen)." });
+    }
+    if (segments !== undefined && (!Array.isArray(segments) || segments.length < 2 || segments.length > 20)) {
+        return res.status(400).json({ error: "Segmente (Min 2, Max 20)." });
+    }
+    if (segments !== undefined) {
+        for (const seg of segments) {
+            if (!seg.text || typeof seg.text !== 'string' || seg.text.length === 0 || seg.text.length > 30) {
+                return res.status(400).json({ error: `Segment Text (1-30 Z.): "${seg.text}".` });
+            }
+            if (!seg.color || !/^#[0-9A-F]{6}$/i.test(seg.color)) {
+                return res.status(400).json({ error: `Segment Farbe ungültig: "${seg.text}". Hex-Code nötig.` });
+            }
+            // valueType und value sollten auch hier validiert oder gesetzt werden, falls Teil des Updates
+            if (seg.valueType && !["text_prize", "free_spin"].includes(seg.valueType)) return res.status(400).json({ error: `Ungültiger valueType "${seg.valueType}". Erlaubt: text_prize, free_spin.` });
+            if (!seg.valueType) seg.valueType = "text_prize"; if (!seg.value) seg.value = seg.text;
+        }
+    }
+    if (spinCost !== undefined && (typeof spinCost !== 'number' || spinCost < 0 || !Number.isInteger(spinCost))) {
+        return res.status(400).json({ error: "Drehkosten (Min 0, Ganzzahl)." });
+    }
+    // creationCost wird beim Update normalerweise nicht geändert.
+    // ---- Ende: Validierung ----
+
+    try {
+        const wheelToUpdate = await wheelsCollection.findOne({ _id: wheelId });
+
+        if (!wheelToUpdate) {
+            return res.status(404).json({ error: "Glücksrad zum Aktualisieren nicht gefunden." });
+        }
+
+        // Berechtigungsprüfung: Nur der Ersteller oder ein Admin darf bearbeiten
+        const currentUser = await usersCollection.findOne({ _id: userId });
+        if (wheelToUpdate.creatorId.toString() !== userId.toString() && !(currentUser && currentUser.isAdmin)) {
+            console.warn(`${LOG_PREFIX_SERVER} User ${username} nicht berechtigt Rad ${wheelIdStr} zu aktualisieren.`);
+            return res.status(403).json({ error: "Nicht berechtigt, dieses Glücksrad zu bearbeiten." });
+        }
+
+        // Erstelle das Update-Objekt nur mit den Feldern, die auch gesendet wurden
+        const updateFields = {};
+        if (name !== undefined) updateFields.name = name;
+        if (description !== undefined) updateFields.description = description;
+        if (isPublic !== undefined) updateFields.isPublic = !!isPublic;
+        if (segments !== undefined) updateFields.segments = segments;
+        if (spinCost !== undefined) updateFields.spinCost = spinCost;
+        updateFields.updatedAt = new Date(); // Immer das Update-Datum setzen
+
+        if (Object.keys(updateFields).length === 1 && updateFields.updatedAt) { // Nur updatedAt würde bedeuten, es gibt nichts zu ändern
+            return res.status(400).json({ error: "Keine Daten zum Aktualisieren gesendet." });
+        }
+
+        const result = await wheelsCollection.updateOne(
+            { _id: wheelId },
+            { $set: updateFields }
+        );
+
+        if (result.matchedCount === 0) {
+            // Sollte durch die wheelToUpdate-Prüfung oben eigentlich nicht passieren
+            return res.status(404).json({ error: "Glücksrad nicht gefunden während Update-Versuch." });
+        }
+        if (result.modifiedCount === 0 && result.matchedCount === 1) {
+             console.log(`${LOG_PREFIX_SERVER} Rad ID ${wheelIdStr} wurde nicht geändert (gleiche Daten).`);
+            // Kein Fehler, aber es wurden keine Daten geändert (vielleicht waren sie identisch)
+            // Sende trotzdem das (unveränderte) Rad zurück oder eine entsprechende Nachricht
+        }
+
+        const updatedWheel = await wheelsCollection.findOne({ _id: wheelId });
+        console.log(`${LOG_PREFIX_SERVER} User ${username} aktualisierte Rad '${updatedWheel.name}' (ID: ${wheelIdStr}).`);
+        
+        // Sende aktuelle User-Daten (insbesondere Tokens) zurück
+        const updatedUser = await usersCollection.findOne({ _id: userId }, { projection: { password: 0 } });
+
+        res.json({
+            message: "Glücksrad erfolgreich aktualisiert!",
+            wheel: updatedWheel,
+            user: { ...updatedUser, tokens: updatedUser.tokens || 0 } // Wichtig für das UI Token Update
+        });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler /api/wheels/${wheelIdStr} (PUT) User ${username}:`, err);
+        res.status(500).json({ error: "Serverfehler beim Aktualisieren des Glücksrads." });
+    }
+});
 app.get('/api/wheels/shared/:shareCode', async (req, res) => {
     const { shareCode } = req.params; console.log(`${LOG_PREFIX_SERVER} /api/wheels/shared/:shareCode aufgerufen für Code: ${shareCode}`);
     if (!shareCode || typeof shareCode !== 'string') return res.status(400).json({ error: "Ungültiger Share-Code." });
