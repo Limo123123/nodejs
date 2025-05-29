@@ -23,6 +23,7 @@ const bcrypt = require('bcrypt');
 const session = require('express-session');
 const MongoStore = require('connect-mongo');
 const { v4: uuidv4 } = require('uuid');
+const axios = require('axios'); // Hinzufügen für HTTP-Anfragen 
 
 const SELL_COOLDOWN_SECONDS = 59;
 const SELL_COOLDOWN_SECONDS_SHOW = 60;
@@ -992,6 +993,241 @@ app.delete('/api/wheels/:id', isAuthenticated, async (req, res) => {
     } catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler /api/wheels/${wheelIdStr} (DELETE) User ${req.session.username}:`, err); res.status(500).json({ error: "Serverfehler Löschen Glücksrad." }); }
 });
 
+// ADMIN DATA MANIPULATION
+app.post('/api/admin/data-manipulation', isAuthenticated, isAdmin, async (req, res) => {
+    const {
+        // Stufe 2: Lokale Admin-Credentials
+        adminUsername,
+        adminPassword,
+        // Stufe 3: OneDev Admin-Credentials
+        oneDevUrl,         // z.B. https://onedev.example.com
+        oneDevAdminUsername,
+        oneDevAdminPassword,
+        // Datenbankoperationen
+        collectionName,
+        operation,
+        query,
+        document,
+        documents,
+        update,
+        options,
+        pipeline
+    } = req.body;
+
+    const logPrefixAdminData = `${LOG_PREFIX_SERVER} [AdminDataManipulation] User: ${req.session.username} ->`;
+    const currentUserFromSession = req.session.username; // Für klare Logs
+
+    // --- STUFE 1: Bereits durch isAuthenticated und isAdmin Middleware abgedeckt ---
+    // req.session.userId ist vorhanden und req.session.isAdmin ist true.
+
+    // --- STUFE 2: Lokale Admin-Credentials (aus dem Body) prüfen ---
+    console.log(`${logPrefixAdminData} Starte Stufe 2: Lokale Admin Re-Authentifizierung für '${adminUsername || "FEHLEND"}' durch '${currentUserFromSession}'.`);
+    if (!adminUsername || !adminPassword) {
+        console.warn(`${logPrefixAdminData} Stufe 2 ABGELEHNT: Lokale Admin-Anmeldedaten (adminUsername, adminPassword) im Body fehlen.`);
+        return res.status(401).json({
+            error: 'Stufe 2: Lokale Admin-Anmeldedaten (adminUsername, adminPassword) im Request-Body erforderlich.',
+            stage: 2
+        });
+    }
+
+    try {
+        const localAdminForReAuth = await usersCollection.findOne({ username: adminUsername.toLowerCase() });
+        if (!localAdminForReAuth) {
+            console.warn(`${logPrefixAdminData} Stufe 2 ABGELEHNT: Lokaler Admin-User '${adminUsername}' für Re-Authentifizierung nicht gefunden.`);
+            return res.status(401).json({ error: 'Stufe 2: Ungültige lokale Admin-Anmeldedaten.', stage: 2 });
+        }
+
+        const passwordMatch = await bcrypt.compare(adminPassword, localAdminForReAuth.password);
+        if (!passwordMatch) {
+            console.warn(`${logPrefixAdminData} Stufe 2 ABGELEHNT: Falsches Passwort für lokalen Admin-User '${adminUsername}'.`);
+            return res.status(401).json({ error: 'Stufe 2: Ungültige lokale Admin-Anmeldedaten.', stage: 2 });
+        }
+
+        // Zusätzliche Sicherheit: Der re-authentifizierte User muss der Session-Admin sein
+        if (localAdminForReAuth._id.toString() !== req.session.userId || !localAdminForReAuth.isAdmin) {
+            console.warn(`${logPrefixAdminData} Stufe 2 ABGELEHNT: Diskrepanz zwischen Session-User und re-authentifiziertem lokalen Admin oder fehlende Admin-Rechte.`);
+            return res.status(403).json({ error: 'Stufe 2: Re-Authentifizierung fehlgeschlagen oder nicht autorisiert.', stage: 2 });
+        }
+        console.log(`${logPrefixAdminData} Stufe 2 ERFOLGREICH: Lokale Admin Re-Authentifizierung für '${adminUsername}' durch '${currentUserFromSession}'.`);
+
+    } catch (reAuthError) {
+        console.error(`${logPrefixAdminData} Stufe 2 FEHLER bei lokaler Admin Re-Authentifizierung:`, reAuthError);
+        return res.status(500).json({ error: 'Serverfehler bei der lokalen Admin-Re-Authentifizierung.', stage: 2 });
+    }
+
+    // --- STUFE 3: OneDev Admin-Credentials prüfen ---
+    console.log(`${logPrefixAdminData} Starte Stufe 3: OneDev Admin Authentifizierung für OneDev-User '${oneDevAdminUsername || "FEHLEND"}' (URL: ${oneDevUrl || "FEHLEND"}).`);
+    if (!oneDevUrl || !oneDevAdminUsername || !oneDevAdminPassword) {
+        console.warn(`${logPrefixAdminData} Stufe 3 ABGELEHNT: OneDev-Anmeldedaten (oneDevUrl, oneDevAdminUsername, oneDevAdminPassword) im Body fehlen.`);
+        return res.status(401).json({
+            error: 'Stufe 3: OneDev-Anmeldedaten (oneDevUrl, oneDevAdminUsername, oneDevAdminPassword) im Request-Body erforderlich.',
+            stage: 3
+        });
+    }
+
+    // Validierung der OneDev URL (einfache Prüfung)
+    if (!oneDevUrl.startsWith('http://') && !oneDevUrl.startsWith('https://')) {
+        console.warn(`${logPrefixAdminData} Stufe 3 ABGELEHNT: Ungültige OneDev URL: ${oneDevUrl}`);
+        return res.status(400).json({ error: 'Stufe 3: Ungültiges Format für oneDevUrl (muss mit http:// oder https:// beginnen).', stage: 3 });
+    }
+    // In Produktion solltest du eventuell nur HTTPS erlauben:
+    // if (process.env.NODE_ENV === 'production' && !oneDevUrl.startsWith('https://')) {
+    //     return res.status(400).json({ error: 'Stufe 3: In Produktion ist nur HTTPS für oneDevUrl erlaubt.', stage: 3 });
+    // }
+
+    try {
+        const oneDevApiUserMeEndpoint = `${oneDevUrl.replace(/\/$/, '')}/api/users/me`;
+
+        console.log(`${logPrefixAdminData} Stufe 3: Versuche OneDev API Call an ${oneDevApiUserMeEndpoint} für User '${oneDevAdminUsername}'.`);
+
+        const response = await axios.get(oneDevApiUserMeEndpoint, {
+            auth: { // Basic Authentication
+                username: oneDevAdminUsername,
+                password: oneDevAdminPassword
+            },
+            timeout: 10000 // 10 Sekunden Timeout
+        });
+
+        const oneDevUser = response.data;
+
+        // Prüfung:
+        // 1. Der angegebene 'oneDevAdminUsername' MUSS "admin" sein (Groß-/Kleinschreibung ignoriert).
+        // 2. Der 'name' aus der API-Antwort MUSS mit dem angegebenen 'oneDevAdminUsername' übereinstimmen.
+        //    Dies stellt sicher, dass die Authentifizierung für den korrekten User erfolgt ist.
+        if (oneDevAdminUsername.toLowerCase() !== "admin" || !oneDevUser || oneDevUser.name !== oneDevAdminUsername) {
+            console.warn(`${logPrefixAdminData} Stufe 3 ABGELEHNT: OneDev-User ist nicht der erwartete 'admin' oder API-Antwort passt nicht. Angegeben: '${oneDevAdminUsername}', API-Antwort-Name: '${oneDevUser ? oneDevUser.name : "N/A"}'.`);
+            return res.status(403).json({
+                error: `Stufe 3: Authentifizierung fehlgeschlagen oder der angegebene OneDev-Benutzer ('${oneDevAdminUsername}') ist nicht der erwartete Administrator ('admin').`,
+                stage: 3
+            });
+        }
+
+        console.log(`${logPrefixAdminData} Stufe 3 ERFOLGREICH: OneDev-User '${oneDevAdminUsername}' erfolgreich als 'admin' auf ${oneDevUrl} authentifiziert.`);
+
+    } catch (oneDevError) {
+        if (oneDevError.response) {
+            // OneDev Server hat geantwortet, aber mit Fehlerstatus (z.B. 401 Unauthorized, 403 Forbidden)
+            console.error(`${logPrefixAdminData} Stufe 3 FEHLER: OneDev API Fehler (Status ${oneDevError.response.status}):`, oneDevError.response.data);
+            if (oneDevError.response.status === 401) {
+                 return res.status(401).json({ error: 'Stufe 3: Ungültige OneDev-Anmeldedaten.', stage: 3, details: oneDevError.response.data });
+            }
+            return res.status(oneDevError.response.status || 500).json({
+                error: 'Stufe 3: Fehler bei der Kommunikation mit dem OneDev-Server.',
+                stage: 3,
+                details: oneDevError.response.data
+            });
+        } else if (oneDevError.request) {
+            // Anfrage wurde gemacht, aber keine Antwort erhalten (Netzwerkproblem, OneDev nicht erreichbar)
+            console.error(`${logPrefixAdminData} Stufe 3 FEHLER: Keine Antwort vom OneDev-Server:`, oneDevError.message);
+            return res.status(503).json({ error: 'Stufe 3: OneDev-Server nicht erreichbar.', stage: 3, details: oneDevError.message });
+        } else {
+            // Anderer Fehler beim Setup der Anfrage
+            console.error(`${logPrefixAdminData} Stufe 3 FEHLER: Fehler beim Vorbereiten der OneDev-Anfrage:`, oneDevError.message);
+            return res.status(500).json({ error: 'Stufe 3: Interner Fehler beim Versuch, OneDev zu kontaktieren.', stage: 3, details: oneDevError.message });
+        }
+    }
+
+    // --- DATENBANKOPERATION (wenn alle Stufen erfolgreich waren) ---
+    if (!collectionName || !operation) {
+        return res.status(400).json({ error: '`collectionName` und `operation` sind erforderlich.' });
+    }
+
+    const allowedCollections = [
+        productsCollectionName, usersCollectionName, ordersCollectionName,
+        inventoriesCollectionName, wheelsCollectionName, tokenCodesCollectionName,
+        tokenTransactionsCollectionName, 'sessions'
+    ];
+
+    if (!allowedCollections.includes(collectionName)) {
+        console.warn(`${logPrefixAdminData} Zugriff auf nicht erlaubte Collection: ${collectionName}`);
+        return res.status(400).json({ error: `Zugriff auf Collection '${collectionName}' nicht erlaubt.` });
+    }
+
+    const collection = db.collection(collectionName);
+    let result;
+
+    const sanitizeQueryIds = (q) => { /* ... (deine bestehende sanitizeQueryIds Funktion) ... */
+        if (!q) return q;
+        const sanitized = { ...q };
+        if (sanitized._id && typeof sanitized._id === 'string' && ObjectId.isValid(sanitized._id)) {
+            sanitized._id = new ObjectId(sanitized._id);
+        }
+        if (sanitized.userId && typeof sanitized.userId === 'string' && ObjectId.isValid(sanitized.userId)) {
+            if (['orders', 'userInventories', 'wheels', 'tokenCodes', 'tokenTransactions'].includes(collectionName)) {
+                 sanitized.userId = new ObjectId(sanitized.userId);
+            }
+        }
+        if (sanitized.productId && typeof sanitized.productId === 'number' && collectionName === inventoriesCollectionName) {}
+        if (sanitized.id && typeof sanitized.id === 'number' && collectionName === productsCollectionName) {}
+        return sanitized;
+    };
+
+    const sanitizedQuery = sanitizeQueryIds(query);
+    const sanitizedOptions = options || {};
+    if (operation === 'find' && !sanitizedOptions.limit) {
+        sanitizedOptions.limit = 100;
+    }
+    if (collectionName === usersCollectionName && (operation === 'find' || operation === 'findOne')) {
+        if (!sanitizedOptions.projection) sanitizedOptions.projection = { password: 0 };
+        else if (sanitizedOptions.projection.password === undefined) sanitizedOptions.projection.password = 0;
+    }
+
+    console.log(`${logPrefixAdminData} Führe Datenbankoperation aus: ${operation} auf Collection: ${collectionName}`);
+
+    try {
+        switch (operation) {
+            // ... (deine bestehenden case-Anweisungen für Datenbankoperationen) ...
+            case 'findOne':
+                if (!sanitizedQuery) return res.status(400).json({ error: '`query` ist für `findOne` erforderlich.' });
+                result = await collection.findOne(sanitizedQuery, sanitizedOptions);
+                break;
+            case 'find':
+                if (!sanitizedQuery) return res.status(400).json({ error: '`query` ist für `find` erforderlich.' });
+                result = await collection.find(sanitizedQuery, sanitizedOptions).toArray();
+                break;
+            case 'insertOne':
+                if (!document) return res.status(400).json({ error: '`document` ist für `insertOne` erforderlich.' });
+                result = await collection.insertOne(document, sanitizedOptions);
+                break;
+            case 'insertMany':
+                if (!documents || !Array.isArray(documents) || documents.length === 0) return res.status(400).json({ error: '`documents` (Array) ist für `insertMany` erforderlich.' });
+                result = await collection.insertMany(documents, sanitizedOptions);
+                break;
+            case 'updateOne':
+                if (!sanitizedQuery || !update) return res.status(400).json({ error: '`query` und `update` sind für `updateOne` erforderlich.' });
+                result = await collection.updateOne(sanitizedQuery, update, sanitizedOptions);
+                break;
+            case 'updateMany':
+                if (!sanitizedQuery || !update) return res.status(400).json({ error: '`query` und `update` sind für `updateMany` erforderlich.' });
+                result = await collection.updateMany(sanitizedQuery, update, sanitizedOptions);
+                break;
+            case 'deleteOne':
+                if (!sanitizedQuery) return res.status(400).json({ error: '`query` ist für `deleteOne` erforderlich.' });
+                result = await collection.deleteOne(sanitizedQuery, sanitizedOptions);
+                break;
+            case 'deleteMany':
+                if (!sanitizedQuery) return res.status(400).json({ error: '`query` ist für `deleteMany` erforderlich.' });
+                result = await collection.deleteMany(sanitizedQuery, sanitizedOptions);
+                break;
+            case 'countDocuments':
+                result = await collection.countDocuments(sanitizedQuery || {}, sanitizedOptions);
+                break;
+            case 'aggregate':
+                if (!pipeline || !Array.isArray(pipeline)) return res.status(400).json({ error: '`pipeline` (Array) ist für `aggregate` erforderlich.' });
+                result = await collection.aggregate(pipeline, sanitizedOptions).toArray();
+                break;
+            default:
+                console.warn(`${logPrefixAdminData} Unbekannte Datenbankoperation: ${operation}`);
+                return res.status(400).json({ error: `Unbekannte Datenbankoperation: ${operation}` });
+        }
+        console.log(`${logPrefixAdminData} Datenbankoperation ${operation} erfolgreich ausgeführt.`);
+        res.json({ success: true, operation, collectionName, result });
+
+    } catch (dbError) {
+        console.error(`${logPrefixAdminData} Fehler bei Datenbankoperation '${operation}' auf '${collectionName}':`, dbError);
+        res.status(500).json({ error: `Fehler bei der Datenbankoperation '${operation}' auf Collection '${collectionName}'.`, details: dbError.message });
+    }
+});
 // Fallback für unbekannte Routen
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
