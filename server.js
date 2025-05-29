@@ -791,7 +791,7 @@ app.post('/api/wheels', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId); const username = req.session.username;
     console.log(`${LOG_PREFIX_SERVER} User ${username} erstellt Glücksrad: ${name}`);
     if (!name || typeof name !== 'string' || name.length < 3 || name.length > 50) return res.status(400).json({ error: "Name (3-50 Zeichen)." });
-    if (!Array.isArray(segments) || segments.length < 2 || segments.length > 20) return res.status(400).json({ error: "Segmente (Min 2, Max 20)." });
+    if (!Array.isArray(segments) || segments.length < 2 || segments.length > 50) return res.status(400).json({ error: "Segmente (Min 2, Max 20)." });
     for (const seg of segments) {
         if (!seg.text || typeof seg.text !== 'string' || seg.text.length === 0 || seg.text.length > 30) return res.status(400).json({ error: `Segment Text (1-30 Z.): "${seg.text}".` });
         if (!seg.color || !/^#[0-9A-F]{6}$/i.test(seg.color)) return res.status(400).json({ error: `Segment Farbe ungültig: "${seg.text}". Hex-Code nötig.` });
