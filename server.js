@@ -1132,7 +1132,7 @@ async function adminDataManipulationEndpoint(req, res) {
     // }
     return sanitized;
 	};
-    let finalQuery = sanitizeQueryIds(query); // Beginne mit der vom User gesendeten Query
+    const sanitizedOptions = options && typeof options === 'object' ? { ...options } : {};
 
     // Serverseitige `searchTerm` Logik für 'find' Operation
     if (operation === 'find' && searchTerm && typeof searchTerm === 'string' && searchTerm.trim() !== '') {
