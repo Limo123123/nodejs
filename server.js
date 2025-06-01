@@ -1169,7 +1169,7 @@ async function adminDataManipulationEndpoint(req, res) {
         }
     }
 
-	let sanitizedOptions.limit = 100;
+	let sanitizedOptions = 100;
     if (operation === 'find' && !sanitizedOptions.limit) { // Default-Limit für find, falls nicht gesetzt
         sanitizedOptions.limit = 100;
     }
