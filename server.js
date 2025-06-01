@@ -1120,26 +1120,8 @@ async function adminDataManipulationEndpoint(req, res) {
     const currentDbCollection = db.collection(collectionName);
     let dbResult;
 
-    const sanitizeQueryIds = (q) => {
-        if (!q || typeof q !== 'object') return {}; // Immer ein Objekt zurückgeben, auch wenn q null, undefined oder kein Objekt ist
-        const sanitized = { ...q }; // Kopie erstellen
-        // _id Konvertierung
-        if (sanitized._id && typeof sanitized._id === 'string' && ObjectId.isValid(sanitized._id)) {
-            sanitized._id = new ObjectId(sanitized._id);
-        }
-        // userId Konvertierung für bestimmte Collections
-        if (sanitized.userId && typeof sanitized.userId === 'string' && ObjectId.isValid(sanitized.userId)) {
-            if ([ordersCollectionName, inventoriesCollectionName, wheelsCollectionName, tokenCodesCollectionName, tokenTransactionsCollectionName].includes(collectionName)) {
-                 sanitized.userId = new ObjectId(sanitized.userId);
-            }
-        }
-        // Numerische IDs (wie in 'products') bleiben Zahlen und werden nicht konvertiert,
-        // außer sie kommen als String an und müssen geparst werden (hier nicht implementiert, Frontend sollte Zahlen senden).
-        return sanitized;
-    };
-
-    let finalQuery = sanitizeQueryIds(query); // Beginne mit der vom User gesendeten Query
-    const sanitizeQueryIds = (q) => {
+    // In server.js -> sanitizeQueryIds
+	const sanitizeQueryIds = (q) => {
     if (!q || typeof q !== 'object') return {};
     const sanitized = { ...q };
     // _id Konvertierung
@@ -1158,7 +1140,8 @@ async function adminDataManipulationEndpoint(req, res) {
     //    sanitized.id = parseInt(sanitized.id);
     // }
     return sanitized;
-    };
+	};
+    let finalQuery = sanitizeQueryIds(query); // Beginne mit der vom User gesendeten Query
 
     // Serverseitige `searchTerm` Logik für 'find' Operation
     if (operation === 'find' && searchTerm && typeof searchTerm === 'string' && searchTerm.trim() !== '') {
