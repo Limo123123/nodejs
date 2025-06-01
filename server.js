@@ -1168,8 +1168,6 @@ async function adminDataManipulationEndpoint(req, res) {
             console.log(`${logPrefixAdminData} Keine Standard-Suchfelder für Collection '${collectionName}' für searchTerm definiert. Suchbegriff ignoriert.`);
         }
     }
-
-	let sanitizedOptions = 100;
     if (operation === 'find' && !sanitizedOptions.limit) { // Default-Limit für find, falls nicht gesetzt
         sanitizedOptions.limit = 100;
     }
