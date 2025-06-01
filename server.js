@@ -1139,7 +1139,26 @@ async function adminDataManipulationEndpoint(req, res) {
     };
 
     let finalQuery = sanitizeQueryIds(query); // Beginne mit der vom User gesendeten Query
-    const sanitizedOptions = options && typeof options === 'object' ? { ...options } : {}; // Optionen sicher kopieren
+    const sanitizeQueryIds = (q) => {
+    if (!q || typeof q !== 'object') return {};
+    const sanitized = { ...q };
+    // _id Konvertierung
+    if (sanitized._id && typeof sanitized._id === 'string' && ObjectId.isValid(sanitized._id)) { // HIER PRÜFT DAS BACKEND
+        sanitized._id = new ObjectId(sanitized._id);
+    }
+    // userId Konvertierung
+    if (sanitized.userId && typeof sanitized.userId === 'string' && ObjectId.isValid(sanitized.userId)) { // HIER PRÜFT DAS BACKEND
+        if ([ordersCollectionName, inventoriesCollectionName, wheelsCollectionName, tokenCodesCollectionName, tokenTransactionsCollectionName].includes(collectionName)) {
+             sanitized.userId = new ObjectId(sanitized.userId);
+        }
+    }
+    // Produkt-IDs sind Zahlen und werden nicht in ObjectId konvertiert.
+    // Wenn 'id' als String ankommt und eine Zahl sein soll, müsste man es hier parsen:
+    // if (collectionName === productsCollectionName && sanitized.id && typeof sanitized.id === 'string' && !isNaN(parseInt(sanitized.id))) {
+    //    sanitized.id = parseInt(sanitized.id);
+    // }
+    return sanitized;
+    };
 
     // Serverseitige `searchTerm` Logik für 'find' Operation
     if (operation === 'find' && searchTerm && typeof searchTerm === 'string' && searchTerm.trim() !== '') {
