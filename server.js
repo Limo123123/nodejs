@@ -1076,7 +1076,7 @@ app.post('/api/admin/data-manipulation', isAuthenticated, isAdmin, async (req, r
     // }
 
     try {
-        const oneDevApiUserMeEndpoint = `${oneDevUrl.replace(/\/$/, '')}/api/users/me`;
+        const oneDevApiUserMeEndpoint = `${oneDevUrl.replace(/\/$/, '')}/~api/users/me`;
 
         console.log(`${logPrefixAdminData} Stufe 3: Versuche OneDev API Call an ${oneDevApiUserMeEndpoint} für User '${oneDevAdminUsername}'.`);
 
