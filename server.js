@@ -993,15 +993,6 @@ app.delete('/api/wheels/:id', isAuthenticated, async (req, res) => {
     } catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler /api/wheels/${wheelIdStr} (DELETE) User ${req.session.username}:`, err); res.status(500).json({ error: "Serverfehler Löschen Glücksrad." }); }
 });
 
-// In server.js
-
-// Stelle sicher, dass deine Collection-Namen als Konstanten verfügbar sind,
-// wenn du sie unten in collectionsTextSearchFields verwendest.
-// Beispiele:
-// const productsCollectionName = 'products';
-// const usersCollectionName = 'users';
-// ...
-
 // === BEGINN ADMIN DATA MANIPULATION ENDPUNKT LOGIK ===
 async function adminDataManipulationEndpoint(req, res) {
     const {
@@ -1178,7 +1169,7 @@ async function adminDataManipulationEndpoint(req, res) {
         }
     }
 
-
+	let sanitizedOptions.limit = 100;
     if (operation === 'find' && !sanitizedOptions.limit) { // Default-Limit für find, falls nicht gesetzt
         sanitizedOptions.limit = 100;
     }
