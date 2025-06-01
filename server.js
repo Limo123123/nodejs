@@ -1088,145 +1088,137 @@ async function adminDataManipulationEndpoint(req, res) {
         }
     }
 
-    // --- DATENBANKOPERATION ---
-    if (!collectionName || !operation) {
-        return res.status(400).json({ error: '`collectionName` und `operation` sind erforderlich.' });
-    }
-
-    // Verwende deine definierten Collection-Namen Konstanten hier
-    const allowedCollections = [
-        productsCollectionName, usersCollectionName, ordersCollectionName,
-        inventoriesCollectionName, wheelsCollectionName, tokenCodesCollectionName,
-        tokenTransactionsCollectionName, 'sessions'
-    ];
-    if (!allowedCollections.includes(collectionName)) {
-        console.warn(`${logPrefixAdminData} Zugriff auf nicht erlaubte Collection: ${collectionName}`);
-        return res.status(400).json({ error: `Zugriff auf Collection '${collectionName}' nicht erlaubt.` });
-    }
-
-    if (!db) {
-        console.error(`${logPrefixAdminData} Datenbank (db) nicht initialisiert!`);
-        return res.status(500).json({ error: "Server-Konfigurationsfehler: Datenbank nicht bereit." });
-    }
-    const currentDbCollection = db.collection(collectionName);
+       const currentDbCollection = db.collection(collectionName);
     let dbResult;
 
-    // In server.js -> sanitizeQueryIds
-	const sanitizeQueryIds = (q) => {
-    if (!q || typeof q !== 'object') return {};
-    const sanitized = { ...q };
-    // _id Konvertierung
-    if (sanitized._id && typeof sanitized._id === 'string' && ObjectId.isValid(sanitized._id)) { // HIER PRÜFT DAS BACKEND
-        sanitized._id = new ObjectId(sanitized._id);
-    }
-    // userId Konvertierung
-    if (sanitized.userId && typeof sanitized.userId === 'string' && ObjectId.isValid(sanitized.userId)) { // HIER PRÜFT DAS BACKEND
-        if ([ordersCollectionName, inventoriesCollectionName, wheelsCollectionName, tokenCodesCollectionName, tokenTransactionsCollectionName].includes(collectionName)) {
-             sanitized.userId = new ObjectId(sanitized.userId);
+    const sanitizeQueryIds = (q) => {
+        if (!q || typeof q !== 'object') return {};
+        const sanitized = { ...q };
+        if (sanitized._id && typeof sanitized._id === 'string' && ObjectId.isValid(sanitized._id)) {
+            sanitized._id = new ObjectId(sanitized._id);
+        }
+        if (sanitized.userId && typeof sanitized.userId === 'string' && ObjectId.isValid(sanitized.userId)) {
+            if ([ordersCollectionName, inventoriesCollectionName, wheelsCollectionName, tokenCodesCollectionName, tokenTransactionsCollectionName].includes(collectionName)) {
+                 sanitized.userId = new ObjectId(sanitized.userId);
+            }
+        }
+        return sanitized;
+    };
+
+    // 1. Initialisiere die Basis-Query vom User
+    let finalQuery = sanitizeQueryIds(query);
+
+    // 2. Initialisiere die Basis-Optionen vom User und bereinige sie
+    const userProvidedOptions = options && typeof options === 'object' ? { ...options } : {};
+    const sanitizedOptionsForDB = { ...userProvidedOptions }; // Kopie zum Bearbeiten
+
+    // Write Concern ('w') bereinigen/validieren
+    if (sanitizedOptionsForDB.hasOwnProperty('w')) {
+        const writeConcernValue = sanitizedOptionsForDB.w;
+        console.warn(`${logPrefixAdminData} User hat Write Concern Option 'w: ${writeConcernValue}' gesendet.`);
+        let isValidWriteConcern = false;
+        if (typeof writeConcernValue === 'number' && writeConcernValue >= 0 && writeConcernValue <= 50) {
+            isValidWriteConcern = true;
+        } else if (typeof writeConcernValue === 'string' && writeConcernValue.toLowerCase() === 'majority') {
+            isValidWriteConcern = true;
+        }
+        if (!isValidWriteConcern) {
+            console.warn(`${logPrefixAdminData} Ungültiger oder nicht unterstützter 'w' Wert '${writeConcernValue}' wird entfernt.`);
+            delete sanitizedOptionsForDB.w;
+        } else {
+            console.log(`${logPrefixAdminData} Gültiger 'w' Wert '${writeConcernValue}' wird beibehalten.`);
         }
     }
-    // Produkt-IDs sind Zahlen und werden nicht in ObjectId konvertiert.
-    // Wenn 'id' als String ankommt und eine Zahl sein soll, müsste man es hier parsen:
-    // if (collectionName === productsCollectionName && sanitized.id && typeof sanitized.id === 'string' && !isNaN(parseInt(sanitized.id))) {
-    //    sanitized.id = parseInt(sanitized.id);
-    // }
-    return sanitized;
-	};
-    const sanitizedOptions = options && typeof options === 'object' ? { ...options } : {};
 
-    // Serverseitige `searchTerm` Logik für 'find' Operation
+    // 3. Wende serverseitige `searchTerm` Logik an, die `finalQuery` modifizieren kann
     if (operation === 'find' && searchTerm && typeof searchTerm === 'string' && searchTerm.trim() !== '') {
         const searchTermCleaned = searchTerm.trim();
-        // Definiere, welche Felder pro Collection durchsucht werden sollen
         const collectionsTextSearchFields = {
-            [productsCollectionName]: ['name', 'description'], // id ist numerisch, RegEx darauf ist schwierig
-            [usersCollectionName]: ['username', 'fullName', 'email'], // Email auch durchsuchen
-            [ordersCollectionName]: ['username', 'items.name'], // In verschachtelten Feldern suchen
+            [productsCollectionName]: ['name', 'description'],
+            [usersCollectionName]: ['username', 'fullName', 'email'],
+            [ordersCollectionName]: ['username', 'items.name'],
             [wheelsCollectionName]: ['name', 'description', 'creatorUsername'],
-            // Füge hier weitere Collections und deren relevante Text-Suchfelder hinzu
         };
         const fieldsToSearch = collectionsTextSearchFields[collectionName];
-
-        if (fieldsToSearch && fieldsToSearch.length > 0) {
-            // Wenn die `finalQuery` vom User leer ist oder nur Optionen enthält,
-            // dann wende den searchTerm an. Sonst hat die User-Query Vorrang.
-            if (Object.keys(finalQuery).length === 0) {
-                const orConditions = fieldsToSearch.map(field => {
-                    // Für numerische ID-Felder, die als Text gesucht werden (z.B. Produkt-ID)
-                    if (field === 'id' && collectionName === productsCollectionName && !isNaN(parseInt(searchTermCleaned))) {
-                        return { [field]: parseInt(searchTermCleaned) };
-                    }
-                    // Für normale Textfelder
-                    return { [field]: { $regex: searchTermCleaned, $options: 'i' } }; // Case-insensitive RegEx
-                });
-                finalQuery = { $or: orConditions };
-                console.log(`${logPrefixAdminData} Nutze serverseitige Textsuche für: "${searchTermCleaned}" auf Feldern ${fieldsToSearch.join(', ')}.`);
-            } else {
-                console.log(`${logPrefixAdminData} Spezifische Query vom User vorhanden, serverseitiger searchTerm wird ignoriert.`);
-            }
+        // Wende searchTerm nur an, wenn die ursprüngliche User-Query (finalQuery) leer war
+        if (fieldsToSearch && fieldsToSearch.length > 0 && Object.keys(finalQuery).length === 0) {
+            const orConditions = fieldsToSearch.map(field => {
+                if (field === 'id' && collectionName === productsCollectionName && !isNaN(parseInt(searchTermCleaned))) {
+                    return { [field]: parseInt(searchTermCleaned) };
+                }
+                return { [field]: { $regex: searchTermCleaned, $options: 'i' } };
+            });
+            finalQuery = { $or: orConditions }; // finalQuery wird hier überschrieben/modifiziert
+            console.log(`${logPrefixAdminData} Nutze serverseitige Textsuche für: "${searchTermCleaned}". Modifizierte finalQuery: ${JSON.stringify(finalQuery)}`);
+        } else if (Object.keys(finalQuery).length > 0) {
+            console.log(`${logPrefixAdminData} Spezifische Query vom User vorhanden (${JSON.stringify(finalQuery)}), serverseitiger searchTerm wird ignoriert.`);
         } else {
-            console.log(`${logPrefixAdminData} Keine Standard-Suchfelder für Collection '${collectionName}' für searchTerm definiert. Suchbegriff ignoriert.`);
+             console.log(`${logPrefixAdminData} Keine Suchfelder für Collection ${collectionName} definiert oder searchTerm-Logik nicht anwendbar.`);
         }
     }
-    if (operation === 'find' && !sanitizedOptions.limit) { // Default-Limit für find, falls nicht gesetzt
-        sanitizedOptions.limit = 100;
+
+    // 4. Standardoptionen wie limit und projection auf `sanitizedOptionsForDB` anwenden
+    if (operation === 'find' && !sanitizedOptionsForDB.hasOwnProperty('limit')) { // Prüfe, ob limit schon existiert
+        sanitizedOptionsForDB.limit = 100;
     }
-    if (collectionName === usersCollectionName && (operation === 'find' || operation === 'findOne')) { // Passwort-Schutz
-        if (!sanitizedOptions.projection) sanitizedOptions.projection = { password: 0 };
-        else if (sanitizedOptions.projection.password === undefined) sanitizedOptions.projection.password = 0;
+    if (collectionName === usersCollectionName && (operation === 'find' || operation === 'findOne')) {
+        if (!sanitizedOptionsForDB.projection) {
+            sanitizedOptionsForDB.projection = { password: 0 };
+        } else if (typeof sanitizedOptionsForDB.projection === 'object' && sanitizedOptionsForDB.projection.password === undefined) {
+            sanitizedOptionsForDB.projection.password = 0;
+        }
     }
 
-    console.log(`${logPrefixAdminData} Führe Datenbankoperation aus: ${operation} auf Collection: ${collectionName}. Query: ${JSON.stringify(finalQuery)} Options: ${JSON.stringify(sanitizedOptions)}`);
+    // Logge die endgültige Query und die bereinigten Optionen
+    console.log(`${logPrefixAdminData} Führe Datenbankoperation aus: ${operation} auf Collection: ${collectionName}. Query: ${JSON.stringify(finalQuery)} Opts: ${JSON.stringify(sanitizedOptionsForDB)}`);
+    
     try {
         switch (operation) {
             case 'findOne':
                 if (Object.keys(finalQuery).length === 0) return res.status(400).json({ error: '`query` (nicht leer) ist für `findOne` erforderlich.' });
-                dbResult = await currentDbCollection.findOne(finalQuery, sanitizedOptions);
+                dbResult = await currentDbCollection.findOne(finalQuery, sanitizedOptionsForDB);
                 break;
             case 'find':
-                dbResult = await currentDbCollection.find(finalQuery, sanitizedOptions).toArray();
+                dbResult = await currentDbCollection.find(finalQuery, sanitizedOptionsForDB).toArray();
                 break;
             case 'insertOne':
                 if (!document || typeof document !== 'object' || Object.keys(document).length === 0) return res.status(400).json({ error: '`document` (nicht leeres Objekt) ist für `insertOne` erforderlich.' });
-                dbResult = await currentDbCollection.insertOne(document, sanitizedOptions);
+                dbResult = await currentDbCollection.insertOne(document, sanitizedOptionsForDB);
                 break;
             case 'insertMany':
                 if (!documents || !Array.isArray(documents) || documents.length === 0) return res.status(400).json({ error: '`documents` (nicht leeres Array) ist für `insertMany` erforderlich.' });
-                dbResult = await currentDbCollection.insertMany(documents, sanitizedOptions);
+                dbResult = await currentDbCollection.insertMany(documents, sanitizedOptionsForDB);
                 break;
-            case 'updateOne':
+            case 'updateOne': 
             case 'updateMany':
-                if (Object.keys(finalQuery).length === 0) return res.status(400).json({ error: `\`query\` (nicht leer) ist für \`${operation}\` erforderlich.` });
-                if (!update || typeof update !== 'object' || Object.keys(update).length === 0) return res.status(400).json({ error: `\`update\` (nicht leeres Objekt) ist für \`${operation}\` erforderlich.` });
-                dbResult = await currentDbCollection[operation](finalQuery, update, sanitizedOptions);
+                if (Object.keys(finalQuery).length === 0) return res.status(400).json({ error: `\`query\` (nicht leer) für \`${operation}\` erforderlich.` });
+                if (!update || typeof update !== 'object' || Object.keys(update).length === 0) return res.status(400).json({ error: `\`update\` (nicht leeres Objekt) für \`${operation}\` erforderlich.` });
+                dbResult = await currentDbCollection[operation](finalQuery, update, sanitizedOptionsForDB);
                 break;
-            case 'deleteOne':
+            case 'deleteOne': 
             case 'deleteMany':
-                if (Object.keys(finalQuery).length === 0) return res.status(400).json({ error: `\`query\` (nicht leer) ist für \`${operation}\` erforderlich.` });
-                dbResult = await currentDbCollection[operation](finalQuery, sanitizedOptions);
+                if (Object.keys(finalQuery).length === 0) return res.status(400).json({ error: `\`query\` (nicht leer) für \`${operation}\` erforderlich.` });
+                dbResult = await currentDbCollection[operation](finalQuery, sanitizedOptionsForDB);
                 break;
             case 'countDocuments':
-                dbResult = await currentDbCollection.countDocuments(finalQuery, sanitizedOptions);
+                dbResult = await currentDbCollection.countDocuments(finalQuery, sanitizedOptionsForDB);
                 break;
             case 'aggregate':
                 if (!pipeline || !Array.isArray(pipeline) || pipeline.length === 0) return res.status(400).json({ error: '`pipeline` (nicht leeres Array) ist für `aggregate` erforderlich.' });
-                dbResult = await currentDbCollection.aggregate(pipeline, sanitizedOptions).toArray();
+                dbResult = await currentDbCollection.aggregate(pipeline, sanitizedOptionsForDB).toArray();
                 break;
             default:
-                console.warn(`${logPrefixAdminData} Unbekannte Datenbankoperation: ${operation}`);
                 return res.status(400).json({ error: `Unbekannte Datenbankoperation: ${operation}` });
         }
-        console.log(`${logPrefixAdminData} Datenbankoperation ${operation} erfolgreich ausgeführt.`);
+        console.log(`${logPrefixAdminData} DB-Op ${operation} erfolgreich.`);
         res.json({ success: true, operation, collectionName, result: dbResult });
-
     } catch (dbError) {
-        console.error(`${logPrefixAdminData} Fehler bei Datenbankoperation '${operation}' auf '${collectionName}':`, dbError);
-        // Unterscheide zwischen "nicht gefunden" und echten Fehlern, falls gewünscht (für bessere UX)
-        if (dbError.message.toLowerCase().includes("not found") && (operation === 'findOne' || operation === 'updateOne' || operation === 'deleteOne')) {
-             // Hier könnte man auch das dbResult von update/delete prüfen (matchedCount, deletedCount)
+        // ... (deine bestehende Fehlerbehandlung) ...
+        console.error(`${logPrefixAdminData} DB-Op Fehler '${operation}' auf '${collectionName}':`, dbError);
+        if (dbError.message.toLowerCase().includes("not found") && ['findOne', 'updateOne', 'deleteOne'].includes(operation)) {
             return res.status(404).json({ error: `Dokument nicht gefunden für Operation '${operation}'.`, details: dbError.message });
         }
-        res.status(500).json({ error: `Fehler bei der Datenbankoperation '${operation}' auf Collection '${collectionName}'.`, details: dbError.message });
+        res.status(500).json({ error: `DB-Fehler bei Operation '${operation}'.`, details: dbError.message });
     }
 }
 app.post('/api/admin/data-manipulation', isAuthenticated, isAdmin, adminDataManipulationEndpoint);
