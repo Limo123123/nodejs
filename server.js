@@ -993,241 +993,252 @@ app.delete('/api/wheels/:id', isAuthenticated, async (req, res) => {
     } catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler /api/wheels/${wheelIdStr} (DELETE) User ${req.session.username}:`, err); res.status(500).json({ error: "Serverfehler Löschen Glücksrad." }); }
 });
 
-// ADMIN DATA MANIPULATION
-app.post('/api/admin/data-manipulation', isAuthenticated, isAdmin, async (req, res) => {
+// In server.js
+
+// Stelle sicher, dass deine Collection-Namen als Konstanten verfügbar sind,
+// wenn du sie unten in collectionsTextSearchFields verwendest.
+// Beispiele:
+// const productsCollectionName = 'products';
+// const usersCollectionName = 'users';
+// ...
+
+// === BEGINN ADMIN DATA MANIPULATION ENDPUNKT LOGIK ===
+async function adminDataManipulationEndpoint(req, res) {
     const {
-        // Stufe 2: Lokale Admin-Credentials
         adminUsername,
         adminPassword,
-        // Stufe 3: OneDev Admin-Credentials
-        oneDevUrl,         // z.B. https://onedev.example.com
+        oneDevUrl,
         oneDevAdminUsername,
         oneDevAdminPassword,
-        // Datenbankoperationen
         collectionName,
         operation,
-        query,
+        query,      // Die vom Frontend gesendete Query (kann null/leer sein)
         document,
         documents,
         update,
         options,
-        pipeline
+        pipeline,
+        searchTerm  // Neuer optionaler Parameter für einfache Textsuche
     } = req.body;
 
-    const logPrefixAdminData = `${LOG_PREFIX_SERVER} [AdminDataManipulation] User: ${req.session.username} ->`;
-    const currentUserFromSession = req.session.username; // Für klare Logs
-
-    // --- STUFE 1: Bereits durch isAuthenticated und isAdmin Middleware abgedeckt ---
-    // req.session.userId ist vorhanden und req.session.isAdmin ist true.
+    const logPrefixAdminData = `${LOG_PREFIX_SERVER} [AdminDataManipulation] Session User: ${req.session.username} ->`;
+    const currentUserFromSession = req.session.username;
 
     // --- STUFE 2: Lokale Admin-Credentials (aus dem Body) prüfen ---
     console.log(`${logPrefixAdminData} Starte Stufe 2: Lokale Admin Re-Authentifizierung für '${adminUsername || "FEHLEND"}' durch '${currentUserFromSession}'.`);
     if (!adminUsername || !adminPassword) {
         console.warn(`${logPrefixAdminData} Stufe 2 ABGELEHNT: Lokale Admin-Anmeldedaten (adminUsername, adminPassword) im Body fehlen.`);
-        return res.status(401).json({
-            error: 'Stufe 2: Lokale Admin-Anmeldedaten (adminUsername, adminPassword) im Request-Body erforderlich.',
-            stage: 2
-        });
+        return res.status(401).json({ error: 'Stufe 2: Lokale Admin-Anmeldedaten (adminUsername, adminPassword) im Request-Body erforderlich.', stage: 2 });
     }
-
     try {
+        if (!usersCollection) throw new Error("usersCollection nicht initialisiert in adminDataManipulationEndpoint");
         const localAdminForReAuth = await usersCollection.findOne({ username: adminUsername.toLowerCase() });
         if (!localAdminForReAuth) {
             console.warn(`${logPrefixAdminData} Stufe 2 ABGELEHNT: Lokaler Admin-User '${adminUsername}' für Re-Authentifizierung nicht gefunden.`);
             return res.status(401).json({ error: 'Stufe 2: Ungültige lokale Admin-Anmeldedaten.', stage: 2 });
         }
-
         const passwordMatch = await bcrypt.compare(adminPassword, localAdminForReAuth.password);
         if (!passwordMatch) {
             console.warn(`${logPrefixAdminData} Stufe 2 ABGELEHNT: Falsches Passwort für lokalen Admin-User '${adminUsername}'.`);
             return res.status(401).json({ error: 'Stufe 2: Ungültige lokale Admin-Anmeldedaten.', stage: 2 });
         }
-
-        // Zusätzliche Sicherheit: Der re-authentifizierte User muss der Session-Admin sein
         if (localAdminForReAuth._id.toString() !== req.session.userId || !localAdminForReAuth.isAdmin) {
             console.warn(`${logPrefixAdminData} Stufe 2 ABGELEHNT: Diskrepanz zwischen Session-User und re-authentifiziertem lokalen Admin oder fehlende Admin-Rechte.`);
             return res.status(403).json({ error: 'Stufe 2: Re-Authentifizierung fehlgeschlagen oder nicht autorisiert.', stage: 2 });
         }
         console.log(`${logPrefixAdminData} Stufe 2 ERFOLGREICH: Lokale Admin Re-Authentifizierung für '${adminUsername}' durch '${currentUserFromSession}'.`);
-
     } catch (reAuthError) {
         console.error(`${logPrefixAdminData} Stufe 2 FEHLER bei lokaler Admin Re-Authentifizierung:`, reAuthError);
-        return res.status(500).json({ error: 'Serverfehler bei der lokalen Admin-Re-Authentifizierung.', stage: 2 });
+        return res.status(500).json({ error: 'Serverfehler bei der lokalen Admin-Re-Authentifizierung.', stage: 2, details: reAuthError.message });
     }
 
     // --- STUFE 3: OneDev Admin-Credentials prüfen ---
     console.log(`${logPrefixAdminData} Starte Stufe 3: OneDev Admin Authentifizierung für OneDev-User '${oneDevAdminUsername || "FEHLEND"}' (URL: ${oneDevUrl || "FEHLEND"}).`);
     if (!oneDevUrl || !oneDevAdminUsername || !oneDevAdminPassword) {
         console.warn(`${logPrefixAdminData} Stufe 3 ABGELEHNT: OneDev-Anmeldedaten (oneDevUrl, oneDevAdminUsername, oneDevAdminPassword) im Body fehlen.`);
-        return res.status(401).json({
-            error: 'Stufe 3: OneDev-Anmeldedaten (oneDevUrl, oneDevAdminUsername, oneDevAdminPassword) im Request-Body erforderlich.',
-            stage: 3
-        });
+        return res.status(401).json({ error: 'Stufe 3: OneDev-Anmeldedaten (oneDevUrl, oneDevAdminUsername, oneDevAdminPassword) im Request-Body erforderlich.', stage: 3 });
     }
-
-    // Validierung der OneDev URL (einfache Prüfung)
     if (!oneDevUrl.startsWith('http://') && !oneDevUrl.startsWith('https://')) {
         console.warn(`${logPrefixAdminData} Stufe 3 ABGELEHNT: Ungültige OneDev URL: ${oneDevUrl}`);
         return res.status(400).json({ error: 'Stufe 3: Ungültiges Format für oneDevUrl (muss mit http:// oder https:// beginnen).', stage: 3 });
     }
-    // In Produktion solltest du eventuell nur HTTPS erlauben:
-    // if (process.env.NODE_ENV === 'production' && !oneDevUrl.startsWith('https://')) {
-    //     return res.status(400).json({ error: 'Stufe 3: In Produktion ist nur HTTPS für oneDevUrl erlaubt.', stage: 3 });
-    // }
-
     try {
-        const oneDevApiUserMeEndpoint = `${oneDevUrl.replace(/\/$/, '')}/~api/users/me`;
-
-        console.log(`${logPrefixAdminData} Stufe 3: Versuche OneDev API Call an ${oneDevApiUserMeEndpoint} für User '${oneDevAdminUsername}'.`);
-
-        const response = await axios.get(oneDevApiUserMeEndpoint, {
-            auth: { // Basic Authentication
-                username: oneDevAdminUsername,
-                password: oneDevAdminPassword
-            },
-            timeout: 10000 // 10 Sekunden Timeout
-        });
-
-        const oneDevUser = response.data;
-
-        // Prüfung:
-        // 1. Der angegebene 'oneDevAdminUsername' MUSS "admin" sein (Groß-/Kleinschreibung ignoriert).
-        // 2. Der 'name' aus der API-Antwort MUSS mit dem angegebenen 'oneDevAdminUsername' übereinstimmen.
-        //    Dies stellt sicher, dass die Authentifizierung für den korrekten User erfolgt ist.
-        if (oneDevAdminUsername.toLowerCase() !== "admin" || !oneDevUser || oneDevUser.name !== oneDevAdminUsername) {
-            console.warn(`${logPrefixAdminData} Stufe 3 ABGELEHNT: OneDev-User ist nicht der erwartete 'admin' oder API-Antwort passt nicht. Angegeben: '${oneDevAdminUsername}', API-Antwort-Name: '${oneDevUser ? oneDevUser.name : "N/A"}'.`);
-            return res.status(403).json({
-                error: `Stufe 3: Authentifizierung fehlgeschlagen oder der angegebene OneDev-Benutzer ('${oneDevAdminUsername}') ist nicht der erwartete Administrator ('admin').`,
-                stage: 3
-            });
+        let oneDevApiUserMeEndpoint;
+        const oneDevBaseUrl = oneDevUrl.replace(/\/$/, '');
+        if (oneDevBaseUrl === "http://cause-radio.gl.at.ply.gg:43894" || (oneDevBaseUrl.startsWith('http://') && oneDevBaseUrl.includes('ply.gg')) ) { // Genauer für ply.gg oder allgemeiner für HTTP
+            oneDevApiUserMeEndpoint = `${oneDevBaseUrl}/~api/users/me`;
+            console.log(`${logPrefixAdminData} Stufe 3: Nutze OneDev Pfad (vermutlich für HTTP-Tunnel/ply.gg): ${oneDevApiUserMeEndpoint}`);
+        } else {
+            oneDevApiUserMeEndpoint = `${oneDevBaseUrl}/api/users/me`;
+            console.log(`${logPrefixAdminData} Stufe 3: Nutze Standard OneDev Pfad: ${oneDevApiUserMeEndpoint}`);
         }
-
+        const response = await axios.get(oneDevApiUserMeEndpoint, {
+            auth: { username: oneDevAdminUsername, password: oneDevAdminPassword },
+            timeout: 15000
+        });
+        const oneDevUser = response.data;
+        if (oneDevAdminUsername.toLowerCase() !== "admin" || !oneDevUser || typeof oneDevUser.name !== 'string' || oneDevUser.name !== oneDevAdminUsername) {
+            console.warn(`${logPrefixAdminData} Stufe 3 ABGELEHNT: OneDev-User ist nicht der erwartete 'admin' oder API-Antwort passt nicht. Angegeben: '${oneDevAdminUsername}', API-Antwort-Name: '${oneDevUser && oneDevUser.name ? oneDevUser.name : "N/A"}'. OneDev User Objekt:`, oneDevUser);
+            return res.status(403).json({ error: `Stufe 3: Authentifizierung fehlgeschlagen oder der angegebene OneDev-Benutzer ('${oneDevAdminUsername}') ist nicht der erwartete Administrator ('admin'). Überprüfen Sie die OneDev API-Antwort.`, stage: 3, debug_onedev_response_name: oneDevUser ? oneDevUser.name : null });
+        }
         console.log(`${logPrefixAdminData} Stufe 3 ERFOLGREICH: OneDev-User '${oneDevAdminUsername}' erfolgreich als 'admin' auf ${oneDevUrl} authentifiziert.`);
-
     } catch (oneDevError) {
         if (oneDevError.response) {
-            // OneDev Server hat geantwortet, aber mit Fehlerstatus (z.B. 401 Unauthorized, 403 Forbidden)
-            console.error(`${logPrefixAdminData} Stufe 3 FEHLER: OneDev API Fehler (Status ${oneDevError.response.status}):`, oneDevError.response.data);
-            if (oneDevError.response.status === 401) {
-                 return res.status(401).json({ error: 'Stufe 3: Ungültige OneDev-Anmeldedaten.', stage: 3, details: oneDevError.response.data });
-            }
-            return res.status(oneDevError.response.status || 500).json({
-                error: 'Stufe 3: Fehler bei der Kommunikation mit dem OneDev-Server.',
-                stage: 3,
-                details: oneDevError.response.data
-            });
+            console.error(`${logPrefixAdminData} Stufe 3 FEHLER: OneDev API Fehler (Status ${oneDevError.response.status}):`, typeof oneDevError.response.data === 'string' ? oneDevError.response.data.substring(0, 500) + "..." : oneDevError.response.data);
+            const details = (typeof oneDevError.response.data === 'object' ? oneDevError.response.data : `HTML-Antwort oder nicht-JSON-Fehler (Status: ${oneDevError.response.status})`);
+            if (oneDevError.response.status === 401) return res.status(401).json({ error: 'Stufe 3: Ungültige OneDev-Anmeldedaten.', stage: 3, details });
+            return res.status(oneDevError.response.status || 500).json({ error: 'Stufe 3: Fehler bei der Kommunikation mit dem OneDev-Server.', stage: 3, details });
         } else if (oneDevError.request) {
-            // Anfrage wurde gemacht, aber keine Antwort erhalten (Netzwerkproblem, OneDev nicht erreichbar)
             console.error(`${logPrefixAdminData} Stufe 3 FEHLER: Keine Antwort vom OneDev-Server:`, oneDevError.message);
             return res.status(503).json({ error: 'Stufe 3: OneDev-Server nicht erreichbar.', stage: 3, details: oneDevError.message });
         } else {
-            // Anderer Fehler beim Setup der Anfrage
             console.error(`${logPrefixAdminData} Stufe 3 FEHLER: Fehler beim Vorbereiten der OneDev-Anfrage:`, oneDevError.message);
             return res.status(500).json({ error: 'Stufe 3: Interner Fehler beim Versuch, OneDev zu kontaktieren.', stage: 3, details: oneDevError.message });
         }
     }
 
-    // --- DATENBANKOPERATION (wenn alle Stufen erfolgreich waren) ---
+    // --- DATENBANKOPERATION ---
     if (!collectionName || !operation) {
         return res.status(400).json({ error: '`collectionName` und `operation` sind erforderlich.' });
     }
 
+    // Verwende deine definierten Collection-Namen Konstanten hier
     const allowedCollections = [
         productsCollectionName, usersCollectionName, ordersCollectionName,
         inventoriesCollectionName, wheelsCollectionName, tokenCodesCollectionName,
         tokenTransactionsCollectionName, 'sessions'
     ];
-
     if (!allowedCollections.includes(collectionName)) {
         console.warn(`${logPrefixAdminData} Zugriff auf nicht erlaubte Collection: ${collectionName}`);
         return res.status(400).json({ error: `Zugriff auf Collection '${collectionName}' nicht erlaubt.` });
     }
 
-    const collection = db.collection(collectionName);
-    let result;
+    if (!db) {
+        console.error(`${logPrefixAdminData} Datenbank (db) nicht initialisiert!`);
+        return res.status(500).json({ error: "Server-Konfigurationsfehler: Datenbank nicht bereit." });
+    }
+    const currentDbCollection = db.collection(collectionName);
+    let dbResult;
 
-    const sanitizeQueryIds = (q) => { /* ... (deine bestehende sanitizeQueryIds Funktion) ... */
-        if (!q) return q;
-        const sanitized = { ...q };
+    const sanitizeQueryIds = (q) => {
+        if (!q || typeof q !== 'object') return {}; // Immer ein Objekt zurückgeben, auch wenn q null, undefined oder kein Objekt ist
+        const sanitized = { ...q }; // Kopie erstellen
+        // _id Konvertierung
         if (sanitized._id && typeof sanitized._id === 'string' && ObjectId.isValid(sanitized._id)) {
             sanitized._id = new ObjectId(sanitized._id);
         }
+        // userId Konvertierung für bestimmte Collections
         if (sanitized.userId && typeof sanitized.userId === 'string' && ObjectId.isValid(sanitized.userId)) {
-            if (['orders', 'userInventories', 'wheels', 'tokenCodes', 'tokenTransactions'].includes(collectionName)) {
+            if ([ordersCollectionName, inventoriesCollectionName, wheelsCollectionName, tokenCodesCollectionName, tokenTransactionsCollectionName].includes(collectionName)) {
                  sanitized.userId = new ObjectId(sanitized.userId);
             }
         }
-        if (sanitized.productId && typeof sanitized.productId === 'number' && collectionName === inventoriesCollectionName) {}
-        if (sanitized.id && typeof sanitized.id === 'number' && collectionName === productsCollectionName) {}
+        // Numerische IDs (wie in 'products') bleiben Zahlen und werden nicht konvertiert,
+        // außer sie kommen als String an und müssen geparst werden (hier nicht implementiert, Frontend sollte Zahlen senden).
         return sanitized;
     };
 
-    const sanitizedQuery = sanitizeQueryIds(query);
-    const sanitizedOptions = options || {};
-    if (operation === 'find' && !sanitizedOptions.limit) {
+    let finalQuery = sanitizeQueryIds(query); // Beginne mit der vom User gesendeten Query
+    const sanitizedOptions = options && typeof options === 'object' ? { ...options } : {}; // Optionen sicher kopieren
+
+    // Serverseitige `searchTerm` Logik für 'find' Operation
+    if (operation === 'find' && searchTerm && typeof searchTerm === 'string' && searchTerm.trim() !== '') {
+        const searchTermCleaned = searchTerm.trim();
+        // Definiere, welche Felder pro Collection durchsucht werden sollen
+        const collectionsTextSearchFields = {
+            [productsCollectionName]: ['name', 'description'], // id ist numerisch, RegEx darauf ist schwierig
+            [usersCollectionName]: ['username', 'fullName', 'email'], // Email auch durchsuchen
+            [ordersCollectionName]: ['username', 'items.name'], // In verschachtelten Feldern suchen
+            [wheelsCollectionName]: ['name', 'description', 'creatorUsername'],
+            // Füge hier weitere Collections und deren relevante Text-Suchfelder hinzu
+        };
+        const fieldsToSearch = collectionsTextSearchFields[collectionName];
+
+        if (fieldsToSearch && fieldsToSearch.length > 0) {
+            // Wenn die `finalQuery` vom User leer ist oder nur Optionen enthält,
+            // dann wende den searchTerm an. Sonst hat die User-Query Vorrang.
+            if (Object.keys(finalQuery).length === 0) {
+                const orConditions = fieldsToSearch.map(field => {
+                    // Für numerische ID-Felder, die als Text gesucht werden (z.B. Produkt-ID)
+                    if (field === 'id' && collectionName === productsCollectionName && !isNaN(parseInt(searchTermCleaned))) {
+                        return { [field]: parseInt(searchTermCleaned) };
+                    }
+                    // Für normale Textfelder
+                    return { [field]: { $regex: searchTermCleaned, $options: 'i' } }; // Case-insensitive RegEx
+                });
+                finalQuery = { $or: orConditions };
+                console.log(`${logPrefixAdminData} Nutze serverseitige Textsuche für: "${searchTermCleaned}" auf Feldern ${fieldsToSearch.join(', ')}.`);
+            } else {
+                console.log(`${logPrefixAdminData} Spezifische Query vom User vorhanden, serverseitiger searchTerm wird ignoriert.`);
+            }
+        } else {
+            console.log(`${logPrefixAdminData} Keine Standard-Suchfelder für Collection '${collectionName}' für searchTerm definiert. Suchbegriff ignoriert.`);
+        }
+    }
+
+
+    if (operation === 'find' && !sanitizedOptions.limit) { // Default-Limit für find, falls nicht gesetzt
         sanitizedOptions.limit = 100;
     }
-    if (collectionName === usersCollectionName && (operation === 'find' || operation === 'findOne')) {
+    if (collectionName === usersCollectionName && (operation === 'find' || operation === 'findOne')) { // Passwort-Schutz
         if (!sanitizedOptions.projection) sanitizedOptions.projection = { password: 0 };
         else if (sanitizedOptions.projection.password === undefined) sanitizedOptions.projection.password = 0;
     }
 
-    console.log(`${logPrefixAdminData} Führe Datenbankoperation aus: ${operation} auf Collection: ${collectionName}`);
-
+    console.log(`${logPrefixAdminData} Führe Datenbankoperation aus: ${operation} auf Collection: ${collectionName}. Query: ${JSON.stringify(finalQuery)} Options: ${JSON.stringify(sanitizedOptions)}`);
     try {
         switch (operation) {
-            // ... (deine bestehenden case-Anweisungen für Datenbankoperationen) ...
             case 'findOne':
-                if (!sanitizedQuery) return res.status(400).json({ error: '`query` ist für `findOne` erforderlich.' });
-                result = await collection.findOne(sanitizedQuery, sanitizedOptions);
+                if (Object.keys(finalQuery).length === 0) return res.status(400).json({ error: '`query` (nicht leer) ist für `findOne` erforderlich.' });
+                dbResult = await currentDbCollection.findOne(finalQuery, sanitizedOptions);
                 break;
             case 'find':
-                if (!sanitizedQuery) return res.status(400).json({ error: '`query` ist für `find` erforderlich.' });
-                result = await collection.find(sanitizedQuery, sanitizedOptions).toArray();
+                dbResult = await currentDbCollection.find(finalQuery, sanitizedOptions).toArray();
                 break;
             case 'insertOne':
-                if (!document) return res.status(400).json({ error: '`document` ist für `insertOne` erforderlich.' });
-                result = await collection.insertOne(document, sanitizedOptions);
+                if (!document || typeof document !== 'object' || Object.keys(document).length === 0) return res.status(400).json({ error: '`document` (nicht leeres Objekt) ist für `insertOne` erforderlich.' });
+                dbResult = await currentDbCollection.insertOne(document, sanitizedOptions);
                 break;
             case 'insertMany':
-                if (!documents || !Array.isArray(documents) || documents.length === 0) return res.status(400).json({ error: '`documents` (Array) ist für `insertMany` erforderlich.' });
-                result = await collection.insertMany(documents, sanitizedOptions);
+                if (!documents || !Array.isArray(documents) || documents.length === 0) return res.status(400).json({ error: '`documents` (nicht leeres Array) ist für `insertMany` erforderlich.' });
+                dbResult = await currentDbCollection.insertMany(documents, sanitizedOptions);
                 break;
             case 'updateOne':
-                if (!sanitizedQuery || !update) return res.status(400).json({ error: '`query` und `update` sind für `updateOne` erforderlich.' });
-                result = await collection.updateOne(sanitizedQuery, update, sanitizedOptions);
-                break;
             case 'updateMany':
-                if (!sanitizedQuery || !update) return res.status(400).json({ error: '`query` und `update` sind für `updateMany` erforderlich.' });
-                result = await collection.updateMany(sanitizedQuery, update, sanitizedOptions);
+                if (Object.keys(finalQuery).length === 0) return res.status(400).json({ error: `\`query\` (nicht leer) ist für \`${operation}\` erforderlich.` });
+                if (!update || typeof update !== 'object' || Object.keys(update).length === 0) return res.status(400).json({ error: `\`update\` (nicht leeres Objekt) ist für \`${operation}\` erforderlich.` });
+                dbResult = await currentDbCollection[operation](finalQuery, update, sanitizedOptions);
                 break;
             case 'deleteOne':
-                if (!sanitizedQuery) return res.status(400).json({ error: '`query` ist für `deleteOne` erforderlich.' });
-                result = await collection.deleteOne(sanitizedQuery, sanitizedOptions);
-                break;
             case 'deleteMany':
-                if (!sanitizedQuery) return res.status(400).json({ error: '`query` ist für `deleteMany` erforderlich.' });
-                result = await collection.deleteMany(sanitizedQuery, sanitizedOptions);
+                if (Object.keys(finalQuery).length === 0) return res.status(400).json({ error: `\`query\` (nicht leer) ist für \`${operation}\` erforderlich.` });
+                dbResult = await currentDbCollection[operation](finalQuery, sanitizedOptions);
                 break;
             case 'countDocuments':
-                result = await collection.countDocuments(sanitizedQuery || {}, sanitizedOptions);
+                dbResult = await currentDbCollection.countDocuments(finalQuery, sanitizedOptions);
                 break;
             case 'aggregate':
-                if (!pipeline || !Array.isArray(pipeline)) return res.status(400).json({ error: '`pipeline` (Array) ist für `aggregate` erforderlich.' });
-                result = await collection.aggregate(pipeline, sanitizedOptions).toArray();
+                if (!pipeline || !Array.isArray(pipeline) || pipeline.length === 0) return res.status(400).json({ error: '`pipeline` (nicht leeres Array) ist für `aggregate` erforderlich.' });
+                dbResult = await currentDbCollection.aggregate(pipeline, sanitizedOptions).toArray();
                 break;
             default:
                 console.warn(`${logPrefixAdminData} Unbekannte Datenbankoperation: ${operation}`);
                 return res.status(400).json({ error: `Unbekannte Datenbankoperation: ${operation}` });
         }
         console.log(`${logPrefixAdminData} Datenbankoperation ${operation} erfolgreich ausgeführt.`);
-        res.json({ success: true, operation, collectionName, result });
+        res.json({ success: true, operation, collectionName, result: dbResult });
 
     } catch (dbError) {
         console.error(`${logPrefixAdminData} Fehler bei Datenbankoperation '${operation}' auf '${collectionName}':`, dbError);
+        // Unterscheide zwischen "nicht gefunden" und echten Fehlern, falls gewünscht (für bessere UX)
+        if (dbError.message.toLowerCase().includes("not found") && (operation === 'findOne' || operation === 'updateOne' || operation === 'deleteOne')) {
+             // Hier könnte man auch das dbResult von update/delete prüfen (matchedCount, deletedCount)
+            return res.status(404).json({ error: `Dokument nicht gefunden für Operation '${operation}'.`, details: dbError.message });
+        }
         res.status(500).json({ error: `Fehler bei der Datenbankoperation '${operation}' auf Collection '${collectionName}'.`, details: dbError.message });
     }
-});
+}
+app.post('/api/admin/data-manipulation', isAuthenticated, isAdmin, adminDataManipulationEndpoint);
 // Fallback für unbekannte Routen
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
