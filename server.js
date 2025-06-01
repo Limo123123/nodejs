@@ -822,10 +822,70 @@ app.get('/api/wheels/public', async (req, res) => {
     catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler /api/wheels/public:`, err); res.status(500).json({ error: "Fehler Laden öffentl. Glücksräder." }); }
 });
 app.get('/api/wheels/my', isAuthenticated, async (req, res) => {
-    const userId = new ObjectId(req.session.userId);
-    console.log(`${LOG_PREFIX_SERVER} /api/wheels/my User: ${req.session.username}`);
-    try { const myWheels = await wheelsCollection.find({ creatorId: userId }).sort({ createdAt: -1 }).limit(50).project({ segments: 0 }).toArray(); res.json({ wheels: myWheels }); }
-    catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler /api/wheels/my User ${req.session.username}:`, err); res.status(500).json({ error: "Fehler Laden meiner Glücksräder." }); }
+    const userIdString = req.session.userId; // Ist bereits ein String
+    const userIdObject = new ObjectId(req.session.userId);
+
+    console.log(`${LOG_PREFIX_SERVER} /api/wheels/my User: ${req.session.username} (ID-String: ${userIdString}, ID-Object: ${userIdObject})`);
+    try {
+        const query = {
+            $or: [
+                { creatorId: userIdObject },
+                { creatorId: userIdString }
+            ]
+        };
+
+        const myWheelsFromDB = await wheelsCollection.find(query)
+            .sort({ createdAt: -1 })
+            .limit(50)
+            .project({ segments: 0 })
+            .toArray();
+
+        // Option 3: "On-the-fly" Korrektur der API-Antwort
+        const cleanedWheelsForResponse = myWheelsFromDB.map(wheel => {
+            const cleanedWheel = { ...wheel }; // Kopie erstellen, um Original nicht zu verändern
+
+            // Korrigiere _id (sollte immer ein String in JSON sein)
+            if (cleanedWheel._id && typeof cleanedWheel._id === 'object' && cleanedWheel._id.toString) {
+                cleanedWheel._id = cleanedWheel._id.toString();
+            }
+
+            // Korrigiere creatorId
+            if (cleanedWheel.creatorId) {
+                if (typeof cleanedWheel.creatorId === 'object' && cleanedWheel.creatorId.toString) {
+                    // Wenn es ein ObjectId-Objekt ist, in String umwandeln
+                    cleanedWheel.creatorId = cleanedWheel.creatorId.toString();
+                } else if (typeof cleanedWheel.creatorId === 'string') {
+                    // Wenn es bereits ein String ist, prüfen, ob es ein valider ObjectId-String ist.
+                    // Ansonsten so belassen. Für die API-Antwort ist ein String okay.
+                    if (!ObjectId.isValid(cleanedWheel.creatorId)) {
+                        console.warn(`${LOG_PREFIX_SERVER} Rad ${cleanedWheel._id} hat ungültigen String als creatorId in DB: ${cleanedWheel.creatorId} für User ${req.session.username}`);
+                        // Hier könntest du entscheiden, das Feld zu nullen oder so zu lassen.
+                        // Für die API-Antwort belassen wir es, das Frontend muss damit umgehen können.
+                    }
+                } else {
+                    // Unerwarteter Typ für creatorId
+                    console.warn(`${LOG_PREFIX_SERVER} Rad ${cleanedWheel._id} hat unerwarteten Typ für creatorId in DB: ${typeof cleanedWheel.creatorId} für User ${req.session.username}`);
+                    // cleanedWheel.creatorId = null; // Oder eine andere Fehlerbehandlung
+                }
+            }
+            // Ähnliche Bereinigungen könnten für andere ObjectId-Felder nötig sein, falls vorhanden.
+            return cleanedWheel;
+        });
+
+        if (cleanedWheelsForResponse.length > 0) {
+            const firstWheelOriginal = myWheelsFromDB[0];
+            const firstWheelCleaned = cleanedWheelsForResponse[0];
+            console.log(`${LOG_PREFIX_SERVER} Gefundene Räder für User ${req.session.username}: ${cleanedWheelsForResponse.length}.`);
+            console.log(`${LOG_PREFIX_SERVER}   Original _id: ${firstWheelOriginal._id} (Typ: ${typeof firstWheelOriginal._id}), creatorId: ${firstWheelOriginal.creatorId} (Typ: ${typeof firstWheelOriginal.creatorId})`);
+            console.log(`${LOG_PREFIX_SERVER}   Cleaned _id: ${firstWheelCleaned._id} (Typ: ${typeof firstWheelCleaned._id}), creatorId: ${firstWheelCleaned.creatorId} (Typ: ${typeof firstWheelCleaned.creatorId})`);
+        }
+
+        res.json({ wheels: cleanedWheelsForResponse });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler /api/wheels/my User ${req.session.username}:`, err);
+        res.status(500).json({ error: "Fehler Laden meiner Glücksräder." });
+    }
 });
 app.get('/api/wheels/:id', async (req, res) => {
     const wheelIdStr = req.params.id; console.log(`${LOG_PREFIX_SERVER} /api/wheels/:id aufgerufen für ID: ${wheelIdStr}`);
