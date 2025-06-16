@@ -23,6 +23,10 @@ const session = require('express-session');
 const MongoStore = require('connect-mongo');
 const { v4: uuidv4 } = require('uuid');
 const axios = require('axios'); // Hinzufügen für HTTP-Anfragen 
+const LOG_PREFIX_CHAT = "[WhatsLim API]";
+const CHAT_COLLECTION_NAME = 'limChats';
+const MESSAGE_COLLECTION_NAME = 'limMessages';
+const USER_CHAT_SETTINGS_COLLECTION_NAME = 'limUserChatSettings';
 
 const SELL_COOLDOWN_SECONDS = 59;
 const SELL_COOLDOWN_SECONDS_SHOW = 60;
@@ -100,8 +104,35 @@ app.use(session({
 let db;
 let productsCollection, usersCollection, ordersCollection, inventoriesCollection;
 let wheelsCollection, tokenCodesCollection, tokenTransactionsCollection;
+let limChatsCollection, limMessagesCollection, limUserChatSettingsCollection;
 
 // --- Hilfsfunktionen ---
+async function generateUniqueUserShareCode() {
+    let code;
+    let exists = true;
+    while (exists) {
+        code = `U-${uuidv4().substr(0, 6).toUpperCase()}`; // Kürzer für User
+        const existingUser = await usersCollection.findOne({ userShareCode: code }, { projection: { _id: 1 } });
+        if (!existingUser) {
+            exists = false;
+        }
+    }
+    return code;
+}
+
+async function generateUniqueGroupShareCode() {
+    let code;
+    let exists = true;
+    while (exists) {
+        code = `G-${uuidv4().substr(0, 8).toUpperCase()}`; // Etwas länger für Gruppen
+        const existingGroup = await limChatsCollection.findOne({ groupShareCode: code }, { projection: { _id: 1 } });
+        if (!existingGroup) {
+            exists = false;
+        }
+    }
+    return code;
+}
+
 async function generateUniqueId(collection = productsCollection) { // Der 'prefix'-Parameter wurde hier entfernt, da er nicht benötigt wird.
     let newIdValue;
     let idExists = true;
@@ -182,7 +213,7 @@ async function seedDatabaseFromLocalJson() {
             } catch (insertManyErr) {
                 console.error(`${LOG_PREFIX_SERVER} ❌ Fehler beim insertMany für Produkt-Seeding:`, insertManyErr.message);
                 seededCount = insertManyErr.result ? insertManyErr.result.nInserted : 0;
-                 if (seededCount > 0) console.error(`${LOG_PREFIX_SERVER}    Trotz Fehler wurden ${seededCount} Produkte eingefügt.`);
+                if (seededCount > 0) console.error(`${LOG_PREFIX_SERVER}    Trotz Fehler wurden ${seededCount} Produkte eingefügt.`);
             }
         } else {
             console.log(`${LOG_PREFIX_SERVER}    Keine neuen regulären Produkte zum Seeden aus Datei ${SEED_PRODUCTS_FILE}.`);
@@ -333,7 +364,7 @@ async function seedTokenCardProducts() {
             if (err.code !== 11000) { console.error(`${LOG_PREFIX_SERVER} ❌ Fehler beim Seeden der Token-Karte ${card.name}:`, err); }
         }
     }
-    if(seededCount > 0) console.log(`${LOG_PREFIX_SERVER} ✅ ${seededCount} Token-Karten Produkte erfolgreich geseedet.`);
+    if (seededCount > 0) console.log(`${LOG_PREFIX_SERVER} ✅ ${seededCount} Token-Karten Produkte erfolgreich geseedet.`);
     else console.log(`${LOG_PREFIX_SERVER}    Keine neuen Token-Karten Produkte zu seeden (oder bereits vorhanden).`);
 }
 
@@ -377,8 +408,23 @@ MongoClient.connect(mongoUri)
         wheelsCollection = db.collection(wheelsCollectionName);
         tokenCodesCollection = db.collection(tokenCodesCollectionName);
         tokenTransactionsCollection = db.collection(tokenTransactionsCollectionName);
+        limChatsCollection = db.collection(CHAT_COLLECTION_NAME);
+        limMessagesCollection = db.collection(MESSAGE_COLLECTION_NAME);
+        limUserChatSettingsCollection = db.collection(USER_CHAT_SETTINGS_COLLECTION_NAME);
+        console.log(`${LOG_PREFIX_SERVER} ✅ Chat-Collections initialisiert.`);
         console.log(`${LOG_PREFIX_SERVER} ✅ MongoDB erfolgreich verbunden und Collections initialisiert.`);
         try {
+            await usersCollection.createIndex({ userShareCode: 1 }, { unique: true, sparse: true }); // sparse, da nicht alle User sofort einen haben
+            await limChatsCollection.createIndex({ participants: 1 });
+            await limChatsCollection.createIndex({ type: 1 });
+            await limChatsCollection.createIndex({ groupShareCode: 1 }, { unique: true, sparse: true });
+            await limChatsCollection.createIndex({ ownerId: 1 });
+            await limChatsCollection.createIndex({ updatedAt: -1 }); // Für Chat-Listen-Sortierung
+            await limMessagesCollection.createIndex({ chatId: 1, timestamp: -1 }); // Wichtig für Nachrichtenabruf
+            await limMessagesCollection.createIndex({ senderId: 1 });
+            await limMessagesCollection.createIndex({ content: "text" }); // Für Textsuche
+            await limUserChatSettingsCollection.createIndex({ userId: 1, chatId: 1 }, { unique: true });
+                console.log(`${LOG_PREFIX_SERVER} ✅ Chat-Indizes erfolgreich erstellt oder bereits vorhanden.`);
             await productsCollection.createIndex({ id: 1 }, { unique: true });
             await usersCollection.createIndex({ username: 1 }, { unique: true });
             await usersCollection.createIndex({ tokens: 1 });
@@ -422,7 +468,7 @@ MongoClient.connect(mongoUri)
 // AUTH
 app.post('/api/auth/register', async (req, res) => {
     const { username, password } = req.body;
-    console.log(`${LOG_PREFIX_SERVER} Registrierungsversuch für User: ${username ? username.substring(0,3)+"***" : "LEER"}`);
+    console.log(`${LOG_PREFIX_SERVER} Registrierungsversuch für User: ${username ? username.substring(0, 3) + "***" : "LEER"}`);
     if (!username || !password || typeof username !== 'string' || typeof password !== 'string' || username.length < 3 || username.length > 30 || password.length < 6) {
         return res.status(400).json({ error: 'Benutzername (3-30 Zeichen) und Passwort (min 6 Zeichen) erforderlich.' });
     }
@@ -448,7 +494,7 @@ app.post('/api/auth/register', async (req, res) => {
 
 app.post('/api/auth/login', async (req, res) => {
     const { username, password, rememberMe } = req.body;
-    console.log(`${LOG_PREFIX_SERVER} Login-Versuch für User: ${username ? username.substring(0,3)+"***" : "LEER"}`);
+    console.log(`${LOG_PREFIX_SERVER} Login-Versuch für User: ${username ? username.substring(0, 3) + "***" : "LEER"}`);
     if (!username || !password) return res.status(400).json({ error: 'Benutzername und Passwort erforderlich.' });
     try {
         const user = await usersCollection.findOne({ username: username.toLowerCase() });
@@ -467,7 +513,7 @@ app.post('/api/auth/login', async (req, res) => {
                 if (err) { console.error(`${LOG_PREFIX_SERVER} Fehler Speichern Session Login ${user.username}:`, err); return res.status(500).json({ error: 'Fehler Session.' }); }
                 console.log(`${LOG_PREFIX_SERVER} User ${user.username} eingeloggt. Session ID: ${req.session.id}, Admin: ${req.session.isAdmin}`);
                 const effectiveInfinityMoney = user.isAdmin ? true : (user.infinityMoney || false);
-                res.json({ message: 'Login erfolgreich!', user: { userId: user._id.toString(), username: user.username, balance: user.balance, tokens: user.tokens || 0, isAdmin: user.isAdmin || false, infinityMoney: effectiveInfinityMoney, unlockedInfinityMoney: user.unlockedInfinityMoney || false, productSellCooldowns: user.productSellCooldowns || {} }});
+                res.json({ message: 'Login erfolgreich!', user: { userId: user._id.toString(), username: user.username, balance: user.balance, tokens: user.tokens || 0, isAdmin: user.isAdmin || false, infinityMoney: effectiveInfinityMoney, unlockedInfinityMoney: user.unlockedInfinityMoney || false, productSellCooldowns: user.productSellCooldowns || {} } });
             });
         } else {
             console.warn(`${LOG_PREFIX_SERVER} Login fehlgeschlagen: Falsches PW für ${username.toLowerCase()}.`);
@@ -496,7 +542,7 @@ app.get('/api/auth/me', isAuthenticated, async (req, res) => {
     console.log(`${LOG_PREFIX_SERVER} /api/auth/me User: ${req.session.username}, Session ID: ${req.session.id}`);
     try {
         const user = await usersCollection.findOne({ _id: new ObjectId(req.session.userId) }, { projection: { password: 0 } });
-        if (!user) { console.error(`${LOG_PREFIX_SERVER} /api/auth/me: User ${req.session.userId} nicht in DB! Zerstöre Session.`); req.session.destroy(() => {}); return res.status(404).json({ error: 'Benutzer nicht gefunden.' }); }
+        if (!user) { console.error(`${LOG_PREFIX_SERVER} /api/auth/me: User ${req.session.userId} nicht in DB! Zerstöre Session.`); req.session.destroy(() => { }); return res.status(404).json({ error: 'Benutzer nicht gefunden.' }); }
         const effectiveInfinityMoney = user.isAdmin ? true : (user.infinityMoney || false);
         res.json({ userId: user._id.toString(), username: user.username, balance: user.balance, tokens: user.tokens || 0, isAdmin: user.isAdmin || false, infinityMoney: effectiveInfinityMoney, unlockedInfinityMoney: user.unlockedInfinityMoney || false, productSellCooldowns: user.productSellCooldowns || {} });
     } catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler /api/auth/me ${req.session.username}:`, err); res.status(500).json({ error: "Fehler Abruf Benutzerdaten." }); }
@@ -517,7 +563,7 @@ app.patch('/api/account/settings', isAuthenticated, async (req, res) => {
         else message = "Keine Änderungen.";
         const updatedUser = await usersCollection.findOne({ _id: userId }, { projection: { password: 0 } });
         const effectiveInfinityMoney = updatedUser.isAdmin ? true : (updatedUser.infinityMoney || false);
-        res.json({ message: message, user: { ...updatedUser, tokens: updatedUser.tokens || 0, infinityMoney: effectiveInfinityMoney, productSellCooldowns: updatedUser.productSellCooldowns || {} }});
+        res.json({ message: message, user: { ...updatedUser, tokens: updatedUser.tokens || 0, infinityMoney: effectiveInfinityMoney, productSellCooldowns: updatedUser.productSellCooldowns || {} } });
     } catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler Acc-Settings ${req.session.username}:`, err); res.status(500).json({ error: "Fehler Speichern Einstellungen." }); }
 });
 
@@ -565,7 +611,7 @@ app.post('/api/admin/generate-token-code', isAdmin, async (req, res) => {
         for (let i = 0; i < count; i++) {
             const uniqueCode = await generateUniqueTokenRedeemCode();
             await tokenCodesCollection.insertOne({ code: uniqueCode, tokenAmount: tokenAmount, isRedeemed: false, createdAt: new Date(), generatedByAdminId: new ObjectId(req.session.userId) });
-            generatedCodes.push({code: uniqueCode, amount: tokenAmount});
+            generatedCodes.push({ code: uniqueCode, amount: tokenAmount });
         }
         console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} hat ${count} Codes mit je ${tokenAmount} Tokens generiert.`);
         res.status(201).json({ message: `${count} Token-Code(s) mit je ${tokenAmount} Tokens erfolgreich generiert.`, codes: generatedCodes });
@@ -575,22 +621,22 @@ app.post('/api/admin/generate-token-code', isAdmin, async (req, res) => {
 // PRODUCTS
 app.get('/api/products', async (req, res) => {
     try {
-        const filter = { $or: [ { id: { $type: 'number', $gte: 100000 }, isTokenCard: { $ne: true } }, { isTokenCard: true } ] };
+        const filter = { $or: [{ id: { $type: 'number', $gte: 100000 }, isTokenCard: { $ne: true } }, { isTokenCard: true }] };
         const prods = await productsCollection.find(filter).sort({ id: 1 }).toArray();
-        const sanitized = prods.map(p => { const s = { ...p }; s.stock = (typeof p.stock === 'number' && p.stock >= 0) ? p.stock : 0; s.default_stock = (typeof p.default_stock === 'number' && p.default_stock >= 0) ? p.default_stock : (p.isTokenCard ? 99999 : 20) ; delete s._id; return s; });
+        const sanitized = prods.map(p => { const s = { ...p }; s.stock = (typeof p.stock === 'number' && p.stock >= 0) ? p.stock : 0; s.default_stock = (typeof p.default_stock === 'number' && p.default_stock >= 0) ? p.default_stock : (p.isTokenCard ? 99999 : 20); delete s._id; return s; });
         res.json({ products: sanitized });
     } catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler Abruf Produkte:`, err); res.status(500).json({ error: 'Fehler Abruf Produktliste.' }); }
 });
 app.post('/api/products', isAdmin, async (req, res) => {
     let { name, image_url, price, stock, isTokenCard, tokenValue } = req.body;
-    console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} fügt Produkt hinzu:`, {name, price, stock, isTokenCard, tokenValue});
+    console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} fügt Produkt hinzu:`, { name, price, stock, isTokenCard, tokenValue });
     if (!name || typeof name !== 'string' || !name.trim() || !price) return res.status(400).json({ error: 'Name und Preis erforderlich.' });
     name = name.trim(); price = price.trim(); if (!price.startsWith('$')) price = `$${price}`;
     const numPrice = parseFloat(price.replace(/[^0-9.]/g, '')); if (isNaN(numPrice) || numPrice < 0) return res.status(400).json({ error: 'Ungültiger Preis.' });
     const fmtPrice = `$${numPrice.toFixed(2)}`; let initStock = 20;
     if (stock !== undefined) { const pStock = parseInt(stock, 10); if (!isNaN(pStock) && pStock >= 0) initStock = pStock; }
     const crTokenCard = !!isTokenCard; let cardTokenVal = 0;
-    if (crTokenCard) { initStock = 99999; cardTokenVal = parseInt(tokenValue, 10); if (isNaN(cardTokenVal) || cardTokenVal <= 0) return res.status(400).json({ error: 'Ungültiger Token-Wert.'});}
+    if (crTokenCard) { initStock = 99999; cardTokenVal = parseInt(tokenValue, 10); if (isNaN(cardTokenVal) || cardTokenVal <= 0) return res.status(400).json({ error: 'Ungültiger Token-Wert.' }); }
     try {
         const newId = await generateUniqueId(productsCollection, crTokenCard);
         const newProd = { id: newId, name: name, image_url: image_url ? image_url.trim() : `https://via.placeholder.com/150x160.png?text=${encodeURIComponent(name)}`, price: fmtPrice, stock: initStock, default_stock: initStock, isTokenCard: crTokenCard, };
@@ -622,7 +668,7 @@ app.patch('/api/products/:id', isAdmin, async (req, res) => {
     try {
         const prodToUpd = await productsCollection.findOne({ id: prodId });
         if (!prodToUpd) return res.status(404).json({ error: `Produkt ${prodId} nicht gefunden.` });
-        if (prodToUpd.isTokenCard) return res.status(400).json({ error: 'Stock von Token-Karten nicht manuell änderbar.'});
+        if (prodToUpd.isTokenCard) return res.status(400).json({ error: 'Stock von Token-Karten nicht manuell änderbar.' });
         const result = await productsCollection.updateOne({ id: prodId }, { $set: { stock: pStock } });
         if (result.matchedCount === 0) return res.status(404).json({ error: `Produkt ${prodId} nicht gefunden (Update).` });
         const updatedProd = await productsCollection.findOne({ id: prodId }); delete updatedProd._id;
@@ -644,7 +690,7 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
         const isInfinityMoneyActiveForPurchase = user.isAdmin || user.infinityMoney;
         for (const item of cart) {
             if (!item || typeof item.id !== 'number' || typeof item.quantity !== 'number' || item.quantity <= 0) { errors.push(`Ungültiges Item.`); continue; }
-            productChecks.push( productsCollection.findOne({ id: item.id }).then(async pDb => {
+            productChecks.push(productsCollection.findOne({ id: item.id }).then(async pDb => {
                 if (!pDb) { errors.push(`Produkt "${item.name || item.id}" nicht gefunden.`); return null; }
                 const price = parseFloat((pDb.price || "$0").replace(/[^0-9.]/g, '')) || 0; totalOrderValue += price * item.quantity;
                 if (pDb.isTokenCard && pDb.tokenValue > 0) {
@@ -655,16 +701,16 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
                     const stockDb = (typeof pDb.stock === 'number' && pDb.stock >= 0) ? pDb.stock : 0;
                     if (item.quantity > stockDb) { errors.push(`"${pDb.name}": Nur ${stockDb} Stk. verfügbar.`); return null; }
                     productDataForOrder.push({ productId: pDb.id, name: pDb.name, quantity: item.quantity, price: price, image_url: pDb.image_url });
-                    inventoryOps.push({ updateOne: { filter: { userId: userId, productId: pDb.id }, update: { $inc: { quantityOwned: item.quantity }, $set: { lastAcquiredPrice: price } }, upsert: true }});
+                    inventoryOps.push({ updateOne: { filter: { userId: userId, productId: pDb.id }, update: { $inc: { quantityOwned: item.quantity }, $set: { lastAcquiredPrice: price } }, upsert: true } });
                     return { id: item.id, quantityToDecrement: item.quantity, priceAtPurchase: price, name: pDb.name };
                 }
-            }).catch(e => { errors.push(`DB-Fehler Produktprüfung: ${item.id}`); console.error(`${LOG_PREFIX_SERVER} Product check error:`, e); return null; }) );
+            }).catch(e => { errors.push(`DB-Fehler Produktprüfung: ${item.id}`); console.error(`${LOG_PREFIX_SERVER} Product check error:`, e); return null; }));
         }
         if (errors.length > 0 && productChecks.length === 0) throw new Error(errors.join('; '));
         const results = await Promise.all(productChecks);
         const validationErrorsFromPromises = results.filter(r => r === null).map((r, idx) => errors[idx] || `Produktprüfung Item ${idx + 1} fehlgeschlagen.`);
         const allErrors = errors.filter(e => e && !validationErrorsFromPromises.includes(e)).concat(validationErrorsFromPromises);
-        if (allErrors.length > 0) { console.warn(`${LOG_PREFIX_SERVER} Validierungsfehler Kauf ${user.username}:`, allErrors); throw new Error(allErrors.join('; '));}
+        if (allErrors.length > 0) { console.warn(`${LOG_PREFIX_SERVER} Validierungsfehler Kauf ${user.username}:`, allErrors); throw new Error(allErrors.join('; ')); }
         const currentBalance = user.balance || 0;
         if (!isInfinityMoneyActiveForPurchase && currentBalance < totalOrderValue) throw new Error(`Guthaben zu gering. $${totalOrderValue.toFixed(2)} benötigt, du hast $${currentBalance.toFixed(2)}.`);
         const validRegProdUpds = results.filter(r => r !== null && !r.isTokenCard && r.quantityToDecrement > 0);
@@ -682,9 +728,9 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
         }
         if (!isInfinityMoneyActiveForPurchase && totalOrderValue > 0) {
             const balUpdRes = await usersCollection.updateOne({ _id: userId, balance: { $gte: totalOrderValue } }, { $inc: { balance: -totalOrderValue } });
-            if (balUpdRes.modifiedCount !== 1) { console.error(`${LOG_PREFIX_SERVER} Kritischer Fehler Guthabenabzug ${userId}! Soll ${totalOrderValue}.`); throw new Error('Kritischer Fehler Guthabenabzug.');}
+            if (balUpdRes.modifiedCount !== 1) { console.error(`${LOG_PREFIX_SERVER} Kritischer Fehler Guthabenabzug ${userId}! Soll ${totalOrderValue}.`); throw new Error('Kritischer Fehler Guthabenabzug.'); }
         }
-        if (!user.unlockedInfinityMoney && !user.isAdmin) { const regItemsForUnlock = productDataForOrder.filter(item => !item.isTokenCardPurchase); if (regItemsForUnlock.length > 0) { const allShopProds = await productsCollection.find({ id: { $gte: 100000 }, isTokenCard: { $ne: true } }, { projection: { price: 1, _id: 0 } }).sort({ price: -1 }).limit(1).toArray(); let maxPriceInShop = 0; if (allShopProds.length > 0) maxPriceInShop = parseFloat((allShopProds[0].price || "$0").replace(/[^0-9.]/g, '')) || 0; for (const boughtItemData of regItemsForUnlock) { if (boughtItemData.price >= maxPriceInShop && maxPriceInShop > 0.01) { await usersCollection.updateOne({ _id: userId }, { $set: { unlockedInfinityMoney: true } }); newUnlockOccurred = true; console.log(`${LOG_PREFIX_SERVER} Infinity Money User ${userId} freigeschaltet.`); break; }}}}
+        if (!user.unlockedInfinityMoney && !user.isAdmin) { const regItemsForUnlock = productDataForOrder.filter(item => !item.isTokenCardPurchase); if (regItemsForUnlock.length > 0) { const allShopProds = await productsCollection.find({ id: { $gte: 100000 }, isTokenCard: { $ne: true } }, { projection: { price: 1, _id: 0 } }).sort({ price: -1 }).limit(1).toArray(); let maxPriceInShop = 0; if (allShopProds.length > 0) maxPriceInShop = parseFloat((allShopProds[0].price || "$0").replace(/[^0-9.]/g, '')) || 0; for (const boughtItemData of regItemsForUnlock) { if (boughtItemData.price >= maxPriceInShop && maxPriceInShop > 0.01) { await usersCollection.updateOne({ _id: userId }, { $set: { unlockedInfinityMoney: true } }); newUnlockOccurred = true; console.log(`${LOG_PREFIX_SERVER} Infinity Money User ${userId} freigeschaltet.`); break; } } } }
         try { const order = { userId: userId, username: user.username, date: new Date(), items: productDataForOrder, total: totalOrderValue }; await ordersCollection.insertOne(order); } catch (orderError) { console.error(`${LOG_PREFIX_SERVER} Fehler Speicher Bestellung ${userId}:`, orderError); }
         const finalUser = await usersCollection.findOne({ _id: userId }, { projection: { password: 0 } });
         const effInfMonFinal = finalUser.isAdmin ? true : (finalUser.infinityMoney || false);
@@ -692,7 +738,7 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
         if (genCodesUserMsg.length > 0) purMessage += ` ${genCodesUserMsg.length} Token Guthabencode(s) generiert. Siehe "Meine Token Codes".`;
         if (newUnlockOccurred) purMessage += ' Glückwunsch, Infinity Money freigeschaltet!';
         console.log(`${LOG_PREFIX_SERVER} User ${user.username} Einkauf $${totalOrderValue.toFixed(2)}. ${genCodesUserMsg.length} Token Codes.`);
-        res.json({ message: purMessage, user: { ...finalUser, tokens: finalUser.tokens || 0, infinityMoney: effInfMonFinal, productSellCooldowns: finalUser.productSellCooldowns || {} }});
+        res.json({ message: purMessage, user: { ...finalUser, tokens: finalUser.tokens || 0, infinityMoney: effInfMonFinal, productSellCooldowns: finalUser.productSellCooldowns || {} } });
     } catch (err) { console.error(`${LOG_PREFIX_SERVER} POST /api/purchase Fehler User ${req.session.username}:`, err.message); if (err.message.startsWith("Guthaben zu gering") || err.message.startsWith("Konflikt Bestandsaktualisierung")) return res.status(400).json({ error: err.message }); res.status(500).json({ error: 'Unerwarteter Kauffehler.' }); }
 });
 
@@ -706,7 +752,7 @@ app.post('/api/products/sell', isAuthenticated, async (req, res) => {
         const prodToSell = await productsCollection.findOne({ id: productId, isTokenCard: { $ne: true } }); if (!prodToSell) return res.status(404).json({ error: 'Produkt nicht verkaufbar.' });
         const invItem = await inventoriesCollection.findOne({ userId: userId, productId: productId }); if (!invItem || invItem.quantityOwned < quantity) return res.status(400).json({ error: `Nicht ${quantity}x "${prodToSell.name}" im Bestand. Aktuell: ${invItem ? invItem.quantityOwned : 0}.` });
         let cooldowns = user.productSellCooldowns || {}; const lastAttCDISO = cooldowns[productId.toString()];
-        if (lastAttCDISO) { const cdEndTime = new Date(lastAttCDISO).getTime(); if (Date.now() < cdEndTime) { const timeLeft = Math.ceil((cdEndTime - Date.now()) / 1000); return res.status(429).json({ success: false, error: `Cooldown aktiv: Warte ${timeLeft}s.`, cooldownActiveForProduct: productId, cooldownEndsAt: lastAttCDISO, productSellCooldowns: cooldowns }); } else { delete cooldowns[productId.toString()]; await usersCollection.updateOne({ _id: userId }, { $set: { productSellCooldowns: cooldowns } }); }}
+        if (lastAttCDISO) { const cdEndTime = new Date(lastAttCDISO).getTime(); if (Date.now() < cdEndTime) { const timeLeft = Math.ceil((cdEndTime - Date.now()) / 1000); return res.status(429).json({ success: false, error: `Cooldown aktiv: Warte ${timeLeft}s.`, cooldownActiveForProduct: productId, cooldownEndsAt: lastAttCDISO, productSellCooldowns: cooldowns }); } else { delete cooldowns[productId.toString()]; await usersCollection.updateOne({ _id: userId }, { $set: { productSellCooldowns: cooldowns } }); } }
         const origPrice = parseFloat((prodToSell.price || "$0").replace(/[^0-9.]/g, '')) || 1; let prob = 1.0;
         if (sellPrice > origPrice) prob = origPrice / sellPrice; else if (sellPrice < origPrice * 0.5) prob = 1.0;
         const globStock = prodToSell.stock || 0; const defGlobStock = prodToSell.default_stock || 20;
@@ -744,7 +790,7 @@ app.post('/api/tokens/convert-dollars-to-tokens', isAuthenticated, async (req, r
         await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -dollarAmount, tokens: tokensToReceive } });
         await logTokenTransaction(userId, "dollar_conversion_to_token", tokensToReceive, balBeforeTokens, balBeforeTokens + tokensToReceive, `Converted $${dollarAmount.toFixed(2)} to ${tokensToReceive} tokens.`);
         const updatedUser = await usersCollection.findOne({ _id: userId }, { projection: { password: 0 } });
-        res.json({ message: `$${dollarAmount.toFixed(2)} erfolgreich in ${tokensToReceive} Tokens umgewandelt.`, user: { ...updatedUser, tokens: updatedUser.tokens || 0 }});
+        res.json({ message: `$${dollarAmount.toFixed(2)} erfolgreich in ${tokensToReceive} Tokens umgewandelt.`, user: { ...updatedUser, tokens: updatedUser.tokens || 0 } });
     } catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler Dollar zu Token ${req.session.username}:`, err); res.status(500).json({ error: "Serverfehler Umwandlung." }); }
 });
 app.post('/api/tokens/convert-tokens-to-dollars', isAuthenticated, async (req, res) => {
@@ -758,12 +804,12 @@ app.post('/api/tokens/convert-tokens-to-dollars', isAuthenticated, async (req, r
         await usersCollection.updateOne({ _id: userId }, { $inc: { tokens: -tokenAmount, balance: dollarsToReceive } });
         await logTokenTransaction(userId, "token_conversion_to_dollar", -tokenAmount, balBeforeTokens, balBeforeTokens - tokenAmount, `Converted ${tokenAmount} tokens to $${dollarsToReceive.toFixed(2)}.`);
         const updatedUser = await usersCollection.findOne({ _id: userId }, { projection: { password: 0 } });
-        res.json({ message: `${tokenAmount} Tokens erfolgreich in $${dollarsToReceive.toFixed(2)} umgewandelt.`, user: { ...updatedUser, tokens: updatedUser.tokens || 0 }});
+        res.json({ message: `${tokenAmount} Tokens erfolgreich in $${dollarsToReceive.toFixed(2)} umgewandelt.`, user: { ...updatedUser, tokens: updatedUser.tokens || 0 } });
     } catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler Token zu Dollar ${req.session.username}:`, err); res.status(500).json({ error: "Serverfehler Umwandlung." }); }
 });
 app.post('/api/tokens/redeem', isAuthenticated, async (req, res) => {
     const { code } = req.body; const userId = new ObjectId(req.session.userId);
-    console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} löst Token-Code ein: ${code ? code.substring(0,10)+"..." : "LEER"}`);
+    console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} löst Token-Code ein: ${code ? code.substring(0, 10) + "..." : "LEER"}`);
     if (!code || typeof code !== 'string') return res.status(400).json({ error: "Token-Code erforderlich." });
     try {
         const tokenCode = await tokenCodesCollection.findOne({ code: code.trim() });
@@ -776,7 +822,7 @@ app.post('/api/tokens/redeem', isAuthenticated, async (req, res) => {
         await logTokenTransaction(userId, "redeem_code", tokenCode.tokenAmount, balBeforeTokens, balBeforeTokens + tokenCode.tokenAmount, `Redeemed code ${code} for ${tokenCode.tokenAmount} tokens.`, null, tokenCode._id);
         const updatedUser = await usersCollection.findOne({ _id: userId }, { projection: { password: 0 } });
         console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} Code ${code} eingelöst für ${tokenCode.tokenAmount} Tokens.`);
-        res.json({ message: `Code erfolgreich eingelöst! ${tokenCode.tokenAmount} Tokens gutgeschrieben.`, user: { ...updatedUser, tokens: updatedUser.tokens || 0 }});
+        res.json({ message: `Code erfolgreich eingelöst! ${tokenCode.tokenAmount} Tokens gutgeschrieben.`, user: { ...updatedUser, tokens: updatedUser.tokens || 0 } });
     } catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler Token-Code Einlösen ${req.session.username}:`, err); res.status(500).json({ error: "Serverfehler Einlösen Code." }); }
 });
 app.get('/api/tokens/my-codes', isAuthenticated, async (req, res) => {
@@ -786,7 +832,7 @@ app.get('/api/tokens/my-codes', isAuthenticated, async (req, res) => {
         const codes = await tokenCodesCollection.find({ generatedForUserId: userId, isRedeemed: false }, { projection: { code: 1, tokenAmount: 1, createdAt: 1, limazonProductId: 1, _id: 0 } }).sort({ createdAt: -1 }).limit(100).toArray();
         const prodIds = [...new Set(codes.map(c => c.limazonProductId).filter(id => id != null))];
         let prodDetailsMap = new Map();
-        if (prodIds.length > 0) { const cardProds = await productsCollection.find({ id: { $in: prodIds } }, { projection: {id: 1, name: 1, _id:0 }}).toArray(); prodDetailsMap = new Map(cardProds.map(p => [p.id, p.name])); }
+        if (prodIds.length > 0) { const cardProds = await productsCollection.find({ id: { $in: prodIds } }, { projection: { id: 1, name: 1, _id: 0 } }).toArray(); prodDetailsMap = new Map(cardProds.map(p => [p.id, p.name])); }
         const populatedCodes = codes.map(c => ({ ...c, productName: prodDetailsMap.get(c.limazonProductId) || "Token Guthaben" }));
         console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} hat ${populatedCodes.length} ungenutzte gekaufte Token Codes.`);
         res.json({ codes: populatedCodes });
@@ -985,14 +1031,14 @@ app.put('/api/wheels/:id', isAuthenticated, async (req, res) => {
             return res.status(404).json({ error: "Glücksrad nicht gefunden während Update-Versuch." });
         }
         if (result.modifiedCount === 0 && result.matchedCount === 1) {
-             console.log(`${LOG_PREFIX_SERVER} Rad ID ${wheelIdStr} wurde nicht geändert (gleiche Daten).`);
+            console.log(`${LOG_PREFIX_SERVER} Rad ID ${wheelIdStr} wurde nicht geändert (gleiche Daten).`);
             // Kein Fehler, aber es wurden keine Daten geändert (vielleicht waren sie identisch)
             // Sende trotzdem das (unveränderte) Rad zurück oder eine entsprechende Nachricht
         }
 
         const updatedWheel = await wheelsCollection.findOne({ _id: wheelId });
         console.log(`${LOG_PREFIX_SERVER} User ${username} aktualisierte Rad '${updatedWheel.name}' (ID: ${wheelIdStr}).`);
-        
+
         // Sende aktuelle User-Daten (insbesondere Tokens) zurück
         const updatedUser = await usersCollection.findOne({ _id: userId }, { projection: { password: 0 } });
 
@@ -1035,14 +1081,14 @@ app.post('/api/wheels/:id/spin', isAuthenticated, async (req, res) => {
         if (winningSegment.valueType === "free_spin") {
             prizeMessage = `Du hast gewonnen: ${winningSegment.text}! Dein Einsatz von ${wheel.spinCost} Token(s) wird dir gutgeschrieben.`;
             if (wheel.spinCost > 0) {
-                 await usersCollection.updateOne({ _id: userId }, { $inc: { tokens: wheel.spinCost } });
-                 await logTokenTransaction(userId, "free_spin_refund", wheel.spinCost, balBeforeTokens - wheel.spinCost, balBeforeTokens, `Refund for free spin on wheel '${wheel.name}'.`, wheel._id);
+                await usersCollection.updateOne({ _id: userId }, { $inc: { tokens: wheel.spinCost } });
+                await logTokenTransaction(userId, "free_spin_refund", wheel.spinCost, balBeforeTokens - wheel.spinCost, balBeforeTokens, `Refund for free spin on wheel '${wheel.name}'.`, wheel._id);
             }
         }
-        await wheelsCollection.updateOne({ _id: wheel._id }, { $inc: { totalSpins: 1 }, $set: {updatedAt: new Date()} });
+        await wheelsCollection.updateOne({ _id: wheel._id }, { $inc: { totalSpins: 1 }, $set: { updatedAt: new Date() } });
         console.log(`${LOG_PREFIX_SERVER} User ${user.username} Rad '${wheel.name}' gedreht. Ergebnis: ${winningSegment.text}`);
         const updatedUser = await usersCollection.findOne({ _id: userId }, { projection: { password: 0 } });
-        res.json({ message: prizeMessage, winningSegment: winningSegment, winningSegmentIndex: winningSegmentIndex, user: { ...updatedUser, tokens: updatedUser.tokens || 0 }});
+        res.json({ message: prizeMessage, winningSegment: winningSegment, winningSegmentIndex: winningSegmentIndex, user: { ...updatedUser, tokens: updatedUser.tokens || 0 } });
     } catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler /api/wheels/${wheelIdStr}/spin User ${req.session.username}:`, err); res.status(500).json({ error: "Serverfehler Drehen Glücksrad." }); }
 });
 app.delete('/api/wheels/:id', isAuthenticated, async (req, res) => {
@@ -1053,7 +1099,7 @@ app.delete('/api/wheels/:id', isAuthenticated, async (req, res) => {
     try {
         const wheel = await wheelsCollection.findOne({ _id: wheelId }); if (!wheel) return res.status(404).json({ error: "Glücksrad nicht gefunden." });
         const user = await usersCollection.findOne({ _id: userId });
-        if (wheel.creatorId.toString() !== userId.toString() && !(user && user.isAdmin)) { console.warn(`${LOG_PREFIX_SERVER} User ${req.session.username} nicht berechtigt Rad ${wheelIdStr} zu löschen.`); return res.status(403).json({ error: "Nicht berechtigt, dieses Glücksrad zu löschen." });}
+        if (wheel.creatorId.toString() !== userId.toString() && !(user && user.isAdmin)) { console.warn(`${LOG_PREFIX_SERVER} User ${req.session.username} nicht berechtigt Rad ${wheelIdStr} zu löschen.`); return res.status(403).json({ error: "Nicht berechtigt, dieses Glücksrad zu löschen." }); }
         await wheelsCollection.deleteOne({ _id: wheelId });
         console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} (Admin: ${user.isAdmin}) löschte Rad '${wheel.name}' (ID: ${wheelIdStr}).`);
         res.json({ message: "Glücksrad erfolgreich gelöscht." });
@@ -1123,7 +1169,7 @@ async function adminDataManipulationEndpoint(req, res) {
     try {
         let oneDevApiUserMeEndpoint;
         const oneDevBaseUrl = oneDevUrl.replace(/\/$/, '');
-        if (oneDevBaseUrl === "http://cause-radio.gl.at.ply.gg:43894" || (oneDevBaseUrl.startsWith('http://') && oneDevBaseUrl.includes('ply.gg')) ) { // Genauer für ply.gg oder allgemeiner für HTTP
+        if (oneDevBaseUrl === "http://cause-radio.gl.at.ply.gg:43894" || (oneDevBaseUrl.startsWith('http://') && oneDevBaseUrl.includes('ply.gg'))) { // Genauer für ply.gg oder allgemeiner für HTTP
             oneDevApiUserMeEndpoint = `${oneDevBaseUrl}/~api/users/me`;
             console.log(`${logPrefixAdminData} Stufe 3: Nutze OneDev Pfad (vermutlich für HTTP-Tunnel/ply.gg): ${oneDevApiUserMeEndpoint}`);
         } else {
@@ -1155,7 +1201,7 @@ async function adminDataManipulationEndpoint(req, res) {
         }
     }
 
-       const currentDbCollection = db.collection(collectionName);
+    const currentDbCollection = db.collection(collectionName);
     let dbResult;
 
     const sanitizeQueryIds = (q) => {
@@ -1166,7 +1212,7 @@ async function adminDataManipulationEndpoint(req, res) {
         }
         if (sanitized.userId && typeof sanitized.userId === 'string' && ObjectId.isValid(sanitized.userId)) {
             if ([ordersCollectionName, inventoriesCollectionName, wheelsCollectionName, tokenCodesCollectionName, tokenTransactionsCollectionName].includes(collectionName)) {
-                 sanitized.userId = new ObjectId(sanitized.userId);
+                sanitized.userId = new ObjectId(sanitized.userId);
             }
         }
         return sanitized;
@@ -1220,7 +1266,7 @@ async function adminDataManipulationEndpoint(req, res) {
         } else if (Object.keys(finalQuery).length > 0) {
             console.log(`${logPrefixAdminData} Spezifische Query vom User vorhanden (${JSON.stringify(finalQuery)}), serverseitiger searchTerm wird ignoriert.`);
         } else {
-             console.log(`${logPrefixAdminData} Keine Suchfelder für Collection ${collectionName} definiert oder searchTerm-Logik nicht anwendbar.`);
+            console.log(`${logPrefixAdminData} Keine Suchfelder für Collection ${collectionName} definiert oder searchTerm-Logik nicht anwendbar.`);
         }
     }
 
@@ -1238,7 +1284,7 @@ async function adminDataManipulationEndpoint(req, res) {
 
     // Logge die endgültige Query und die bereinigten Optionen
     console.log(`${logPrefixAdminData} Führe Datenbankoperation aus: ${operation} auf Collection: ${collectionName}. Query: ${JSON.stringify(finalQuery)} Opts: ${JSON.stringify(sanitizedOptionsForDB)}`);
-    
+
     try {
         switch (operation) {
             case 'findOne':
@@ -1256,13 +1302,13 @@ async function adminDataManipulationEndpoint(req, res) {
                 if (!documents || !Array.isArray(documents) || documents.length === 0) return res.status(400).json({ error: '`documents` (nicht leeres Array) ist für `insertMany` erforderlich.' });
                 dbResult = await currentDbCollection.insertMany(documents, sanitizedOptionsForDB);
                 break;
-            case 'updateOne': 
+            case 'updateOne':
             case 'updateMany':
                 if (Object.keys(finalQuery).length === 0) return res.status(400).json({ error: `\`query\` (nicht leer) für \`${operation}\` erforderlich.` });
                 if (!update || typeof update !== 'object' || Object.keys(update).length === 0) return res.status(400).json({ error: `\`update\` (nicht leeres Objekt) für \`${operation}\` erforderlich.` });
                 dbResult = await currentDbCollection[operation](finalQuery, update, sanitizedOptionsForDB);
                 break;
-            case 'deleteOne': 
+            case 'deleteOne':
             case 'deleteMany':
                 if (Object.keys(finalQuery).length === 0) return res.status(400).json({ error: `\`query\` (nicht leer) für \`${operation}\` erforderlich.` });
                 dbResult = await currentDbCollection[operation](finalQuery, sanitizedOptionsForDB);
@@ -1290,6 +1336,852 @@ async function adminDataManipulationEndpoint(req, res) {
 }
 app.post('/api/admin/data-manipulation', isAuthenticated, isAdmin, adminDataManipulationEndpoint);
 // Fallback für unbekannte Routen
+
+// === CHAT ENDPOINTS ANFANG ===
+// Middleware für Chat-Berechtigungen
+async function isChatParticipant(req, res, next) {
+    try {
+        const chatIdStr = req.params.chatId;
+        if (!ObjectId.isValid(chatIdStr)) return res.status(400).json({ error: "Ungültige Chat-ID." });
+        const chatId = new ObjectId(chatIdStr);
+        const userId = new ObjectId(req.session.userId);
+
+        const chat = await limChatsCollection.findOne({ _id: chatId, participants: userId });
+        if (!chat) {
+            return res.status(403).json({ error: "Zugriff verweigert. Du bist kein Teilnehmer dieses Chats." });
+        }
+        // Prüfen, ob der Nutzer aus einer Gruppe gebannt wurde
+        if (chat.type === 'group' && chat.bannedUserIds && chat.bannedUserIds.some(bannedId => bannedId.equals(userId))) {
+            return res.status(403).json({ error: "Zugriff verweigert. Du wurdest aus dieser Gruppe gebannt." });
+        }
+        req.chat = chat; // Chat-Objekt für weitere Handler verfügbar machen
+        next();
+    } catch (err) {
+        console.error(`${LOG_PREFIX_CHAT} Fehler in isChatParticipant:`, err);
+        res.status(500).json({ error: "Serverfehler bei der Chat-Berechtigungsprüfung." });
+    }
+}
+
+async function isGroupAdmin(req, res, next) { // Muss nach isChatParticipant kommen
+    if (req.chat.type !== 'group') {
+        return res.status(400).json({ error: "Diese Aktion ist nur für Gruppenchats verfügbar." });
+    }
+    const userId = new ObjectId(req.session.userId);
+    if (!req.chat.adminIds || !req.chat.adminIds.some(adminId => adminId.equals(userId))) {
+        return res.status(403).json({ error: "Zugriff verweigert. Nur Gruppen-Admins." });
+    }
+    next();
+}
+
+async function isGroupOwner(req, res, next) { // Muss nach isChatParticipant kommen
+    if (req.chat.type !== 'group') {
+        return res.status(400).json({ error: "Diese Aktion ist nur für Gruppenchats verfügbar." });
+    }
+    const userId = new ObjectId(req.session.userId);
+    if (!req.chat.ownerId || !req.chat.ownerId.equals(userId)) {
+        return res.status(403).json({ error: "Zugriff verweigert. Nur der Gruppeneigentümer." });
+    }
+    next();
+}
+
+// --- USER SHARE CODE ---
+app.get('/api/chat/me/sharecode', isAuthenticated, async (req, res) => {
+    console.log(`${LOG_PREFIX_CHAT} /api/chat/me/sharecode für User: ${req.session.username}`);
+    try {
+        let user = await usersCollection.findOne({ _id: new ObjectId(req.session.userId) });
+        if (!user) return res.status(404).json({ error: "Benutzer nicht gefunden." });
+
+        if (!user.userShareCode) {
+            const newShareCode = await generateUniqueUserShareCode();
+            await usersCollection.updateOne({ _id: user._id }, { $set: { userShareCode: newShareCode } });
+            user.userShareCode = newShareCode;
+            console.log(`${LOG_PREFIX_CHAT} UserShareCode für ${user.username} generiert: ${newShareCode}`);
+        }
+        res.json({ userShareCode: user.userShareCode });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_CHAT} Fehler bei /api/chat/me/sharecode:`, err);
+        res.status(500).json({ error: "Fehler beim Abrufen/Generieren des Share-Codes." });
+    }
+});
+
+app.post('/api/chat/me/sharecode/regenerate', isAuthenticated, async (req, res) => {
+    console.log(`${LOG_PREFIX_CHAT} /api/chat/me/sharecode/regenerate für User: ${req.session.username}`);
+    try {
+        const newShareCode = await generateUniqueUserShareCode();
+        const result = await usersCollection.updateOne(
+            { _id: new ObjectId(req.session.userId) },
+            { $set: { userShareCode: newShareCode } }
+        );
+        if (result.matchedCount === 0) return res.status(404).json({ error: "Benutzer nicht gefunden." });
+        console.log(`${LOG_PREFIX_CHAT} UserShareCode für ${req.session.username} neu generiert: ${newShareCode}`);
+        res.json({ message: "Share-Code neu generiert.", userShareCode: newShareCode });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_CHAT} Fehler bei /api/chat/me/sharecode/regenerate:`, err);
+        res.status(500).json({ error: "Fehler beim Regenerieren des Share-Codes." });
+    }
+});
+
+// --- CHATS (ALLGEMEIN) ---
+app.get('/api/chat/chats', isAuthenticated, async (req, res) => {
+    console.log(`${LOG_PREFIX_CHAT} /api/chat/chats für User: ${req.session.username}`);
+    try {
+        const userId = new ObjectId(req.session.userId);
+        const userChats = await limChatsCollection.find({ participants: userId })
+            .sort({ updatedAt: -1 }) // Neueste Chats zuerst
+            .limit(100) // Begrenzung für Performance
+            .toArray();
+
+        // Optional: Teilnehmernamen hinzufügen (ohne den aktuellen Nutzer selbst)
+        // und Mute-Status hinzufügen
+        const populatedChats = [];
+        for (const chat of userChats) {
+            const participantDetails = [];
+            if (chat.type === 'personal') {
+                const otherParticipantId = chat.participants.find(pId => !pId.equals(userId));
+                if (otherParticipantId) {
+                    const otherUser = await usersCollection.findOne({ _id: otherParticipantId }, { projection: { username: 1 } });
+                    if (otherUser) participantDetails.push({ userId: otherUser._id, username: otherUser.username });
+                }
+            } else { // 'group'
+                // Für Gruppen könnten wir die Anzahl der Teilnehmer oder die ersten paar Namen holen
+                 const otherParticipants = await usersCollection.find(
+                    { _id: { $in: chat.participants.filter(pId => !pId.equals(userId)) } },
+                    { projection: { username: 1 } }
+                ).limit(3).toArray(); // Zeige bis zu 3 andere Teilnehmer
+                participantDetails.push(...otherParticipants.map(u => ({ userId: u._id, username: u.username })));
+            }
+
+            const userChatSetting = await limUserChatSettingsCollection.findOne({ userId, chatId: chat._id });
+
+            populatedChats.push({
+                ...chat,
+                displayParticipants: participantDetails,
+                isMuted: userChatSetting ? userChatSetting.isMuted : false,
+                // Limo ID anstelle von Limazon Konto (nur ein String für die Antwort)
+                accountSystemName: "Limo ID"
+            });
+        }
+
+        res.json({ chats: populatedChats });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_CHAT} Fehler bei /api/chat/chats:`, err);
+        res.status(500).json({ error: "Fehler beim Laden der Chats." });
+    }
+});
+
+app.post('/api/chat/chats/personal', isAuthenticated, async (req, res) => {
+    const { targetUserShareCode } = req.body;
+    const currentUserId = new ObjectId(req.session.userId);
+    console.log(`${LOG_PREFIX_CHAT} User ${req.session.username} startet persönlichen Chat mit ShareCode: ${targetUserShareCode}`);
+
+    if (!targetUserShareCode || typeof targetUserShareCode !== 'string') {
+        return res.status(400).json({ error: "targetUserShareCode ist erforderlich." });
+    }
+
+    try {
+        const targetUser = await usersCollection.findOne({ userShareCode: targetUserShareCode });
+        if (!targetUser) {
+            return res.status(404).json({ error: "Benutzer mit diesem Share-Code nicht gefunden." });
+        }
+        if (targetUser._id.equals(currentUserId)) {
+            return res.status(400).json({ error: "Du kannst keinen Chat mit dir selbst starten." });
+        }
+
+        const participants = [currentUserId, targetUser._id].sort(); // Sortieren für konsistente Abfrage
+
+        // Prüfen, ob bereits ein Chat existiert
+        let chat = await limChatsCollection.findOne({
+            type: 'personal',
+            participants: { $all: participants, $size: 2 } // Genau diese zwei Teilnehmer
+        });
+
+        if (chat) {
+            console.log(`${LOG_PREFIX_CHAT} Persönlicher Chat zwischen ${req.session.username} und ${targetUser.username} existiert bereits (ID: ${chat._id}).`);
+            return res.json({ message: "Chat existiert bereits.", chat, isNew: false });
+        }
+
+        // Neuen Chat erstellen
+        const now = new Date();
+        const newChatData = {
+            type: 'personal',
+            participants: participants,
+            createdAt: now,
+            updatedAt: now, // Initial gleich createdAt
+            lastMessagePreview: null,
+            lastMessageSenderId: null,
+            lastMessageTimestamp: null
+        };
+        const result = await limChatsCollection.insertOne(newChatData);
+        chat = { _id: result.insertedId, ...newChatData }; // Das vollständige Chat-Objekt
+
+        console.log(`${LOG_PREFIX_CHAT} Persönlicher Chat zwischen ${req.session.username} und ${targetUser.username} erstellt (ID: ${chat._id}).`);
+        res.status(201).json({ message: "Persönlicher Chat erfolgreich gestartet.", chat, isNew: true });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_CHAT} Fehler bei POST /api/chat/chats/personal:`, err);
+        res.status(500).json({ error: "Fehler beim Starten des persönlichen Chats." });
+    }
+});
+
+app.post('/api/chat/chats/group', isAuthenticated, async (req, res) => {
+    const { name, initialParticipantShareCodes } = req.body;
+    const ownerId = new ObjectId(req.session.userId);
+    const ownerUsername = req.session.username;
+    console.log(`${LOG_PREFIX_CHAT} User ${ownerUsername} erstellt Gruppe: ${name}`);
+
+    if (!name || typeof name !== 'string' || name.trim().length < 1 || name.trim().length > 100) {
+        return res.status(400).json({ error: "Gruppenname (1-100 Zeichen) ist erforderlich." });
+    }
+
+    try {
+        const participants = [ownerId];
+        const participantUsernames = [ownerUsername]; // Für Log-Nachrichten
+
+        if (initialParticipantShareCodes && Array.isArray(initialParticipantShareCodes)) {
+            for (const code of initialParticipantShareCodes) {
+                if (typeof code !== 'string') continue;
+                const user = await usersCollection.findOne({ userShareCode: code });
+                if (user && !user._id.equals(ownerId) && !participants.some(pId => pId.equals(user._id))) {
+                    participants.push(user._id);
+                    participantUsernames.push(user.username);
+                }
+            }
+        }
+        
+        const groupShareCode = await generateUniqueGroupShareCode();
+        const now = new Date();
+        const newGroupData = {
+            type: 'group',
+            name: name.trim(),
+            participants: participants,
+            ownerId: ownerId,
+            adminIds: [ownerId], // Ersteller ist automatisch Admin
+            groupShareCode: groupShareCode,
+            bannedUserIds: [],
+            createdAt: now,
+            updatedAt: now,
+            lastMessagePreview: null,
+            lastMessageSenderId: null,
+            lastMessageTimestamp: null
+        };
+
+        const result = await limChatsCollection.insertOne(newGroupData);
+        const groupChat = { _id: result.insertedId, ...newGroupData };
+
+        console.log(`${LOG_PREFIX_CHAT} Gruppe '${name}' von ${ownerUsername} erstellt (ID: ${groupChat._id}). Teilnehmer: ${participantUsernames.join(', ')}.`);
+        res.status(201).json({ message: "Gruppe erfolgreich erstellt.", chat: groupChat });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_CHAT} Fehler bei POST /api/chat/chats/group:`, err);
+        res.status(500).json({ error: "Fehler beim Erstellen der Gruppe." });
+    }
+});
+
+// --- NACHRICHTEN ---
+app.get('/api/chat/chats/:chatId/messages', isAuthenticated, isChatParticipant, async (req, res) => {
+    const chatId = req.chat._id; // von isChatParticipant
+    const { limit = 50, beforeMessageId } = req.query; // Paginierung
+    const numLimit = parseInt(limit, 10);
+
+    console.log(`${LOG_PREFIX_CHAT} User ${req.session.username} lädt Nachrichten für Chat ${chatId}. Limit: ${numLimit}, Before: ${beforeMessageId}`);
+
+    try {
+        const query = { chatId: chatId };
+        if (beforeMessageId && ObjectId.isValid(beforeMessageId)) {
+            query._id = { $lt: new ObjectId(beforeMessageId) }; // Ältere Nachrichten laden
+        }
+
+        const messages = await limMessagesCollection.find(query)
+            .sort({ timestamp: -1 }) // Neueste zuerst (innerhalb der Paginierungslogik)
+            .limit(numLimit)
+            .toArray();
+        
+        // Da wir absteigend sortiert haben, um $lt zu nutzen, für die Anzeige umdrehen
+        messages.reverse(); 
+
+        res.json({ messages });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_CHAT} Fehler bei GET /api/chat/chats/:chatId/messages:`, err);
+        res.status(500).json({ error: "Fehler beim Laden der Nachrichten." });
+    }
+});
+
+app.post('/api/chat/chats/:chatId/messages', isAuthenticated, isChatParticipant, async (req, res) => {
+    const chatId = req.chat._id; // von isChatParticipant
+    const senderId = new ObjectId(req.session.userId);
+    const senderUsername = req.session.username;
+    const { content } = req.body;
+
+    if (!content || typeof content !== 'string' || content.trim().length === 0 || content.length > 2000) {
+        return res.status(400).json({ error: "Nachrichteninhalt (1-2000 Zeichen) ist erforderlich." });
+    }
+
+    console.log(`${LOG_PREFIX_CHAT} User ${senderUsername} sendet Nachricht in Chat ${chatId}: "${content.substring(0,20)}..."`);
+
+    try {
+        const now = new Date();
+        const newMessageData = {
+            chatId: chatId,
+            senderId: senderId,
+            senderUsername: senderUsername, // Denormalisiert für einfache Anzeige
+            content: content.trim(),
+            timestamp: now
+        };
+        const result = await limMessagesCollection.insertOne(newMessageData);
+        const newMessage = { _id: result.insertedId, ...newMessageData };
+
+        // Chat `updatedAt` und `lastMessagePreview` aktualisieren
+        await limChatsCollection.updateOne(
+            { _id: chatId },
+            { 
+                $set: { 
+                    updatedAt: now,
+                    lastMessagePreview: content.trim().substring(0, 50), // Kurze Vorschau
+                    lastMessageSenderId: senderId,
+                    lastMessageTimestamp: now
+                }
+            }
+        );
+
+        // Hier würde man normalerweise via WebSockets die Nachricht an andere Teilnehmer pushen.
+        // Da keine Benachrichtigungen gewünscht sind, entfällt das für den Server. Clients pollen.
+
+        console.log(`${LOG_PREFIX_CHAT} Nachricht von ${senderUsername} in Chat ${chatId} gespeichert (ID: ${newMessage._id}).`);
+        res.status(201).json({ message: "Nachricht gesendet.", sentMessage: newMessage });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_CHAT} Fehler bei POST /api/chat/chats/:chatId/messages:`, err);
+        res.status(500).json({ error: "Fehler beim Senden der Nachricht." });
+    }
+});
+
+app.get('/api/chat/messages/search', isAuthenticated, async (req, res) => {
+    const { term } = req.query;
+    const userId = new ObjectId(req.session.userId);
+    console.log(`${LOG_PREFIX_CHAT} User ${req.session.username} sucht Nachrichten mit Begriff: "${term}"`);
+
+    if (!term || typeof term !== 'string' || term.trim().length < 2) {
+        return res.status(400).json({ error: "Suchbegriff (mind. 2 Zeichen) ist erforderlich." });
+    }
+
+    try {
+        // 1. Finde alle Chats, an denen der User teilnimmt
+        const userChats = await limChatsCollection.find({ participants: userId }, { projection: { _id: 1 } }).toArray();
+        const userChatIds = userChats.map(chat => chat._id);
+
+        if (userChatIds.length === 0) {
+            return res.json({ results: [] });
+        }
+
+        // 2. Suche Nachrichten in diesen Chats
+        const searchResults = await limMessagesCollection.find({
+            chatId: { $in: userChatIds },
+            $text: { $search: term.trim() }
+        }, {
+            projection: { score: { $meta: "textScore" } } // Optional: Score für Relevanz
+        })
+        .sort({ score: { $meta: "textScore" } , timestamp: -1}) // Beste Übereinstimmung zuerst
+        .limit(50) // Begrenzung der Ergebnisse
+        .toArray();
+        
+        // Optional: Chat-Namen zu den Ergebnissen hinzufügen
+        const resultsWithChatInfo = [];
+        for (const message of searchResults) {
+            const chatInfo = userChats.find(c => c._id.equals(message.chatId)); // Finde den Chat aus dem vorherigen Fetch
+            let chatDisplay = `Chat ${message.chatId.toString().substring(0,6)}`; // Fallback
+            if (chatInfo) {
+                 const fullChat = await limChatsCollection.findOne({_id: chatInfo._id}); // Hole vollständige Chat-Daten
+                 if (fullChat) {
+                    if (fullChat.type === 'group') {
+                        chatDisplay = fullChat.name;
+                    } else {
+                        const otherParticipantId = fullChat.participants.find(pId => !pId.equals(userId));
+                        if (otherParticipantId) {
+                            const otherUser = await usersCollection.findOne({ _id: otherParticipantId }, { projection: { username: 1 } });
+                            chatDisplay = otherUser ? `Chat mit ${otherUser.username}` : `Persönlicher Chat`;
+                        }
+                    }
+                 }
+            }
+            resultsWithChatInfo.push({ ...message, chatDisplay });
+        }
+
+
+        console.log(`${LOG_PREFIX_CHAT} Suche für "${term}" ergab ${resultsWithChatInfo.length} Ergebnisse für User ${req.session.username}.`);
+        res.json({ results: resultsWithChatInfo });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_CHAT} Fehler bei GET /api/chat/messages/search:`, err);
+        res.status(500).json({ error: "Fehler bei der Nachrichtensuche." });
+    }
+});
+
+
+// --- GRUPPEN-MANAGEMENT ---
+app.get('/api/chat/groups/join/:groupShareCode', isAuthenticated, async (req, res) => {
+    const { groupShareCode } = req.params;
+    const userId = new ObjectId(req.session.userId);
+    const username = req.session.username;
+    console.log(`${LOG_PREFIX_CHAT} User ${username} versucht Gruppe mit Code ${groupShareCode} beizutreten.`);
+
+    if (!groupShareCode || typeof groupShareCode !== 'string') {
+        return res.status(400).json({ error: "groupShareCode ist erforderlich." });
+    }
+
+    try {
+        const group = await limChatsCollection.findOne({ groupShareCode: groupShareCode, type: 'group' });
+        if (!group) {
+            return res.status(404).json({ error: "Gruppe mit diesem Code nicht gefunden." });
+        }
+        if (group.participants.some(pId => pId.equals(userId))) {
+            return res.status(400).json({ message: "Du bist bereits Mitglied dieser Gruppe.", chat: group });
+        }
+        if (group.bannedUserIds && group.bannedUserIds.some(bannedId => bannedId.equals(userId))) {
+            return res.status(403).json({ error: "Du kannst dieser Gruppe nicht beitreten, da du gebannt wurdest." });
+        }
+
+        const result = await limChatsCollection.updateOne(
+            { _id: group._id },
+            { $addToSet: { participants: userId }, $set: {updatedAt: new Date()} } // $addToSet verhindert Duplikate
+        );
+
+        if (result.modifiedCount === 0 && result.matchedCount === 1) {
+             // Sollte durch die obere Prüfung nicht passieren, aber sicher ist sicher
+            return res.json({ message: "Du bist bereits Mitglied dieser Gruppe (erneute Prüfung).", chat: group });
+        }
+        
+        // Log Nachricht an Gruppe senden (optional, aber nett)
+        const joinMessageContent = `${username} ist der Gruppe beigetreten.`;
+        const systemMessage = {
+            chatId: group._id,
+            senderId: null, // Kennzeichnet Systemnachricht
+            senderUsername: "System",
+            content: joinMessageContent,
+            timestamp: new Date()
+        };
+        await limMessagesCollection.insertOne(systemMessage);
+        await limChatsCollection.updateOne(
+            { _id: group._id },
+            { $set: { lastMessagePreview: joinMessageContent.substring(0,50), lastMessageSenderId: null, lastMessageTimestamp: systemMessage.timestamp, updatedAt: systemMessage.timestamp }}
+        );
+
+
+        console.log(`${LOG_PREFIX_CHAT} User ${username} ist Gruppe '${group.name}' (ID: ${group._id}) beigetreten.`);
+        const updatedGroup = await limChatsCollection.findOne({_id: group._id}); // um aktuelle Teilnehmerzahl zu bekommen
+        res.json({ message: `Erfolgreich Gruppe '${group.name}' beigetreten.`, chat: updatedGroup });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_CHAT} Fehler bei GET /api/chat/groups/join/:groupShareCode:`, err);
+        res.status(500).json({ error: "Fehler beim Beitreten zur Gruppe." });
+    }
+});
+
+app.put('/api/chat/groups/:chatId/details', isAuthenticated, isChatParticipant, isGroupAdmin, async (req, res) => {
+    const { name } = req.body; // Vorerst nur Name änderbar
+    const group = req.chat; // von isChatParticipant
+    const adminUsername = req.session.username;
+
+    if (!name || typeof name !== 'string' || name.trim().length < 1 || name.trim().length > 100) {
+        return res.status(400).json({ error: "Neuer Gruppenname (1-100 Zeichen) ist erforderlich." });
+    }
+    console.log(`${LOG_PREFIX_CHAT} Admin ${adminUsername} ändert Details für Gruppe ${group._id} zu Name: ${name}`);
+
+    try {
+        const result = await limChatsCollection.updateOne(
+            { _id: group._id },
+            { $set: { name: name.trim(), updatedAt: new Date() } }
+        );
+        if (result.matchedCount === 0) return res.status(404).json({error: "Gruppe nicht gefunden."}); // Sollte durch Middleware nicht passieren
+
+        const updatedGroup = await limChatsCollection.findOne({ _id: group._id });
+        res.json({ message: "Gruppendetails aktualisiert.", chat: updatedGroup });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_CHAT} Fehler bei PUT /api/chat/groups/:chatId/details:`, err);
+        res.status(500).json({ error: "Fehler beim Aktualisieren der Gruppendetails." });
+    }
+});
+
+app.post('/api/chat/groups/:chatId/participants', isAuthenticated, isChatParticipant, isGroupAdmin, async (req, res) => {
+    const { userShareCodes } = req.body;
+    const group = req.chat;
+    const adminUsername = req.session.username;
+
+    if (!userShareCodes || !Array.isArray(userShareCodes) || userShareCodes.length === 0) {
+        return res.status(400).json({ error: "Mindestens ein userShareCode ist erforderlich." });
+    }
+    console.log(`${LOG_PREFIX_CHAT} Admin ${adminUsername} fügt Nutzer zu Gruppe ${group._id} hinzu: ${userShareCodes.join(', ')}`);
+
+    try {
+        const usersToAddIds = [];
+        const addedUsernames = [];
+        const errors = [];
+
+        for (const code of userShareCodes) {
+            if (typeof code !== 'string') continue;
+            const user = await usersCollection.findOne({ userShareCode: code });
+            if (!user) {
+                errors.push(`Nutzer mit Code ${code} nicht gefunden.`);
+                continue;
+            }
+            if (group.participants.some(pId => pId.equals(user._id))) {
+                errors.push(`Nutzer ${user.username} ist bereits in der Gruppe.`);
+                continue;
+            }
+            if (group.bannedUserIds && group.bannedUserIds.some(bannedId => bannedId.equals(user._id))) {
+                errors.push(`Nutzer ${user.username} ist von dieser Gruppe gebannt und kann nicht hinzugefügt werden.`);
+                continue;
+            }
+            usersToAddIds.push(user._id);
+            addedUsernames.push(user.username);
+        }
+
+        if (usersToAddIds.length > 0) {
+            await limChatsCollection.updateOne(
+                { _id: group._id },
+                { $addToSet: { participants: { $each: usersToAddIds } }, $set: {updatedAt: new Date()} }
+            );
+             // Systemnachricht für hinzugefügte User
+            const joinMessageContent = `${adminUsername} hat ${addedUsernames.join(', ')} zur Gruppe hinzugefügt.`;
+            const systemMessage = { chatId: group._id, senderId: null, senderUsername: "System", content: joinMessageContent, timestamp: new Date() };
+            await limMessagesCollection.insertOne(systemMessage);
+            await limChatsCollection.updateOne( { _id: group._id }, { $set: { lastMessagePreview: joinMessageContent.substring(0,50), lastMessageSenderId: null, lastMessageTimestamp: systemMessage.timestamp, updatedAt: systemMessage.timestamp }});
+        }
+        
+        const updatedGroup = await limChatsCollection.findOne({ _id: group._id });
+        let message = `${usersToAddIds.length} Nutzer erfolgreich hinzugefügt.`;
+        if (errors.length > 0) message += ` Fehler: ${errors.join('; ')}`;
+
+        res.json({ message, chat: updatedGroup, errors });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_CHAT} Fehler bei POST /api/chat/groups/:chatId/participants:`, err);
+        res.status(500).json({ error: "Fehler beim Hinzufügen von Teilnehmern." });
+    }
+});
+
+app.delete('/api/chat/groups/:chatId/participants/:participantUserId', isAuthenticated, isChatParticipant, isGroupAdmin, async (req, res) => {
+    const { participantUserId: participantUserIdStr } = req.params;
+    const group = req.chat;
+    const adminUserId = new ObjectId(req.session.userId);
+    const adminUsername = req.session.username;
+
+    if (!ObjectId.isValid(participantUserIdStr)) {
+        return res.status(400).json({ error: "Ungültige participantUserId." });
+    }
+    const participantUserId = new ObjectId(participantUserIdStr);
+
+    if (participantUserId.equals(group.ownerId)) {
+        return res.status(403).json({ error: "Der Gruppeneigentümer kann nicht gekickt werden." });
+    }
+     if (participantUserId.equals(adminUserId)) {
+        return res.status(400).json({ error: "Du kannst dich nicht selbst kicken. Nutze 'Gruppe verlassen'." });
+    }
+
+    console.log(`${LOG_PREFIX_CHAT} Admin ${adminUsername} kickt User ${participantUserIdStr} aus Gruppe ${group._id}`);
+
+    try {
+        const participantUser = await usersCollection.findOne({_id: participantUserId}, {projection: {username:1}});
+        if (!participantUser) return res.status(404).json({error: "Zu kickender Nutzer nicht gefunden."});
+
+        const result = await limChatsCollection.updateOne(
+            { _id: group._id },
+            { $pull: { participants: participantUserId, adminIds: participantUserId }, $set: {updatedAt: new Date()} } // Auch aus Admins entfernen
+        );
+
+        if (result.modifiedCount === 0 && result.matchedCount === 1) {
+            return res.status(404).json({ error: "Nutzer war nicht Teil der Gruppe oder wurde bereits entfernt." });
+        }
+        
+        // Systemnachricht
+        const kickMessageContent = `${participantUser.username} wurde von ${adminUsername} aus der Gruppe entfernt.`;
+        const systemMessage = { chatId: group._id, senderId: null, senderUsername: "System", content: kickMessageContent, timestamp: new Date() };
+        await limMessagesCollection.insertOne(systemMessage);
+        await limChatsCollection.updateOne( { _id: group._id }, { $set: { lastMessagePreview: kickMessageContent.substring(0,50), lastMessageSenderId: null, lastMessageTimestamp: systemMessage.timestamp, updatedAt: systemMessage.timestamp }});
+
+        const updatedGroup = await limChatsCollection.findOne({ _id: group._id });
+        res.json({ message: `Nutzer ${participantUser.username} erfolgreich aus der Gruppe entfernt.`, chat: updatedGroup });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_CHAT} Fehler bei DELETE /api/chat/groups/:chatId/participants/:participantUserId:`, err);
+        res.status(500).json({ error: "Fehler beim Entfernen des Teilnehmers." });
+    }
+});
+
+app.post('/api/chat/groups/:chatId/ban', isAuthenticated, isChatParticipant, isGroupAdmin, async (req, res) => {
+    const { userIdToBan: userIdToBanStr } = req.body;
+    const group = req.chat;
+    const adminUsername = req.session.username;
+
+    if (!userIdToBanStr || !ObjectId.isValid(userIdToBanStr)) {
+        return res.status(400).json({ error: "Ungültige userIdToBan." });
+    }
+    const userIdToBan = new ObjectId(userIdToBanStr);
+
+    if (userIdToBan.equals(group.ownerId)) {
+        return res.status(403).json({ error: "Der Gruppeneigentümer kann nicht gebannt werden." });
+    }
+    if (group.adminIds.some(adminId => adminId.equals(userIdToBan)) && !group.ownerId.equals(new ObjectId(req.session.userId))) {
+        return res.status(403).json({ error: "Nur der Gruppeneigentümer kann andere Admins bannen."});
+    }
+
+    console.log(`${LOG_PREFIX_CHAT} Admin ${adminUsername} bannt User ${userIdToBanStr} aus Gruppe ${group._id}`);
+    try {
+        const userToBanDetails = await usersCollection.findOne({_id: userIdToBan}, {projection: {username: 1}});
+        if(!userToBanDetails) return res.status(404).json({error: "Zu bannender Nutzer nicht gefunden."});
+
+        const result = await limChatsCollection.updateOne(
+            { _id: group._id },
+            { 
+                $addToSet: { bannedUserIds: userIdToBan },
+                $pull: { participants: userIdToBan, adminIds: userIdToBan }, // Aus Teilnehmern & Admins entfernen
+                $set: {updatedAt: new Date()}
+            }
+        );
+        
+        // Systemnachricht
+        const banMessageContent = `${userToBanDetails.username} wurde von ${adminUsername} aus der Gruppe gebannt.`;
+        const systemMessage = { chatId: group._id, senderId: null, senderUsername: "System", content: banMessageContent, timestamp: new Date() };
+        await limMessagesCollection.insertOne(systemMessage);
+        await limChatsCollection.updateOne( { _id: group._id }, { $set: { lastMessagePreview: banMessageContent.substring(0,50), lastMessageSenderId: null, lastMessageTimestamp: systemMessage.timestamp, updatedAt: systemMessage.timestamp }});
+
+        const updatedGroup = await limChatsCollection.findOne({ _id: group._id });
+        res.json({ message: `Nutzer ${userToBanDetails.username} erfolgreich gebannt und entfernt.`, chat: updatedGroup });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_CHAT} Fehler bei POST /api/chat/groups/:chatId/ban:`, err);
+        res.status(500).json({ error: "Fehler beim Bannen des Nutzers." });
+    }
+});
+
+app.delete('/api/chat/groups/:chatId/ban/:bannedUserId', isAuthenticated, isChatParticipant, isGroupAdmin, async (req, res) => {
+    const { bannedUserId: bannedUserIdStr } = req.params;
+    const group = req.chat;
+    const adminUsername = req.session.username;
+
+    if (!ObjectId.isValid(bannedUserIdStr)) {
+        return res.status(400).json({ error: "Ungültige bannedUserId." });
+    }
+    const bannedUserId = new ObjectId(bannedUserIdStr);
+    console.log(`${LOG_PREFIX_CHAT} Admin ${adminUsername} entbannt User ${bannedUserIdStr} aus Gruppe ${group._id}`);
+
+    try {
+        const result = await limChatsCollection.updateOne(
+            { _id: group._id },
+            { $pull: { bannedUserIds: bannedUserId }, $set: {updatedAt: new Date()} }
+        );
+        if (result.modifiedCount === 0 && result.matchedCount === 1) {
+            return res.status(404).json({ error: "Nutzer war nicht gebannt." });
+        }
+        const userUnbanned = await usersCollection.findOne({_id: bannedUserId}, {projection: {username:1}});
+        const updatedGroup = await limChatsCollection.findOne({ _id: group._id });
+        res.json({ message: `Nutzer ${userUnbanned ? userUnbanned.username : bannedUserIdStr} erfolgreich entbannt.`, chat: updatedGroup });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_CHAT} Fehler bei DELETE /api/chat/groups/:chatId/ban/:bannedUserId:`, err);
+        res.status(500).json({ error: "Fehler beim Entbannen des Nutzers." });
+    }
+});
+
+app.post('/api/chat/groups/:chatId/admins/:participantUserId', isAuthenticated, isChatParticipant, isGroupOwner, async (req, res) => {
+    const { participantUserId: participantUserIdStr } = req.params;
+    const group = req.chat;
+    const ownerUsername = req.session.username;
+
+    if (!ObjectId.isValid(participantUserIdStr)) {
+        return res.status(400).json({ error: "Ungültige participantUserId." });
+    }
+    const participantUserId = new ObjectId(participantUserIdStr);
+
+    if (!group.participants.some(pId => pId.equals(participantUserId))) {
+        return res.status(404).json({ error: "Nutzer ist kein Teilnehmer der Gruppe." });
+    }
+    if (group.adminIds.some(adminId => adminId.equals(participantUserId))) {
+        return res.status(400).json({ error: "Nutzer ist bereits Admin." });
+    }
+    console.log(`${LOG_PREFIX_CHAT} Owner ${ownerUsername} befördert ${participantUserIdStr} zum Admin in Gruppe ${group._id}`);
+
+    try {
+        await limChatsCollection.updateOne(
+            { _id: group._id },
+            { $addToSet: { adminIds: participantUserId }, $set: {updatedAt: new Date()} }
+        );
+        const userPromoted = await usersCollection.findOne({_id: participantUserId}, {projection: {username:1}});
+        const updatedGroup = await limChatsCollection.findOne({ _id: group._id });
+        res.json({ message: `Nutzer ${userPromoted ? userPromoted.username : participantUserIdStr} erfolgreich zum Admin befördert.`, chat: updatedGroup });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_CHAT} Fehler bei POST /api/chat/groups/:chatId/admins/:participantUserId:`, err);
+        res.status(500).json({ error: "Fehler beim Befördern zum Admin." });
+    }
+});
+
+app.delete('/api/chat/groups/:chatId/admins/:adminUserIdToRemove', isAuthenticated, isChatParticipant, isGroupOwner, async (req, res) => {
+    const { adminUserIdToRemove: adminUserIdToRemoveStr } = req.params;
+    const group = req.chat;
+    const ownerUsername = req.session.username;
+
+    if (!ObjectId.isValid(adminUserIdToRemoveStr)) {
+        return res.status(400).json({ error: "Ungültige adminUserIdToRemove." });
+    }
+    const adminUserIdToRemove = new ObjectId(adminUserIdToRemoveStr);
+
+    if (adminUserIdToRemove.equals(group.ownerId)) {
+        return res.status(403).json({ error: "Der Gruppeneigentümer kann seinen Admin-Status nicht selbst entfernen." });
+    }
+    if (!group.adminIds.some(adminId => adminId.equals(adminUserIdToRemove))) {
+        return res.status(404).json({ error: "Nutzer ist kein Admin in dieser Gruppe." });
+    }
+    console.log(`${LOG_PREFIX_CHAT} Owner ${ownerUsername} entfernt Admin-Status von ${adminUserIdToRemoveStr} in Gruppe ${group._id}`);
+
+    try {
+        await limChatsCollection.updateOne(
+            { _id: group._id },
+            { $pull: { adminIds: adminUserIdToRemove }, $set: {updatedAt: new Date()} }
+        );
+        const userDemoted = await usersCollection.findOne({_id: adminUserIdToRemove}, {projection: {username:1}});
+        const updatedGroup = await limChatsCollection.findOne({ _id: group._id });
+        res.json({ message: `Admin-Status von Nutzer ${userDemoted ? userDemoted.username : adminUserIdToRemoveStr} erfolgreich entfernt.`, chat: updatedGroup });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_CHAT} Fehler bei DELETE /api/chat/groups/:chatId/admins/:adminUserIdToRemove:`, err);
+        res.status(500).json({ error: "Fehler beim Entfernen des Admin-Status." });
+    }
+});
+
+app.post('/api/chat/groups/:chatId/leave', isAuthenticated, isChatParticipant, async (req, res) => {
+    const group = req.chat;
+    const userId = new ObjectId(req.session.userId);
+    const username = req.session.username;
+    console.log(`${LOG_PREFIX_CHAT} User ${username} verlässt Gruppe ${group._id} (${group.name})`);
+
+    try {
+        if (group.ownerId.equals(userId)) {
+            // Owner verlässt die Gruppe
+            if (group.participants.length === 1) { // Owner ist der einzige Teilnehmer
+                await limChatsCollection.deleteOne({ _id: group._id });
+                // Optional: Nachrichten auch löschen
+                // await limMessagesCollection.deleteMany({ chatId: group._id });
+                console.log(`${LOG_PREFIX_CHAT} Gruppe ${group.name} (ID: ${group._id}) wurde gelöscht, da der Owner das letzte Mitglied war.`);
+                return res.json({ message: "Gruppe verlassen und gelöscht, da du das letzte Mitglied warst." });
+            } else {
+                // Neuen Owner bestimmen (z.B. ältester Admin, oder ältester Teilnehmer)
+                let newOwnerId = null;
+                const otherAdmins = group.adminIds.filter(id => !id.equals(userId));
+                if (otherAdmins.length > 0) {
+                    // Wähle ersten anderen Admin (könnte durch Timestamp der Admin-Ernennung verbessert werden)
+                    newOwnerId = otherAdmins[0]; 
+                } else {
+                    // Wähle ältesten anderen Teilnehmer (basierend auf _id, was ungefähr der Beitrittszeit entspricht)
+                    const otherParticipants = group.participants.filter(id => !id.equals(userId)).sort();
+                    if (otherParticipants.length > 0) newOwnerId = otherParticipants[0];
+                }
+
+                if (newOwnerId) {
+                    await limChatsCollection.updateOne(
+                        { _id: group._id },
+                        { 
+                            $pull: { participants: userId, adminIds: userId },
+                            $set: { ownerId: newOwnerId, updatedAt: new Date() },
+                            $addToSet: { adminIds: newOwnerId } // Sicherstellen, dass neuer Owner auch Admin ist
+                        }
+                    );
+                    const newOwner = await usersCollection.findOne({_id: newOwnerId}, {projection:{username:1}});
+                    console.log(`${LOG_PREFIX_CHAT} Owner ${username} hat Gruppe ${group.name} verlassen. Neuer Owner: ${newOwner ? newOwner.username : newOwnerId}.`);
+                     // Systemnachricht
+                    const leaveMessageContent = `${username} (Owner) hat die Gruppe verlassen. ${newOwner ? newOwner.username : 'Ein neuer Nutzer'} ist nun der Owner.`;
+                    const systemMessage = { chatId: group._id, senderId: null, senderUsername: "System", content: leaveMessageContent, timestamp: new Date() };
+                    await limMessagesCollection.insertOne(systemMessage);
+                    await limChatsCollection.updateOne( { _id: group._id }, { $set: { lastMessagePreview: leaveMessageContent.substring(0,50), lastMessageSenderId: null, lastMessageTimestamp: systemMessage.timestamp, updatedAt: systemMessage.timestamp }});
+
+                } else {
+                     // Sollte nicht passieren, wenn participants.length > 1
+                    console.warn(`${LOG_PREFIX_CHAT} Gruppe ${group.name} konnte nicht verlassen werden, kein neuer Owner bestimmbar.`);
+                    return res.status(500).json({ error: "Konnte keinen neuen Owner bestimmen. Gruppe kann nicht verlassen werden." });
+                }
+            }
+        } else {
+            // Normaler Teilnehmer verlässt die Gruppe
+            await limChatsCollection.updateOne(
+                { _id: group._id },
+                { $pull: { participants: userId, adminIds: userId }, $set: {updatedAt: new Date()} } // Auch aus Admins entfernen
+            );
+             // Systemnachricht
+            const leaveMessageContent = `${username} hat die Gruppe verlassen.`;
+            const systemMessage = { chatId: group._id, senderId: null, senderUsername: "System", content: leaveMessageContent, timestamp: new Date() };
+            await limMessagesCollection.insertOne(systemMessage);
+            await limChatsCollection.updateOne( { _id: group._id }, { $set: { lastMessagePreview: leaveMessageContent.substring(0,50), lastMessageSenderId: null, lastMessageTimestamp: systemMessage.timestamp, updatedAt: systemMessage.timestamp }});
+        }
+        
+        const updatedGroupAfterLeave = await limChatsCollection.findOne({ _id: group._id }); // Kann null sein, wenn gelöscht
+        res.json({ message: "Gruppe erfolgreich verlassen.", chat: updatedGroupAfterLeave });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_CHAT} Fehler bei POST /api/chat/groups/:chatId/leave:`, err);
+        res.status(500).json({ error: "Fehler beim Verlassen der Gruppe." });
+    }
+});
+
+app.delete('/api/chat/groups/:chatId', isAuthenticated, isChatParticipant, isGroupOwner, async (req, res) => {
+    const group = req.chat;
+    const ownerUsername = req.session.username;
+    console.log(`${LOG_PREFIX_CHAT} Owner ${ownerUsername} löscht Gruppe ${group._id} (${group.name})`);
+
+    try {
+        await limChatsCollection.deleteOne({ _id: group._id });
+        // Optional: Alle Nachrichten dieser Gruppe auch löschen
+        const msgDeleteResult = await limMessagesCollection.deleteMany({ chatId: group._id });
+        // Optional: Alle UserChatSettings für diese Gruppe löschen
+        await limUserChatSettingsCollection.deleteMany({ chatId: group._id });
+
+        console.log(`${LOG_PREFIX_CHAT} Gruppe ${group.name} (ID: ${group._id}) und ${msgDeleteResult.deletedCount} Nachrichten gelöscht.`);
+        res.json({ message: `Gruppe '${group.name}' und zugehörige Nachrichten erfolgreich gelöscht.` });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_CHAT} Fehler bei DELETE /api/chat/groups/:chatId:`, err);
+        res.status(500).json({ error: "Fehler beim Löschen der Gruppe." });
+    }
+});
+
+app.post('/api/chat/groups/:chatId/regenerateShareCode', isAuthenticated, isChatParticipant, isGroupAdmin, async (req, res) => {
+    const group = req.chat;
+    const adminUsername = req.session.username;
+    console.log(`${LOG_PREFIX_CHAT} Admin ${adminUsername} generiert neuen Share-Code für Gruppe ${group._id}`);
+    try {
+        const newShareCode = await generateUniqueGroupShareCode();
+        await limChatsCollection.updateOne(
+            { _id: group._id },
+            { $set: { groupShareCode: newShareCode, updatedAt: new Date() } }
+        );
+        const updatedGroup = await limChatsCollection.findOne({ _id: group._id });
+        res.json({ message: "Neuer Gruppen-Share-Code generiert.", chat: updatedGroup });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_CHAT} Fehler bei POST /api/chat/groups/:chatId/regenerateShareCode:`, err);
+        res.status(500).json({ error: "Fehler beim Regenerieren des Gruppen-Share-Codes." });
+    }
+});
+
+// --- CHAT EINSTELLUNGEN (MUTE) ---
+app.put('/api/chat/chats/:chatId/settings/mute', isAuthenticated, isChatParticipant, async (req, res) => {
+    const chatId = req.chat._id;
+    const userId = new ObjectId(req.session.userId);
+    const { isMuted } = req.body;
+
+    if (typeof isMuted !== 'boolean') {
+        return res.status(400).json({ error: "isMuted (boolean) ist erforderlich." });
+    }
+    console.log(`${LOG_PREFIX_CHAT} User ${req.session.username} setzt Mute-Status für Chat ${chatId} auf ${isMuted}`);
+
+    try {
+        const result = await limUserChatSettingsCollection.updateOne(
+            { userId: userId, chatId: chatId },
+            { $set: { isMuted: isMuted } },
+            { upsert: true } // Erstellt Dokument, falls nicht vorhanden
+        );
+        res.json({ message: `Chat erfolgreich ${isMuted ? 'stummgeschaltet' : 'lautgeschaltet'}.`, isMuted });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_CHAT} Fehler bei PUT /api/chat/chats/:chatId/settings/mute:`, err);
+        res.status(500).json({ error: "Fehler beim Ändern des Mute-Status." });
+    }
+});
+
+// === CHAT ENDPOINTS ENDE===
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
