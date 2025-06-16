@@ -1,5 +1,4 @@
-// server.js - Vollständiges Backend für Limazon
-// Inklusive: Auth, Produkte, Inventar, Kauf (mit Token-Karten), Token-System, Glücksrad-Backend
+// server.js - Full Backend for Limo Open Source Project and all of the components of it
 
 const path = require('path');
 const fs = require('fs');
@@ -27,7 +26,7 @@ const axios = require('axios'); // Hinzufügen für HTTP-Anfragen
 
 const SELL_COOLDOWN_SECONDS = 59;
 const SELL_COOLDOWN_SECONDS_SHOW = 60;
-const LOG_PREFIX_SERVER = "[Limazon BE]";
+const LOG_PREFIX_SERVER = "[Limazon BACKEND]";
 
 const app = express();
 app.set('trust proxy', 1);
@@ -103,14 +102,19 @@ let productsCollection, usersCollection, ordersCollection, inventoriesCollection
 let wheelsCollection, tokenCodesCollection, tokenTransactionsCollection;
 
 // --- Hilfsfunktionen ---
-async function generateUniqueId(collection = productsCollection, prefix = '') {
-    let newIdValue; // Renamed to avoid conflict with 'id' parameter if any
+async function generateUniqueId(collection = productsCollection) { // Der 'prefix'-Parameter wurde hier entfernt, da er nicht benötigt wird.
+    let newIdValue;
     let idExists = true;
     let attempts = 0;
     const maxAttempts = 1000;
+
     while (idExists && attempts < maxAttempts) {
-        newIdValue = prefix + Math.floor(100000 + Math.random() * 900000);
+        // Generiere direkt eine 6-stellige Zahl zwischen 100.000 und 999.999
+        newIdValue = Math.floor(100000 + Math.random() * 900000); // Dies ist eine reine Zahl!
+
         try {
+            // Prüfe, ob diese generierte NUMERISCHE ID bereits in der Collection existiert.
+            // Da 'id' in der DB Int32 ist, ist dies ein direkter Zahlenvergleich.
             const existing = await collection.findOne({ id: newIdValue }, { projection: { _id: 1 } });
             if (!existing) {
                 idExists = false;
@@ -121,9 +125,12 @@ async function generateUniqueId(collection = productsCollection, prefix = '') {
         }
         attempts++;
     }
+
     if (idExists) {
         throw new Error('Fehler bei ID-Generierung nach maximalen Versuchen (Kollisionen).');
     }
+
+    // Gib die generierte ZAHL zurück. Sie ist Int32-kompatibel und kann direkt verwendet werden.
     return newIdValue;
 }
 
@@ -585,7 +592,7 @@ app.post('/api/products', isAdmin, async (req, res) => {
     const crTokenCard = !!isTokenCard; let cardTokenVal = 0;
     if (crTokenCard) { initStock = 99999; cardTokenVal = parseInt(tokenValue, 10); if (isNaN(cardTokenVal) || cardTokenVal <= 0) return res.status(400).json({ error: 'Ungültiger Token-Wert.'});}
     try {
-        const newId = await generateUniqueId(productsCollection, crTokenCard ? 'TC' : '');
+        const newId = await generateUniqueId(productsCollection, crTokenCard);
         const newProd = { id: newId, name: name, image_url: image_url ? image_url.trim() : `https://via.placeholder.com/150x160.png?text=${encodeURIComponent(name)}`, price: fmtPrice, stock: initStock, default_stock: initStock, isTokenCard: crTokenCard, };
         if (crTokenCard) newProd.tokenValue = cardTokenVal;
         await productsCollection.insertOne(newProd);
