@@ -2183,6 +2183,10 @@ app.put('/api/chat/chats/:chatId/settings/mute', isAuthenticated, isChatParticip
 
 // === CHAT ENDPOINTS ENDE===
 
+app.get('/health', (req, res) => {
+  res.status(200).send('OK');
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
