@@ -58,7 +58,7 @@ const sessionSecret = process.env.SESSION_SECRET;
 const SALT_ROUNDS = 10;
 const frontendProdUrl = process.env.FRONTEND_URL;
 const frontendDevUrlHttp = 'http://127.0.0.1:8080';
-const frontendDevUrlHttps = 'https://127.0.0.1:8080';
+const frontendDevUrlHttps = 'https://wl.limazon.v6.rocks';
 
 // --- Glücksrad & Token Konstanten ---
 const DEFAULT_STARTING_TOKENS = 10;
@@ -93,11 +93,10 @@ app.use(session({
     saveUninitialized: false,
     store: MongoStore.create({ mongoUrl: mongoUri, dbName: mongoDbName, collectionName: 'sessions', ttl: 14 * 24 * 60 * 60 }),
     cookie: {
-        secure: process.env.NODE_ENV === 'production',
-        httpOnly: true,
-        maxAge: 14 * 24 * 60 * 60 * 1000,
-        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-		partitioned: process.env.NODE_ENV === 'production'
+      secure: true, 
+      httpOnly: true,
+      maxAge: 14 * 24 * 60 * 60 * 1000, 
+      sameSite: 'lax'
     }
 }));
 
