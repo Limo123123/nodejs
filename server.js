@@ -2180,7 +2180,138 @@ app.put('/api/chat/chats/:chatId/settings/mute', isAuthenticated, isChatParticip
     }
 });
 
-// === CHAT ENDPOINTS ENDE===
+// === CHAT ENDPOINTS ENDE ===
+
+// === ACCOUNT MANAGEMENT START ===
+
+app.patch('/api/account/username', isAuthenticated, async (req, res) => {
+    const { newUsername, password } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (!newUsername || newUsername.length < 3 || newUsername.length > 30) {
+        return res.status(400).json({ error: 'Neuer Benutzername muss 3-30 Zeichen lang sein.' });
+    }
+    if (!password) {
+        return res.status(400).json({ error: 'Aktuelles Passwort zur Bestätigung erforderlich.' });
+    }
+
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        if (!user) return res.status(404).json({ error: 'Benutzer nicht gefunden.' });
+
+        // Passwort vergleichen
+        const match = await bcrypt.compare(password, user.password);
+        if (!match) {
+            return res.status(403).json({ error: 'Falsches Passwort.' });
+        }
+
+        // Prüfen, ob der neue Username bereits vergeben ist
+        const existingUser = await usersCollection.findOne({ username: newUsername.toLowerCase() });
+        if (existingUser && !existingUser._id.equals(userId)) {
+            return res.status(409).json({ error: 'Dieser Benutzername ist bereits vergeben.' });
+        }
+
+        await usersCollection.updateOne({ _id: userId }, { $set: { username: newUsername.toLowerCase() } });
+        
+        // Wichtig: Session aktualisieren!
+        req.session.username = newUsername.toLowerCase();
+        req.session.save();
+
+        res.json({ message: 'Benutzername erfolgreich aktualisiert.' });
+    } catch (err) {
+        console.error(`Fehler bei Username-Änderung für ${req.session.username}:`, err);
+        if (err.code === 11000) return res.status(409).json({ error: 'Dieser Benutzername ist bereits vergeben (DB).' });
+        res.status(500).json({ error: 'Serverfehler bei der Aktualisierung.' });
+    }
+});
+
+// 2. ENDPOINT ZUM ÄNDERN DES PASSWORTS
+app.patch('/api/account/password', isAuthenticated, async (req, res) => {
+    const { currentPassword, newPassword } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (!currentPassword || !newPassword || newPassword.length < 6) {
+        return res.status(400).json({ error: 'Alle Felder erforderlich, neues Passwort mind. 6 Zeichen.' });
+    }
+
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        if (!user) return res.status(404).json({ error: 'Benutzer nicht gefunden.' });
+
+        const match = await bcrypt.compare(currentPassword, user.password);
+        if (!match) {
+            return res.status(403).json({ error: 'Aktuelles Passwort ist falsch.' });
+        }
+
+        const hashedNewPassword = await bcrypt.hash(newPassword, SALT_ROUNDS);
+        await usersCollection.updateOne({ _id: userId }, { $set: { password: hashedNewPassword } });
+
+        res.json({ message: 'Passwort erfolgreich geändert.' });
+    } catch (err) {
+        console.error(`Fehler bei Passwort-Änderung für ${req.session.username}:`, err);
+        res.status(500).json({ error: 'Serverfehler bei der Passwortänderung.' });
+    }
+});
+
+// 3. ENDPOINT ZUM LÖSCHEN DES ACCOUNTS
+app.delete('/api/account', isAuthenticated, async (req, res) => {
+    const { password } = req.body; // Passwort zur Bestätigung aus dem Request-Body holen
+    const userId = new ObjectId(req.session.userId);
+    
+    if (!password) {
+        return res.status(400).json({ error: 'Passwort zur Bestätigung erforderlich.' });
+    }
+
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        if (!user) return res.status(404).json({ error: 'Benutzer nicht gefunden.' });
+        
+        const match = await bcrypt.compare(password, user.password);
+        if (!match) {
+            return res.status(403).json({ error: 'Falsches Passwort. Account nicht gelöscht.' });
+        }
+
+        // Hier alle Daten des Nutzers aus ALLEN Collections löschen!
+        // Dies ist ein kritisches Beispiel und muss an deine DB-Struktur angepasst werden.
+        console.warn(`!!! ACCOUNT LÖSCHUNG FÜR USER ${user.username} (ID: ${userId}) WIRD AUSGEFÜHRT !!!`);
+        
+        // 1. User-Dokument löschen
+        await usersCollection.deleteOne({ _id: userId });
+        // 2. Inventar löschen
+        await inventoriesCollection.deleteMany({ userId: userId });
+        // 3. Bestellungen löschen
+        await ordersCollection.deleteMany({ userId: userId });
+        // 4. Token-Codes und Transaktionen löschen
+        await tokenCodesCollection.deleteMany({ $or: [{ generatedForUserId: userId }, { redeemedByUserId: userId }] });
+        await tokenTransactionsCollection.deleteMany({ userId: userId });
+        // 5. Glücksräder löschen
+        await wheelsCollection.deleteMany({ creatorId: userId });
+        // 6. User aus allen Chats entfernen (komplexer!)
+        //    - Aus Teilnehmerlisten entfernen
+        //    - Wenn Owner, neuen Owner bestimmen oder Gruppe löschen
+        //    - Chat-Nachrichten könnten anonymisiert oder gelöscht werden
+        //    Dies ist eine fortgeschrittene Aufgabe, die hier nicht vollständig abgebildet wird.
+        await limChatsCollection.updateMany({ participants: userId }, { $pull: { participants: userId, adminIds: userId } });
+
+
+        // Zum Schluss die Session zerstören
+        req.session.destroy(err => {
+            if (err) {
+                console.error(`Fehler beim Zerstören der Session nach Account-Löschung für ${user.username}:`, err);
+                // Der User ist schon gelöscht, also senden wir trotzdem eine Erfolgsmeldung
+                return res.json({ message: 'Account gelöscht, aber Logout fehlgeschlagen.' });
+            }
+            res.clearCookie('connect.sid');
+            res.json({ message: 'Account erfolgreich und dauerhaft gelöscht.' });
+        });
+
+    } catch (err) {
+        console.error(`Kritischer Fehler bei Account-Löschung für User-ID ${userId}:`, err);
+        res.status(500).json({ error: 'Serverfehler beim Löschen des Accounts.' });
+    }
+});
+
+// === ACCOUNT MANAGEMENT ENDE ===
 
 app.get('/health', (req, res) => {
   res.status(200).send('OK');
