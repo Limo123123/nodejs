@@ -58,7 +58,7 @@ const sessionSecret = process.env.SESSION_SECRET;
 const SALT_ROUNDS = 10;
 const frontendProdUrl = process.env.FRONTEND_URL;
 const frontendDevUrlHttp = 'http://127.0.0.1:8080';
-const frontendDevUrlHttps = 'https://wl.limazon.v6.rocks';
+const frontendDevUrlHttps = 'https://127.0.0.1:8080';
 
 // --- Glücksrad & Token Konstanten ---
 const DEFAULT_STARTING_TOKENS = 10;
@@ -93,10 +93,10 @@ app.use(session({
     saveUninitialized: false,
     store: MongoStore.create({ mongoUrl: mongoUri, dbName: mongoDbName, collectionName: 'sessions', ttl: 14 * 24 * 60 * 60 }),
     cookie: {
-      secure: true, 
-      httpOnly: true,
-      maxAge: 14 * 24 * 60 * 60 * 1000, 
-      sameSite: 'lax'
+        secure: process.env.NODE_ENV === 'production',
+        httpOnly: true,
+        maxAge: 14 * 24 * 60 * 60 * 1000,
+        sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax'
     }
 }));
 
@@ -2180,141 +2180,77 @@ app.put('/api/chat/chats/:chatId/settings/mute', isAuthenticated, isChatParticip
     }
 });
 
-// === CHAT ENDPOINTS ENDE ===
+// === CHAT ENDPOINTS ENDE===
 
-// === ACCOUNT MANAGEMENT START ===
-
-app.patch('/api/account/username', isAuthenticated, async (req, res) => {
-    const { newUsername, password } = req.body;
-    const userId = new ObjectId(req.session.userId);
-
-    if (!newUsername || newUsername.length < 3 || newUsername.length > 30) {
-        return res.status(400).json({ error: 'Neuer Benutzername muss 3-30 Zeichen lang sein.' });
-    }
-    if (!password) {
-        return res.status(400).json({ error: 'Aktuelles Passwort zur Bestätigung erforderlich.' });
-    }
-
+// =========================================================
+// === HALL OF FAME ENDPUNKT ===
+// =========================================================
+app.get('/api/hall-of-fame', async (req, res) => {
+    console.log(`${LOG_PREFIX_SERVER} 🏆 Hall of Fame wird abgerufen.`);
     try {
-        const user = await usersCollection.findOne({ _id: userId });
-        if (!user) return res.status(404).json({ error: 'Benutzer nicht gefunden.' });
+        // Wir führen alle Abfragen parallel aus, um Zeit zu sparen
+        const [topMoney, topTokens, infinityClub] = await Promise.all([
+            // 1. Die reichsten User (ohne Admins)
+            usersCollection.find(
+                { isAdmin: { $ne: true } }, // WICHTIG: Admins ausschließen
+                { projection: { username: 1, balance: 1, _id: 0 } } // Nur relevante Daten holen
+            )
+            .sort({ balance: -1 }) // Nach Guthaben absteigend sortieren
+            .limit(5) // Die Top 5
+            .toArray(),
 
-        // Passwort vergleichen
-        const match = await bcrypt.compare(password, user.password);
-        if (!match) {
-            return res.status(403).json({ error: 'Falsches Passwort.' });
-        }
+            // 2. Die User mit den meisten Tokens (ohne Admins)
+            usersCollection.find(
+                { isAdmin: { $ne: true } }, // WICHTIG: Admins ausschließen
+                { projection: { username: 1, tokens: 1, _id: 0 } }
+            )
+            .sort({ tokens: -1 }) // Nach Tokens absteigend sortieren
+            .limit(5) // Die Top 5
+            .toArray(),
 
-        // Prüfen, ob der neue Username bereits vergeben ist
-        const existingUser = await usersCollection.findOne({ username: newUsername.toLowerCase() });
-        if (existingUser && !existingUser._id.equals(userId)) {
-            return res.status(409).json({ error: 'Dieser Benutzername ist bereits vergeben.' });
-        }
+            // 3. Die Mitglieder des "Infinity Clubs" (ohne Admins)
+            usersCollection.find(
+                { 
+                    isAdmin: { $ne: true },            // WICHTIG: Admins ausschließen
+                    unlockedInfinityMoney: true        // Prüft, wer es freigeschaltet hat
+                },
+                { projection: { username: 1, createdAt: 1, _id: 0 } }
+            )
+            .sort({ createdAt: 1 }) // Die ersten, die es geschafft haben, stehen oben
+            .limit(10) // Zeigen wir bis zu 10 Legenden
+            .toArray()
+        ]);
 
-        await usersCollection.updateOne({ _id: userId }, { $set: { username: newUsername.toLowerCase() } });
-        
-        // Wichtig: Session aktualisieren!
-        req.session.username = newUsername.toLowerCase();
-        req.session.save();
-
-        res.json({ message: 'Benutzername erfolgreich aktualisiert.' });
-    } catch (err) {
-        console.error(`Fehler bei Username-Änderung für ${req.session.username}:`, err);
-        if (err.code === 11000) return res.status(409).json({ error: 'Dieser Benutzername ist bereits vergeben (DB).' });
-        res.status(500).json({ error: 'Serverfehler bei der Aktualisierung.' });
-    }
-});
-
-// 2. ENDPOINT ZUM ÄNDERN DES PASSWORTS
-app.patch('/api/account/password', isAuthenticated, async (req, res) => {
-    const { currentPassword, newPassword } = req.body;
-    const userId = new ObjectId(req.session.userId);
-
-    if (!currentPassword || !newPassword || newPassword.length < 6) {
-        return res.status(400).json({ error: 'Alle Felder erforderlich, neues Passwort mind. 6 Zeichen.' });
-    }
-
-    try {
-        const user = await usersCollection.findOne({ _id: userId });
-        if (!user) return res.status(404).json({ error: 'Benutzer nicht gefunden.' });
-
-        const match = await bcrypt.compare(currentPassword, user.password);
-        if (!match) {
-            return res.status(403).json({ error: 'Aktuelles Passwort ist falsch.' });
-        }
-
-        const hashedNewPassword = await bcrypt.hash(newPassword, SALT_ROUNDS);
-        await usersCollection.updateOne({ _id: userId }, { $set: { password: hashedNewPassword } });
-
-        res.json({ message: 'Passwort erfolgreich geändert.' });
-    } catch (err) {
-        console.error(`Fehler bei Passwort-Änderung für ${req.session.username}:`, err);
-        res.status(500).json({ error: 'Serverfehler bei der Passwortänderung.' });
-    }
-});
-
-// 3. ENDPOINT ZUM LÖSCHEN DES ACCOUNTS
-app.delete('/api/account', isAuthenticated, async (req, res) => {
-    const { password } = req.body; // Passwort zur Bestätigung aus dem Request-Body holen
-    const userId = new ObjectId(req.session.userId);
-    
-    if (!password) {
-        return res.status(400).json({ error: 'Passwort zur Bestätigung erforderlich.' });
-    }
-
-    try {
-        const user = await usersCollection.findOne({ _id: userId });
-        if (!user) return res.status(404).json({ error: 'Benutzer nicht gefunden.' });
-        
-        const match = await bcrypt.compare(password, user.password);
-        if (!match) {
-            return res.status(403).json({ error: 'Falsches Passwort. Account nicht gelöscht.' });
-        }
-
-        // Hier alle Daten des Nutzers aus ALLEN Collections löschen!
-        // Dies ist ein kritisches Beispiel und muss an deine DB-Struktur angepasst werden.
-        console.warn(`!!! ACCOUNT LÖSCHUNG FÜR USER ${user.username} (ID: ${userId}) WIRD AUSGEFÜHRT !!!`);
-        
-        // 1. User-Dokument löschen
-        await usersCollection.deleteOne({ _id: userId });
-        // 2. Inventar löschen
-        await inventoriesCollection.deleteMany({ userId: userId });
-        // 3. Bestellungen löschen
-        await ordersCollection.deleteMany({ userId: userId });
-        // 4. Token-Codes und Transaktionen löschen
-        await tokenCodesCollection.deleteMany({ $or: [{ generatedForUserId: userId }, { redeemedByUserId: userId }] });
-        await tokenTransactionsCollection.deleteMany({ userId: userId });
-        // 5. Glücksräder löschen
-        await wheelsCollection.deleteMany({ creatorId: userId });
-        // 6. User aus allen Chats entfernen (komplexer!)
-        //    - Aus Teilnehmerlisten entfernen
-        //    - Wenn Owner, neuen Owner bestimmen oder Gruppe löschen
-        //    - Chat-Nachrichten könnten anonymisiert oder gelöscht werden
-        //    Dies ist eine fortgeschrittene Aufgabe, die hier nicht vollständig abgebildet wird.
-        await limChatsCollection.updateMany({ participants: userId }, { $pull: { participants: userId, adminIds: userId } });
-
-
-        // Zum Schluss die Session zerstören
-        req.session.destroy(err => {
-            if (err) {
-                console.error(`Fehler beim Zerstören der Session nach Account-Löschung für ${user.username}:`, err);
-                // Der User ist schon gelöscht, also senden wir trotzdem eine Erfolgsmeldung
-                return res.json({ message: 'Account gelöscht, aber Logout fehlgeschlagen.' });
-            }
-            res.clearCookie('connect.sid');
-            res.json({ message: 'Account erfolgreich und dauerhaft gelöscht.' });
+        // Jetzt bauen wir die coole JSON-Antwort zusammen
+        res.json({
+            title: "🏆 Hall of Fame von Limazon 🏆",
+            lastUpdated: new Date().toISOString(),
+            categories: [
+                {
+                    id: "money_magnates",
+                    title: "Die Finanz-Magnaten 💰",
+                    description: "Sie schwimmen in Limazon-Dollars und ihre Konten platzen aus allen Nähten. Das sind die unangefochtenen Könige des Kapitals!",
+                    entries: topMoney
+                },
+                {
+                    id: "token_titans",
+                    title: "Die Token-Titanen ✨",
+                    description: "Während andere auf schnödes Geld setzen, sammeln diese Visionäre das wahre Gold: Tokens. Ihr Vermögen ist für die Ewigkeit... oder zumindest für das nächste Glücksrad.",
+                    entries: topTokens
+                },
+                {
+                    id: "infinity_club",
+                    title: "Der Club der Unendlichkeit ∞",
+                    description: "Diese Legenden haben die Fesseln der Wirtschaft gesprengt. Für sie ist 'Geld' nur noch ein Konzept. Sie haben das Spiel gemeistert.",
+                    members: infinityClub.map(user => user.username) // Wir geben hier nur die Namen als einfache Liste zurück
+                }
+            ]
         });
 
     } catch (err) {
-        console.error(`Kritischer Fehler bei Account-Löschung für User-ID ${userId}:`, err);
-        res.status(500).json({ error: 'Serverfehler beim Löschen des Accounts.' });
+        console.error(`${LOG_PREFIX_SERVER} ❌ Fehler beim Abrufen der Hall of Fame:`, err);
+        res.status(500).json({ error: "Fehler beim Laden der Halle des Ruhms. Die Legenden schlafen noch." });
     }
-});
-
-// === ACCOUNT MANAGEMENT ENDE ===
-
-app.get('/health', (req, res) => {
-  res.status(200).send('OK');
 });
 
 app.use((req, res) => {
