@@ -424,7 +424,7 @@ MongoClient.connect(mongoUri)
             await limMessagesCollection.createIndex({ senderId: 1 });
             await limMessagesCollection.createIndex({ content: "text" }); // Für Textsuche
             await limUserChatSettingsCollection.createIndex({ userId: 1, chatId: 1 }, { unique: true });
-                console.log(`${LOG_PREFIX_SERVER} ✅ Chat-Indizes erfolgreich erstellt oder bereits vorhanden.`);
+            console.log(`${LOG_PREFIX_SERVER} ✅ Chat-Indizes erfolgreich erstellt oder bereits vorhanden.`);
             await productsCollection.createIndex({ id: 1 }, { unique: true });
             await usersCollection.createIndex({ username: 1 }, { unique: true });
             await usersCollection.createIndex({ tokens: 1 });
@@ -1444,7 +1444,7 @@ app.get('/api/chat/chats', isAuthenticated, async (req, res) => {
                 }
             } else { // 'group'
                 // Für Gruppen könnten wir die Anzahl der Teilnehmer oder die ersten paar Namen holen
-                 const otherParticipants = await usersCollection.find(
+                const otherParticipants = await usersCollection.find(
                     { _id: { $in: chat.participants.filter(pId => !pId.equals(userId)) } },
                     { projection: { username: 1 } }
                 ).limit(3).toArray(); // Zeige bis zu 3 andere Teilnehmer
@@ -1547,7 +1547,7 @@ app.post('/api/chat/chats/group', isAuthenticated, async (req, res) => {
                 }
             }
         }
-        
+
         const groupShareCode = await generateUniqueGroupShareCode();
         const now = new Date();
         const newGroupData = {
@@ -1595,9 +1595,9 @@ app.get('/api/chat/chats/:chatId/messages', isAuthenticated, isChatParticipant, 
             .sort({ timestamp: -1 }) // Neueste zuerst (innerhalb der Paginierungslogik)
             .limit(numLimit)
             .toArray();
-        
+
         // Da wir absteigend sortiert haben, um $lt zu nutzen, für die Anzeige umdrehen
-        messages.reverse(); 
+        messages.reverse();
 
         res.json({ messages });
     } catch (err) {
@@ -1616,7 +1616,7 @@ app.post('/api/chat/chats/:chatId/messages', isAuthenticated, isChatParticipant,
         return res.status(400).json({ error: "Nachrichteninhalt (1-2000 Zeichen) ist erforderlich." });
     }
 
-    console.log(`${LOG_PREFIX_CHAT} User ${senderUsername} sendet Nachricht in Chat ${chatId}: "${content.substring(0,20)}..."`);
+    console.log(`${LOG_PREFIX_CHAT} User ${senderUsername} sendet Nachricht in Chat ${chatId}: "${content.substring(0, 20)}..."`);
 
     try {
         const now = new Date();
@@ -1633,8 +1633,8 @@ app.post('/api/chat/chats/:chatId/messages', isAuthenticated, isChatParticipant,
         // Chat `updatedAt` und `lastMessagePreview` aktualisieren
         await limChatsCollection.updateOne(
             { _id: chatId },
-            { 
-                $set: { 
+            {
+                $set: {
                     updatedAt: now,
                     lastMessagePreview: content.trim().substring(0, 50), // Kurze Vorschau
                     lastMessageSenderId: senderId,
@@ -1680,18 +1680,18 @@ app.get('/api/chat/messages/search', isAuthenticated, async (req, res) => {
         }, {
             projection: { score: { $meta: "textScore" } } // Optional: Score für Relevanz
         })
-        .sort({ score: { $meta: "textScore" } , timestamp: -1}) // Beste Übereinstimmung zuerst
-        .limit(50) // Begrenzung der Ergebnisse
-        .toArray();
-        
+            .sort({ score: { $meta: "textScore" }, timestamp: -1 }) // Beste Übereinstimmung zuerst
+            .limit(50) // Begrenzung der Ergebnisse
+            .toArray();
+
         // Optional: Chat-Namen zu den Ergebnissen hinzufügen
         const resultsWithChatInfo = [];
         for (const message of searchResults) {
             const chatInfo = userChats.find(c => c._id.equals(message.chatId)); // Finde den Chat aus dem vorherigen Fetch
-            let chatDisplay = `Chat ${message.chatId.toString().substring(0,6)}`; // Fallback
+            let chatDisplay = `Chat ${message.chatId.toString().substring(0, 6)}`; // Fallback
             if (chatInfo) {
-                 const fullChat = await limChatsCollection.findOne({_id: chatInfo._id}); // Hole vollständige Chat-Daten
-                 if (fullChat) {
+                const fullChat = await limChatsCollection.findOne({ _id: chatInfo._id }); // Hole vollständige Chat-Daten
+                if (fullChat) {
                     if (fullChat.type === 'group') {
                         chatDisplay = fullChat.name;
                     } else {
@@ -1701,7 +1701,7 @@ app.get('/api/chat/messages/search', isAuthenticated, async (req, res) => {
                             chatDisplay = otherUser ? `Chat mit ${otherUser.username}` : `Persönlicher Chat`;
                         }
                     }
-                 }
+                }
             }
             resultsWithChatInfo.push({ ...message, chatDisplay });
         }
@@ -1742,14 +1742,14 @@ app.get('/api/chat/groups/join/:groupShareCode', isAuthenticated, async (req, re
 
         const result = await limChatsCollection.updateOne(
             { _id: group._id },
-            { $addToSet: { participants: userId }, $set: {updatedAt: new Date()} } // $addToSet verhindert Duplikate
+            { $addToSet: { participants: userId }, $set: { updatedAt: new Date() } } // $addToSet verhindert Duplikate
         );
 
         if (result.modifiedCount === 0 && result.matchedCount === 1) {
-             // Sollte durch die obere Prüfung nicht passieren, aber sicher ist sicher
+            // Sollte durch die obere Prüfung nicht passieren, aber sicher ist sicher
             return res.json({ message: "Du bist bereits Mitglied dieser Gruppe (erneute Prüfung).", chat: group });
         }
-        
+
         // Log Nachricht an Gruppe senden (optional, aber nett)
         const joinMessageContent = `${username} ist der Gruppe beigetreten.`;
         const systemMessage = {
@@ -1762,12 +1762,12 @@ app.get('/api/chat/groups/join/:groupShareCode', isAuthenticated, async (req, re
         await limMessagesCollection.insertOne(systemMessage);
         await limChatsCollection.updateOne(
             { _id: group._id },
-            { $set: { lastMessagePreview: joinMessageContent.substring(0,50), lastMessageSenderId: null, lastMessageTimestamp: systemMessage.timestamp, updatedAt: systemMessage.timestamp }}
+            { $set: { lastMessagePreview: joinMessageContent.substring(0, 50), lastMessageSenderId: null, lastMessageTimestamp: systemMessage.timestamp, updatedAt: systemMessage.timestamp } }
         );
 
 
         console.log(`${LOG_PREFIX_CHAT} User ${username} ist Gruppe '${group.name}' (ID: ${group._id}) beigetreten.`);
-        const updatedGroup = await limChatsCollection.findOne({_id: group._id}); // um aktuelle Teilnehmerzahl zu bekommen
+        const updatedGroup = await limChatsCollection.findOne({ _id: group._id }); // um aktuelle Teilnehmerzahl zu bekommen
         res.json({ message: `Erfolgreich Gruppe '${group.name}' beigetreten.`, chat: updatedGroup });
 
     } catch (err) {
@@ -1791,7 +1791,7 @@ app.put('/api/chat/groups/:chatId/details', isAuthenticated, isChatParticipant, 
             { _id: group._id },
             { $set: { name: name.trim(), updatedAt: new Date() } }
         );
-        if (result.matchedCount === 0) return res.status(404).json({error: "Gruppe nicht gefunden."}); // Sollte durch Middleware nicht passieren
+        if (result.matchedCount === 0) return res.status(404).json({ error: "Gruppe nicht gefunden." }); // Sollte durch Middleware nicht passieren
 
         const updatedGroup = await limChatsCollection.findOne({ _id: group._id });
         res.json({ message: "Gruppendetails aktualisiert.", chat: updatedGroup });
@@ -1838,15 +1838,15 @@ app.post('/api/chat/groups/:chatId/participants', isAuthenticated, isChatPartici
         if (usersToAddIds.length > 0) {
             await limChatsCollection.updateOne(
                 { _id: group._id },
-                { $addToSet: { participants: { $each: usersToAddIds } }, $set: {updatedAt: new Date()} }
+                { $addToSet: { participants: { $each: usersToAddIds } }, $set: { updatedAt: new Date() } }
             );
-             // Systemnachricht für hinzugefügte User
+            // Systemnachricht für hinzugefügte User
             const joinMessageContent = `${adminUsername} hat ${addedUsernames.join(', ')} zur Gruppe hinzugefügt.`;
             const systemMessage = { chatId: group._id, senderId: null, senderUsername: "System", content: joinMessageContent, timestamp: new Date() };
             await limMessagesCollection.insertOne(systemMessage);
-            await limChatsCollection.updateOne( { _id: group._id }, { $set: { lastMessagePreview: joinMessageContent.substring(0,50), lastMessageSenderId: null, lastMessageTimestamp: systemMessage.timestamp, updatedAt: systemMessage.timestamp }});
+            await limChatsCollection.updateOne({ _id: group._id }, { $set: { lastMessagePreview: joinMessageContent.substring(0, 50), lastMessageSenderId: null, lastMessageTimestamp: systemMessage.timestamp, updatedAt: systemMessage.timestamp } });
         }
-        
+
         const updatedGroup = await limChatsCollection.findOne({ _id: group._id });
         let message = `${usersToAddIds.length} Nutzer erfolgreich hinzugefügt.`;
         if (errors.length > 0) message += ` Fehler: ${errors.join('; ')}`;
@@ -1873,30 +1873,30 @@ app.delete('/api/chat/groups/:chatId/participants/:participantUserId', isAuthent
     if (participantUserId.equals(group.ownerId)) {
         return res.status(403).json({ error: "Der Gruppeneigentümer kann nicht gekickt werden." });
     }
-     if (participantUserId.equals(adminUserId)) {
+    if (participantUserId.equals(adminUserId)) {
         return res.status(400).json({ error: "Du kannst dich nicht selbst kicken. Nutze 'Gruppe verlassen'." });
     }
 
     console.log(`${LOG_PREFIX_CHAT} Admin ${adminUsername} kickt User ${participantUserIdStr} aus Gruppe ${group._id}`);
 
     try {
-        const participantUser = await usersCollection.findOne({_id: participantUserId}, {projection: {username:1}});
-        if (!participantUser) return res.status(404).json({error: "Zu kickender Nutzer nicht gefunden."});
+        const participantUser = await usersCollection.findOne({ _id: participantUserId }, { projection: { username: 1 } });
+        if (!participantUser) return res.status(404).json({ error: "Zu kickender Nutzer nicht gefunden." });
 
         const result = await limChatsCollection.updateOne(
             { _id: group._id },
-            { $pull: { participants: participantUserId, adminIds: participantUserId }, $set: {updatedAt: new Date()} } // Auch aus Admins entfernen
+            { $pull: { participants: participantUserId, adminIds: participantUserId }, $set: { updatedAt: new Date() } } // Auch aus Admins entfernen
         );
 
         if (result.modifiedCount === 0 && result.matchedCount === 1) {
             return res.status(404).json({ error: "Nutzer war nicht Teil der Gruppe oder wurde bereits entfernt." });
         }
-        
+
         // Systemnachricht
         const kickMessageContent = `${participantUser.username} wurde von ${adminUsername} aus der Gruppe entfernt.`;
         const systemMessage = { chatId: group._id, senderId: null, senderUsername: "System", content: kickMessageContent, timestamp: new Date() };
         await limMessagesCollection.insertOne(systemMessage);
-        await limChatsCollection.updateOne( { _id: group._id }, { $set: { lastMessagePreview: kickMessageContent.substring(0,50), lastMessageSenderId: null, lastMessageTimestamp: systemMessage.timestamp, updatedAt: systemMessage.timestamp }});
+        await limChatsCollection.updateOne({ _id: group._id }, { $set: { lastMessagePreview: kickMessageContent.substring(0, 50), lastMessageSenderId: null, lastMessageTimestamp: systemMessage.timestamp, updatedAt: systemMessage.timestamp } });
 
         const updatedGroup = await limChatsCollection.findOne({ _id: group._id });
         res.json({ message: `Nutzer ${participantUser.username} erfolgreich aus der Gruppe entfernt.`, chat: updatedGroup });
@@ -1921,28 +1921,28 @@ app.post('/api/chat/groups/:chatId/ban', isAuthenticated, isChatParticipant, isG
         return res.status(403).json({ error: "Der Gruppeneigentümer kann nicht gebannt werden." });
     }
     if (group.adminIds.some(adminId => adminId.equals(userIdToBan)) && !group.ownerId.equals(new ObjectId(req.session.userId))) {
-        return res.status(403).json({ error: "Nur der Gruppeneigentümer kann andere Admins bannen."});
+        return res.status(403).json({ error: "Nur der Gruppeneigentümer kann andere Admins bannen." });
     }
 
     console.log(`${LOG_PREFIX_CHAT} Admin ${adminUsername} bannt User ${userIdToBanStr} aus Gruppe ${group._id}`);
     try {
-        const userToBanDetails = await usersCollection.findOne({_id: userIdToBan}, {projection: {username: 1}});
-        if(!userToBanDetails) return res.status(404).json({error: "Zu bannender Nutzer nicht gefunden."});
+        const userToBanDetails = await usersCollection.findOne({ _id: userIdToBan }, { projection: { username: 1 } });
+        if (!userToBanDetails) return res.status(404).json({ error: "Zu bannender Nutzer nicht gefunden." });
 
         const result = await limChatsCollection.updateOne(
             { _id: group._id },
-            { 
+            {
                 $addToSet: { bannedUserIds: userIdToBan },
                 $pull: { participants: userIdToBan, adminIds: userIdToBan }, // Aus Teilnehmern & Admins entfernen
-                $set: {updatedAt: new Date()}
+                $set: { updatedAt: new Date() }
             }
         );
-        
+
         // Systemnachricht
         const banMessageContent = `${userToBanDetails.username} wurde von ${adminUsername} aus der Gruppe gebannt.`;
         const systemMessage = { chatId: group._id, senderId: null, senderUsername: "System", content: banMessageContent, timestamp: new Date() };
         await limMessagesCollection.insertOne(systemMessage);
-        await limChatsCollection.updateOne( { _id: group._id }, { $set: { lastMessagePreview: banMessageContent.substring(0,50), lastMessageSenderId: null, lastMessageTimestamp: systemMessage.timestamp, updatedAt: systemMessage.timestamp }});
+        await limChatsCollection.updateOne({ _id: group._id }, { $set: { lastMessagePreview: banMessageContent.substring(0, 50), lastMessageSenderId: null, lastMessageTimestamp: systemMessage.timestamp, updatedAt: systemMessage.timestamp } });
 
         const updatedGroup = await limChatsCollection.findOne({ _id: group._id });
         res.json({ message: `Nutzer ${userToBanDetails.username} erfolgreich gebannt und entfernt.`, chat: updatedGroup });
@@ -1967,12 +1967,12 @@ app.delete('/api/chat/groups/:chatId/ban/:bannedUserId', isAuthenticated, isChat
     try {
         const result = await limChatsCollection.updateOne(
             { _id: group._id },
-            { $pull: { bannedUserIds: bannedUserId }, $set: {updatedAt: new Date()} }
+            { $pull: { bannedUserIds: bannedUserId }, $set: { updatedAt: new Date() } }
         );
         if (result.modifiedCount === 0 && result.matchedCount === 1) {
             return res.status(404).json({ error: "Nutzer war nicht gebannt." });
         }
-        const userUnbanned = await usersCollection.findOne({_id: bannedUserId}, {projection: {username:1}});
+        const userUnbanned = await usersCollection.findOne({ _id: bannedUserId }, { projection: { username: 1 } });
         const updatedGroup = await limChatsCollection.findOne({ _id: group._id });
         res.json({ message: `Nutzer ${userUnbanned ? userUnbanned.username : bannedUserIdStr} erfolgreich entbannt.`, chat: updatedGroup });
     } catch (err) {
@@ -2002,9 +2002,9 @@ app.post('/api/chat/groups/:chatId/admins/:participantUserId', isAuthenticated, 
     try {
         await limChatsCollection.updateOne(
             { _id: group._id },
-            { $addToSet: { adminIds: participantUserId }, $set: {updatedAt: new Date()} }
+            { $addToSet: { adminIds: participantUserId }, $set: { updatedAt: new Date() } }
         );
-        const userPromoted = await usersCollection.findOne({_id: participantUserId}, {projection: {username:1}});
+        const userPromoted = await usersCollection.findOne({ _id: participantUserId }, { projection: { username: 1 } });
         const updatedGroup = await limChatsCollection.findOne({ _id: group._id });
         res.json({ message: `Nutzer ${userPromoted ? userPromoted.username : participantUserIdStr} erfolgreich zum Admin befördert.`, chat: updatedGroup });
     } catch (err) {
@@ -2034,9 +2034,9 @@ app.delete('/api/chat/groups/:chatId/admins/:adminUserIdToRemove', isAuthenticat
     try {
         await limChatsCollection.updateOne(
             { _id: group._id },
-            { $pull: { adminIds: adminUserIdToRemove }, $set: {updatedAt: new Date()} }
+            { $pull: { adminIds: adminUserIdToRemove }, $set: { updatedAt: new Date() } }
         );
-        const userDemoted = await usersCollection.findOne({_id: adminUserIdToRemove}, {projection: {username:1}});
+        const userDemoted = await usersCollection.findOne({ _id: adminUserIdToRemove }, { projection: { username: 1 } });
         const updatedGroup = await limChatsCollection.findOne({ _id: group._id });
         res.json({ message: `Admin-Status von Nutzer ${userDemoted ? userDemoted.username : adminUserIdToRemoveStr} erfolgreich entfernt.`, chat: updatedGroup });
     } catch (err) {
@@ -2066,7 +2066,7 @@ app.post('/api/chat/groups/:chatId/leave', isAuthenticated, isChatParticipant, a
                 const otherAdmins = group.adminIds.filter(id => !id.equals(userId));
                 if (otherAdmins.length > 0) {
                     // Wähle ersten anderen Admin (könnte durch Timestamp der Admin-Ernennung verbessert werden)
-                    newOwnerId = otherAdmins[0]; 
+                    newOwnerId = otherAdmins[0];
                 } else {
                     // Wähle ältesten anderen Teilnehmer (basierend auf _id, was ungefähr der Beitrittszeit entspricht)
                     const otherParticipants = group.participants.filter(id => !id.equals(userId)).sort();
@@ -2076,22 +2076,22 @@ app.post('/api/chat/groups/:chatId/leave', isAuthenticated, isChatParticipant, a
                 if (newOwnerId) {
                     await limChatsCollection.updateOne(
                         { _id: group._id },
-                        { 
+                        {
                             $pull: { participants: userId, adminIds: userId },
                             $set: { ownerId: newOwnerId, updatedAt: new Date() },
                             $addToSet: { adminIds: newOwnerId } // Sicherstellen, dass neuer Owner auch Admin ist
                         }
                     );
-                    const newOwner = await usersCollection.findOne({_id: newOwnerId}, {projection:{username:1}});
+                    const newOwner = await usersCollection.findOne({ _id: newOwnerId }, { projection: { username: 1 } });
                     console.log(`${LOG_PREFIX_CHAT} Owner ${username} hat Gruppe ${group.name} verlassen. Neuer Owner: ${newOwner ? newOwner.username : newOwnerId}.`);
-                     // Systemnachricht
+                    // Systemnachricht
                     const leaveMessageContent = `${username} (Owner) hat die Gruppe verlassen. ${newOwner ? newOwner.username : 'Ein neuer Nutzer'} ist nun der Owner.`;
                     const systemMessage = { chatId: group._id, senderId: null, senderUsername: "System", content: leaveMessageContent, timestamp: new Date() };
                     await limMessagesCollection.insertOne(systemMessage);
-                    await limChatsCollection.updateOne( { _id: group._id }, { $set: { lastMessagePreview: leaveMessageContent.substring(0,50), lastMessageSenderId: null, lastMessageTimestamp: systemMessage.timestamp, updatedAt: systemMessage.timestamp }});
+                    await limChatsCollection.updateOne({ _id: group._id }, { $set: { lastMessagePreview: leaveMessageContent.substring(0, 50), lastMessageSenderId: null, lastMessageTimestamp: systemMessage.timestamp, updatedAt: systemMessage.timestamp } });
 
                 } else {
-                     // Sollte nicht passieren, wenn participants.length > 1
+                    // Sollte nicht passieren, wenn participants.length > 1
                     console.warn(`${LOG_PREFIX_CHAT} Gruppe ${group.name} konnte nicht verlassen werden, kein neuer Owner bestimmbar.`);
                     return res.status(500).json({ error: "Konnte keinen neuen Owner bestimmen. Gruppe kann nicht verlassen werden." });
                 }
@@ -2100,15 +2100,15 @@ app.post('/api/chat/groups/:chatId/leave', isAuthenticated, isChatParticipant, a
             // Normaler Teilnehmer verlässt die Gruppe
             await limChatsCollection.updateOne(
                 { _id: group._id },
-                { $pull: { participants: userId, adminIds: userId }, $set: {updatedAt: new Date()} } // Auch aus Admins entfernen
+                { $pull: { participants: userId, adminIds: userId }, $set: { updatedAt: new Date() } } // Auch aus Admins entfernen
             );
-             // Systemnachricht
+            // Systemnachricht
             const leaveMessageContent = `${username} hat die Gruppe verlassen.`;
             const systemMessage = { chatId: group._id, senderId: null, senderUsername: "System", content: leaveMessageContent, timestamp: new Date() };
             await limMessagesCollection.insertOne(systemMessage);
-            await limChatsCollection.updateOne( { _id: group._id }, { $set: { lastMessagePreview: leaveMessageContent.substring(0,50), lastMessageSenderId: null, lastMessageTimestamp: systemMessage.timestamp, updatedAt: systemMessage.timestamp }});
+            await limChatsCollection.updateOne({ _id: group._id }, { $set: { lastMessagePreview: leaveMessageContent.substring(0, 50), lastMessageSenderId: null, lastMessageTimestamp: systemMessage.timestamp, updatedAt: systemMessage.timestamp } });
         }
-        
+
         const updatedGroupAfterLeave = await limChatsCollection.findOne({ _id: group._id }); // Kann null sein, wenn gelöscht
         res.json({ message: "Gruppe erfolgreich verlassen.", chat: updatedGroupAfterLeave });
 
@@ -2190,38 +2190,64 @@ app.get('/api/hall-of-fame', async (req, res) => {
     try {
         // Wir führen alle Abfragen parallel aus, um Zeit zu sparen
         const [topMoney, topTokens, infinityClub] = await Promise.all([
-            // 1. Die reichsten User (ohne Admins)
-            usersCollection.find(
-                { isAdmin: { $ne: true } }, // WICHTIG: Admins ausschließen
-                { projection: { username: 1, balance: 1, _id: 0 } } // Nur relevante Daten holen
-            )
-            .sort({ balance: -1 }) // Nach Guthaben absteigend sortieren
-            .limit(5) // Die Top 5
-            .toArray(),
+            // 1. Die reichsten User (mit korrekter NUMERISCHER Sortierung)
+            usersCollection.aggregate([
+                // Stufe 1: Admins ausschließen
+                { $match: { isAdmin: { $ne: true } } },
+                // Stufe 2: Ein neues Feld 'numericBalance' erstellen, das 'balance' sicher in eine Zahl umwandelt.
+                // $toDouble ist robust und wandelt Zahlen, die als String gespeichert sind, korrekt um.
+                {
+                    $addFields: {
+                        "numericBalance": { $toDouble: "$balance" }
+                    }
+                },
+                // Stufe 3: Nach dem neuen, GARANTIERT numerischen Feld sortieren
+                { $sort: { numericBalance: -1 } },
+                // Stufe 4: Die Top 5 auswählen
+                { $limit: 5 },
+                // Stufe 5: Nur die ursprünglichen Felder für die Antwort auswählen, um die API-Antwort konsistent zu halten
+                {
+                    $project: {
+                        username: 1,
+                        balance: 1,
+                        _id: 0
+                    }
+                }
+            ]).toArray(),
 
-            // 2. Die User mit den meisten Tokens (ohne Admins)
-            usersCollection.find(
-                { isAdmin: { $ne: true } }, // WICHTIG: Admins ausschließen
-                { projection: { username: 1, tokens: 1, _id: 0 } }
-            )
-            .sort({ tokens: -1 }) // Nach Tokens absteigend sortieren
-            .limit(5) // Die Top 5
-            .toArray(),
+            // 2. Die User mit den meisten Tokens (ebenfalls mit numerischer Sortierung zur Sicherheit)
+            usersCollection.aggregate([
+                { $match: { isAdmin: { $ne: true } } },
+                {
+                    $addFields: {
+                        "numericTokens": { $toDouble: "$tokens" }
+                    }
+                },
+                { $sort: { numericTokens: -1 } },
+                { $limit: 5 },
+                {
+                    $project: {
+                        username: 1,
+                        tokens: 1,
+                        _id: 0
+                    }
+                }
+            ]).toArray(),
 
             // 3. Die Mitglieder des "Infinity Clubs" (ohne Admins)
             usersCollection.find(
-                { 
-                    isAdmin: { $ne: true },            // WICHTIG: Admins ausschließen
-                    unlockedInfinityMoney: true        // Prüft, wer es freigeschaltet hat
+                {
+                    isAdmin: { $ne: true },
+                    unlockedInfinityMoney: true
                 },
                 { projection: { username: 1, createdAt: 1, _id: 0 } }
             )
-            .sort({ createdAt: 1 }) // Die ersten, die es geschafft haben, stehen oben
-            .limit(10) // Zeigen wir bis zu 10 Legenden
-            .toArray()
+                .sort({ createdAt: 1 })
+                .limit(10)
+                .toArray()
         ]);
 
-        // Jetzt bauen wir die coole JSON-Antwort zusammen
+        // Jetzt bauen wir die coole JSON-Antwort zusammen (dieser Teil bleibt gleich)
         res.json({
             title: "🏆 Hall of Fame von Limazon 🏆",
             lastUpdated: new Date().toISOString(),
@@ -2242,7 +2268,7 @@ app.get('/api/hall-of-fame', async (req, res) => {
                     id: "infinity_club",
                     title: "Der Club der Unendlichkeit ∞",
                     description: "Diese Legenden haben die Fesseln der Wirtschaft gesprengt. Für sie ist 'Geld' nur noch ein Konzept. Sie haben das Spiel gemeistert.",
-                    members: infinityClub.map(user => user.username) // Wir geben hier nur die Namen als einfache Liste zurück
+                    members: infinityClub.map(user => user.username)
                 }
             ]
         });
