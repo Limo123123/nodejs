@@ -2183,7 +2183,7 @@ app.put('/api/chat/chats/:chatId/settings/mute', isAuthenticated, isChatParticip
 
 // === CHAT ENDPOINTS ENDE===
 
-app.get('/api/hall-of-fame', async (req, res) => {
+app.get('/health', async (req, res) => {
     res.status(200)
 });
 
