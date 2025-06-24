@@ -23,6 +23,7 @@ const session = require('express-session');
 const MongoStore = require('connect-mongo');
 const { v4: uuidv4 } = require('uuid');
 const axios = require('axios'); // Hinzufügen für HTTP-Anfragen 
+const { ok } = require('assert');
 const LOG_PREFIX_CHAT = "[WhatsLim API]";
 const CHAT_COLLECTION_NAME = 'limChats';
 const MESSAGE_COLLECTION_NAME = 'limMessages';
@@ -2182,72 +2183,66 @@ app.put('/api/chat/chats/:chatId/settings/mute', isAuthenticated, isChatParticip
 
 // === CHAT ENDPOINTS ENDE===
 
+app.get('/api/hall-of-fame', async (req, res) => {
+    res.status(200)
+});
+
 // =========================================================
 // === HALL OF FAME ENDPUNKT ===
 // =========================================================
 app.get('/api/hall-of-fame', async (req, res) => {
-    console.log(`${LOG_PREFIX_SERVER} 🏆 Hall of Fame wird abgerufen.`);
+    console.log(`${LOG_PREFIX_SERVER} 🏆 Hall of Fame wird abgerufen (mit Infinity-Filter).`);
     try {
-        // Wir führen alle Abfragen parallel aus, um Zeit zu sparen
+        // Die Bedingung, um unendliche User auszuschließen.
+        // Wir prüfen auf `unlockedInfinityMoney: { $ne: true }`, um auch die auszuschließen, die es zwar freigeschaltet, aber deaktiviert haben.
+        const finiteUserCondition = {
+            isAdmin: { $ne: true },
+            unlockedInfinityMoney: { $ne: true }
+        };
+
         const [topMoney, topTokens, infinityClub] = await Promise.all([
-            // 1. Die reichsten User (mit korrekter NUMERISCHER Sortierung)
+            // 1. Die reichsten User (NUR User OHNE Infinity-Status)
             usersCollection.aggregate([
-                // Stufe 1: Admins ausschließen
-                { $match: { isAdmin: { $ne: true } } },
+                // Stufe 1: Nur User ohne Admin-Rechte UND ohne freigeschalteten Infinity-Modus
+                { $match: finiteUserCondition },
                 // Stufe 2: Ein neues Feld 'numericBalance' erstellen, das 'balance' sicher in eine Zahl umwandelt.
-                // $toDouble ist robust und wandelt Zahlen, die als String gespeichert sind, korrekt um.
-                {
-                    $addFields: {
-                        "numericBalance": { $toDouble: "$balance" }
-                    }
-                },
-                // Stufe 3: Nach dem neuen, GARANTIERT numerischen Feld sortieren
+                { $addFields: { "numericBalance": { $toDouble: "$balance" } } },
+                // Stufe 3: Nach dem neuen, numerischen Feld sortieren
                 { $sort: { numericBalance: -1 } },
                 // Stufe 4: Die Top 5 auswählen
                 { $limit: 5 },
-                // Stufe 5: Nur die ursprünglichen Felder für die Antwort auswählen, um die API-Antwort konsistent zu halten
-                {
-                    $project: {
-                        username: 1,
-                        balance: 1,
-                        _id: 0
-                    }
-                }
+                // Stufe 5: Nur die ursprünglichen Felder für die Antwort auswählen
+                { $project: { username: 1, balance: 1, _id: 0 } }
             ]).toArray(),
 
-            // 2. Die User mit den meisten Tokens (ebenfalls mit numerischer Sortierung zur Sicherheit)
+            // 2. Die User mit den meisten Tokens (NUR User OHNE Infinity-Status)
             usersCollection.aggregate([
-                { $match: { isAdmin: { $ne: true } } },
-                {
-                    $addFields: {
-                        "numericTokens": { $toDouble: "$tokens" }
-                    }
-                },
+                 // Stufe 1: Nur User ohne Admin-Rechte UND ohne freigeschalteten Infinity-Modus
+                { $match: finiteUserCondition },
+                // Stufe 2: Ein neues Feld 'numericTokens' erstellen
+                { $addFields: { "numericTokens": { $toDouble: "$tokens" } } },
+                // Stufe 3: Nach dem neuen, numerischen Feld sortieren
                 { $sort: { numericTokens: -1 } },
+                // Stufe 4: Die Top 5 auswählen
                 { $limit: 5 },
-                {
-                    $project: {
-                        username: 1,
-                        tokens: 1,
-                        _id: 0
-                    }
-                }
+                // Stufe 5: Nur die ursprünglichen Felder für die Antwort auswählen
+                { $project: { username: 1, tokens: 1, _id: 0 } }
             ]).toArray(),
 
-            // 3. Die Mitglieder des "Infinity Clubs" (ohne Admins)
+            // 3. Die Mitglieder des "Infinity Clubs" (Diese Liste bleibt unverändert)
             usersCollection.find(
-                {
+                { 
                     isAdmin: { $ne: true },
                     unlockedInfinityMoney: true
                 },
                 { projection: { username: 1, createdAt: 1, _id: 0 } }
             )
-                .sort({ createdAt: 1 })
-                .limit(10)
-                .toArray()
+            .sort({ createdAt: 1 })
+            .limit(10)
+            .toArray()
         ]);
 
-        // Jetzt bauen wir die coole JSON-Antwort zusammen (dieser Teil bleibt gleich)
+        // Die JSON-Antwort bleibt strukturell gleich.
         res.json({
             title: "🏆 Hall of Fame von Limazon 🏆",
             lastUpdated: new Date().toISOString(),
@@ -2255,7 +2250,7 @@ app.get('/api/hall-of-fame', async (req, res) => {
                 {
                     id: "money_magnates",
                     title: "Die Finanz-Magnaten 💰",
-                    description: "Sie schwimmen in Limazon-Dollars und ihre Konten platzen aus allen Nähten. Das sind die unangefochtenen Könige des Kapitals!",
+                    description: "Sie schwimmen in Limazon-Dollars und ihre Konten platzen aus allen Nähten. Das sind die unangefochtenen Könige des Kapitals unter den sterblichen Spielern!",
                     entries: topMoney
                 },
                 {
@@ -2267,7 +2262,7 @@ app.get('/api/hall-of-fame', async (req, res) => {
                 {
                     id: "infinity_club",
                     title: "Der Club der Unendlichkeit ∞",
-                    description: "Diese Legenden haben die Fesseln der Wirtschaft gesprengt. Für sie ist 'Geld' nur noch ein Konzept. Sie haben das Spiel gemeistert.",
+                    description: "Diese Legenden haben die Fesseln der Wirtschaft gesprengt. Für sie ist 'Geld' nur noch ein Konzept. Sie haben das Spiel gemeistert und spielen nun in ihrer eigenen Liga.",
                     members: infinityClub.map(user => user.username)
                 }
             ]
