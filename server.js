@@ -549,7 +549,7 @@ app.get('/api/auth/me', isAuthenticated, async (req, res) => {
         const user = await usersCollection.findOne({ _id: new ObjectId(req.session.userId) }, { projection: { password: 0 } });
         if (!user) { console.error(`${LOG_PREFIX_SERVER} /api/auth/me: User ${req.session.userId} nicht in DB! Zerstöre Session.`); req.session.destroy(() => { }); return res.status(404).json({ error: 'Benutzer nicht gefunden.' }); }
         const effectiveInfinityMoney = user.isAdmin ? true : (user.infinityMoney || false);
-        res.json({ userId: user._id.toString(), username: user.username, balance: user.balance, tokens: user.tokens || 0, isAdmin: user.isAdmin || false, infinityMoney: effectiveInfinityMoney, unlockedInfinityMoney: user.unlockedInfinityMoney || false, productSellCooldowns: user.productSellCooldowns || {} });
+			res.json({ userId: user._id.toString(), username: user.username, balance: parseFloat(user.balance || 0), tokens: user.tokens || 0, isAdmin: user.isAdmin || false, infinityMoney: effectiveInfinityMoney, unlockedInfinityMoney: user.unlockedInfinityMoney || false, productSellCooldowns: user.productSellCooldowns || {} });
     } catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler /api/auth/me ${req.session.username}:`, err); res.status(500).json({ error: "Fehler Abruf Benutzerdaten." }); }
 });
 
