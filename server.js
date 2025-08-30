@@ -748,13 +748,34 @@ app.post('/api/admin/generate-token-code', isAdmin, async (req, res) => {
 });
 
 // PRODUCTS
+// PRODUCTS
 app.get('/api/products', async (req, res) => {
     try {
-        const filter = { $or: [{ id: { $type: 'number', $gte: 100000 }, isTokenCard: { $ne: true } }, { isTokenCard: true }] };
-        const prods = await productsCollection.find(filter).sort({ id: 1 }).toArray();
-        const sanitized = prods.map(p => { const s = { ...p }; s.stock = (typeof p.stock === 'number' && p.stock >= 0) ? p.stock : 0; s.default_stock = (typeof p.default_stock === 'number' && p.default_stock >= 0) ? p.default_stock : (p.isTokenCard ? 99999 : 20); delete s._id; return s; });
+        const prods = await productsCollection.find({}).sort({ id: 1 }).toArray();
+
+        // Sanitize products for both classic shop and stonk market
+        const sanitized = prods.map(p => {
+            const s = { ...p };
+
+            // --- Kompatibilitäts-Logik für alten Shop ---
+            if (p.hasOwnProperty('currentPrice') && !p.isTokenCard) {
+                // Wenn es eine Aktie ist, erstelle das alte 'price'-Feld als String
+                s.price = `$${parseFloat(p.currentPrice || 0).toFixed(2)}`;
+            }
+            
+            // Standard-Bereinigung für stock etc.
+            s.stock = (typeof p.stock === 'number' && p.stock >= 0) ? p.stock : 0;
+            s.default_stock = (typeof p.default_stock === 'number' && p.default_stock >= 0) ? p.default_stock : (p.isTokenCard ? 99999 : 20);
+            
+            delete s._id;
+            return s;
+        });
+
         res.json({ products: sanitized });
-    } catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler Abruf Produkte:`, err); res.status(500).json({ error: 'Fehler Abruf Produktliste.' }); }
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler Abruf Produkte:`, err);
+        res.status(500).json({ error: 'Fehler Abruf Produktliste.' });
+    }
 });
 app.post('/api/products', isAdmin, async (req, res) => {
     let { name, image_url, price, stock, isTokenCard, tokenValue } = req.body;
