@@ -2527,6 +2527,22 @@ app.get('/api/auctions', async (req, res) => {
     }
 });
 
+app.get('/api/auctions/:id', async (req, res) => {
+    try {
+        if (!ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({ error: "Ungültige Auktions-ID." });
+        }
+        const auction = await auctionsCollection.findOne({ _id: new ObjectId(req.params.id) });
+        if (!auction) {
+            return res.status(404).json({ error: "Auktion nicht gefunden." });
+        }
+        res.json({ auction });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Abrufen der Auktionsdetails für ID ${req.params.id}:`, err);
+        res.status(500).json({ error: 'Fehler beim Laden der Auktionsdetails.' });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
