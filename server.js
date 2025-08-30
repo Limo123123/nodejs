@@ -107,6 +107,7 @@ let productsCollection, usersCollection, ordersCollection, inventoriesCollection
 let wheelsCollection, tokenCodesCollection, tokenTransactionsCollection;
 let limChatsCollection, limMessagesCollection, limUserChatSettingsCollection;
 let auctionsCollection;
+let portfoliosCollection, transactionsCollection; 
 
 // --- Hilfsfunktionen ---
 async function generateUniqueUserShareCode() {
@@ -415,6 +416,9 @@ MongoClient.connect(mongoUri)
         limUserChatSettingsCollection = db.collection(USER_CHAT_SETTINGS_COLLECTION_NAME);
 		auctionsCollection = db.collection('auctions');
 		console.log(`${LOG_PREFIX_SERVER} ✅ Auktionshaus-Collection initialisiert.`);
+		portfoliosCollection = db.collection('portfolios');
+		transactionsCollection = db.collection('transactions');
+		console.log(`${LOG_PREFIX_SERVER} ✅ Börsen-Collections (portfolios, transactions) initialisiert.`);
         console.log(`${LOG_PREFIX_SERVER} ✅ Chat-Collections initialisiert.`);
         console.log(`${LOG_PREFIX_SERVER} ✅ MongoDB erfolgreich verbunden und Collections initialisiert.`);
         try {
@@ -430,6 +434,9 @@ MongoClient.connect(mongoUri)
             await limUserChatSettingsCollection.createIndex({ userId: 1, chatId: 1 }, { unique: true });
 			await auctionsCollection.createIndex({ status: 1, endTime: 1 }); // Wichtig für den Auktions-Ende-Job
             console.log(`${LOG_PREFIX_SERVER} ✅ Chat-Indizes erfolgreich erstellt oder bereits vorhanden.`);
+			await portfoliosCollection.createIndex({ userId: 1, productId: 1 }, { unique: true });
+			await transactionsCollection.createIndex({ userId: 1 });
+			await transactionsCollection.createIndex({ productId: 1, timestamp: -1 });
             await productsCollection.createIndex({ id: 1 }, { unique: true });
             await usersCollection.createIndex({ username: 1 }, { unique: true });
             await usersCollection.createIndex({ tokens: 1 });
@@ -2576,6 +2583,50 @@ app.post('/api/admin/fix-balances', isAuthenticated, isAdmin, async (req, res) =
         res.status(500).json({ error: "Serverfehler bei der Reparatur." });
     }
 });
+
+app.post('/api/admin/convert-products-to-stocks', isAuthenticated, isAdmin, async (req, res) => {
+    console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} startet die Konvertierung von Produkten zu Aktien.`);
+    try {
+        const productsToConvert = await productsCollection.find({
+            isTokenCard: { $ne: true },
+            currentPrice: { $exists: false } // Nur Produkte konvertieren, die noch nicht konvertiert wurden
+        }).toArray();
+
+        if (productsToConvert.length === 0) {
+            return res.json({ message: "Keine Produkte zur Konvertierung gefunden. Wahrscheinlich bereits erledigt." });
+        }
+
+        const bulkOps = productsToConvert.map(prod => {
+            const priceAsNumber = parseFloat(String(prod.price).replace(/[^0-9.]/g, '')) || 100.0; // Fallback-Preis 100
+            return {
+                updateOne: {
+                    filter: { _id: prod._id },
+                    update: {
+                        $set: {
+                            currentPrice: priceAsNumber,
+                            basePrice: priceAsNumber, // Speichert den ursprünglichen Preis
+                            priceHistory: [{ price: priceAsNumber, timestamp: new Date() }],
+                            buysLastInterval: 0,
+                            sellsLastInterval: 0
+                        },
+                        $unset: { price: "" } // Entfernt das alte 'price'-Feld (String)
+                    }
+                }
+            };
+        });
+
+        const result = await productsCollection.bulkWrite(bulkOps);
+        const message = `Konvertierung abgeschlossen. ${result.modifiedCount} Produkte wurden in das Börsenformat umgewandelt.`;
+        console.log(`${LOG_PREFIX_SERVER} ${message}`);
+        res.json({ message, modifiedCount: result.modifiedCount });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler bei der Produkt-Konvertierung:`, err);
+        res.status(500).json({ error: "Serverfehler bei der Konvertierung." });
+    }
+});
+
+
 
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
