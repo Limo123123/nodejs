@@ -2543,6 +2543,40 @@ app.get('/api/auctions/:id', async (req, res) => {
     }
 });
 
+// Admin Repair
+// NEU: Admin-Endpunkt zum Reparieren von String-Balances
+app.post('/api/admin/fix-balances', isAuthenticated, isAdmin, async (req, res) => {
+    console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} startet die Reparatur der Benutzer-Kontostände.`);
+    try {
+        const usersWithBadBalance = await usersCollection.find({ balance: { $type: "string" } }).toArray();
+
+        if (usersWithBadBalance.length === 0) {
+            return res.json({ message: "Keine Benutzer mit fehlerhaftem Kontostand (String) gefunden. Alles in Ordnung!" });
+        }
+
+        const bulkOps = usersWithBadBalance.map(user => {
+            // Bereinige den String und wandle ihn in eine Zahl um
+            const numericBalance = parseFloat(String(user.balance).replace(/[^0-9.]/g, '')) || 0;
+            return {
+                updateOne: {
+                    filter: { _id: user._id },
+                    update: { $set: { balance: numericBalance } }
+                }
+            };
+        });
+
+        const result = await usersCollection.bulkWrite(bulkOps);
+
+        const message = `Reparatur abgeschlossen. ${result.modifiedCount} von ${usersWithBadBalance.length} Benutzerkontoständen wurden korrigiert.`;
+        console.log(`${LOG_PREFIX_SERVER} ${message}`);
+        res.json({ message, modifiedCount: result.modifiedCount });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler bei der Kontostand-Reparatur:`, err);
+        res.status(500).json({ error: "Serverfehler bei der Reparatur." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
