@@ -404,7 +404,7 @@ async function isAdmin(req, res, next) {
 }
 
 // --- Init MongoDB-Verbindung und Serverstart ---
-setInterval(async () => {(mongoUri)
+MongoClient.connect(mongoUri)
     .then(async client => {
         db = client.db(mongoDbName);
         productsCollection = db.collection(productsCollectionName);
