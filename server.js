@@ -2419,6 +2419,100 @@ app.post('/api/auctions', isAuthenticated, async (req, res) => {
     }
 });
 
+app.post('/api/auctions/:id/bid', isAuthenticated, async (req, res) => {
+    const { bidAmount } = req.body;
+    const bidderId = new ObjectId(req.session.userId);
+    const auctionId = new ObjectId(req.params.id);
+
+    if (typeof bidAmount !== 'number' || bidAmount <= 0) {
+        return res.status(400).json({ error: 'Ungültiger Gebotsbetrag.' });
+    }
+    const finalBidAmount = parseFloat(bidAmount.toFixed(2));
+
+    try {
+        // --- 1. Daten abrufen und validieren ---
+        const auction = await auctionsCollection.findOne({ _id: auctionId });
+        if (!auction) {
+            return res.status(404).json({ error: 'Auktion nicht gefunden.' });
+        }
+        if (auction.status !== 'active') {
+            return res.status(400).json({ error: 'Diese Auktion ist bereits beendet.' });
+        }
+        if (new Date() > new Date(auction.endTime)) {
+            return res.status(400).json({ error: 'Diese Auktion ist bereits abgelaufen.' });
+        }
+        if (auction.sellerId.equals(bidderId)) {
+            return res.status(400).json({ error: 'Du kannst nicht auf deine eigene Auktion bieten.' });
+        }
+        if (finalBidAmount <= auction.currentBid) {
+            return res.status(400).json({ error: `Dein Gebot muss höher als das aktuelle Gebot von $${auction.currentBid.toFixed(2)} sein.` });
+        }
+
+        const bidder = await usersCollection.findOne({ _id: bidderId });
+        if (!bidder || bidder.balance < finalBidAmount) {
+            return res.status(400).json({ error: `Nicht genügend Guthaben. Du benötigst $${finalBidAmount.toFixed(2)}.` });
+        }
+
+        // --- 2. Transaktionen durchführen ---
+        
+        // Geld vom neuen Bieter abziehen (reservieren)
+        const bidderDebitResult = await usersCollection.updateOne(
+            { _id: bidderId, balance: { $gte: finalBidAmount } },
+            { $inc: { balance: -finalBidAmount } }
+        );
+        if (bidderDebitResult.modifiedCount === 0) {
+            throw new Error("Guthabenabzug beim neuen Bieter fehlgeschlagen. Möglicherweise Race Condition.");
+        }
+
+        // Wenn es einen vorherigen Höchstbietenden gab, Geld zurückgeben
+        if (auction.highestBidderId) {
+            await usersCollection.updateOne(
+                { _id: auction.highestBidderId },
+                { $inc: { balance: auction.currentBid } }
+            );
+        }
+
+        // --- 3. Auktionsdokument aktualisieren ---
+        const newBid = {
+            bidderId,
+            bidderUsername: req.session.username,
+            amount: finalBidAmount,
+            timestamp: new Date()
+        };
+
+        const auctionUpdateResult = await auctionsCollection.updateOne(
+            { _id: auctionId, status: 'active' }, // Erneute Sicherheitsprüfung
+            {
+                $set: {
+                    currentBid: finalBidAmount,
+                    highestBidderId: bidderId,
+                    highestBidderUsername: req.session.username
+                },
+                $push: {
+                    bids: {
+                        $each: [newBid],
+                        $position: 0 // Neues Gebot an den Anfang des Arrays setzen
+                    }
+                }
+            }
+        );
+        
+        if (auctionUpdateResult.modifiedCount === 0) {
+             throw new Error("Auktions-Update fehlgeschlagen. Auktion wurde möglicherweise in der Zwischenzeit beendet.");
+        }
+
+        console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} bietet $${finalBidAmount} auf Auktion ${auctionId}.`);
+        res.json({ message: 'Gebot erfolgreich abgegeben!', newBid });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Bieten für User ${req.session.username} auf Auktion ${auctionId}:`, err);
+        // WICHTIG: Im Fehlerfall sicherstellen, dass das Geld nicht verloren geht.
+        // Da das Geld bereits abgezogen wurde, müssen wir es hier zurückgeben.
+        await usersCollection.updateOne({ _id: bidderId }, { $inc: { balance: finalBidAmount } });
+        res.status(500).json({ error: 'Serverfehler beim Bieten. Dein Geld wurde dir zurückerstattet.' });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
