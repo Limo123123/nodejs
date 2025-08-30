@@ -2513,6 +2513,20 @@ app.post('/api/auctions/:id/bid', isAuthenticated, async (req, res) => {
     }
 });
 
+app.get('/api/auctions', async (req, res) => {
+    try {
+        const activeAuctions = await auctionsCollection.find({ status: 'active' })
+            .sort({ endTime: 1 }) // Auktionen, die am frühesten enden, zuerst
+            .limit(100) // Begrenzung zur Performance-Schonung
+            .toArray();
+
+        res.json({ auctions: activeAuctions });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Abrufen der Auktionen:`, err);
+        res.status(500).json({ error: 'Fehler beim Laden der Auktionsliste.' });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
