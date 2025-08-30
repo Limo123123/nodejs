@@ -840,6 +840,79 @@ app.get('/api/tokens/my-codes', isAuthenticated, async (req, res) => {
     } catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler /api/tokens/my-codes User ${req.session.username}:`, err); res.status(500).json({ error: "Fehler Abruf gekaufte Token Codes." }); }
 });
 
+// START: New Endpoint for merging token codes
+app.post('/api/tokens/merge', isAuthenticated, async (req, res) => {
+    const { tokenValue, count } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} will ${count}x ${tokenValue} Token-Codes zusammenführen.`);
+
+    // Validation
+    const allowedValues = [10, 50, 100, 500, 1000];
+    if (!allowedValues.includes(tokenValue)) {
+        return res.status(400).json({ error: "Ungültiger Token-Wert ausgewählt." });
+    }
+    if (typeof count !== 'number' || !Number.isInteger(count) || count < 2) {
+        return res.status(400).json({ error: "Ungültige Anzahl. Es müssen mindestens 2 Codes sein." });
+    }
+
+    try {
+        // Find enough unredeemed codes of the specified value for the user
+        const codesToMerge = await tokenCodesCollection.find({
+            generatedForUserId: userId,
+            tokenAmount: tokenValue,
+            isRedeemed: false
+        }).limit(count).toArray();
+
+        if (codesToMerge.length < count) {
+            return res.status(400).json({ error: `Nicht genügend Codes vorhanden. Du hast nur ${codesToMerge.length} von ${count} benötigten ${tokenValue}-Token-Codes.` });
+        }
+
+        // --- All checks passed, proceed with merging ---
+
+        // 1. Calculate new value and generate new code
+        const newTokenValue = tokenValue * count;
+        const newCodeString = await generateUniqueTokenRedeemCode();
+        const mergedFromIds = codesToMerge.map(c => c._id);
+
+        const newCodeDocument = {
+            code: newCodeString,
+            tokenAmount: newTokenValue,
+            isRedeemed: false,
+            createdAt: new Date(),
+            generatedForUserId: userId,
+            limazonProductId: null, // It's not from a direct product purchase
+            mergedFrom: mergedFromIds // For traceability
+        };
+
+        // 2. Delete the old codes
+        const deleteResult = await tokenCodesCollection.deleteMany({
+            _id: { $in: mergedFromIds }
+        });
+
+        if (deleteResult.deletedCount !== count) {
+            // This would be a critical error, something went wrong between finding and deleting
+            console.error(`${LOG_PREFIX_SERVER} MERGE ERROR: Konnte nicht alle alten Codes löschen für User ${req.session.username}. Erwartet: ${count}, Gelöscht: ${deleteResult.deletedCount}`);
+            // We should not proceed to create the new code to avoid issues.
+            return res.status(500).json({ error: "Kritischer Fehler: Alte Codes konnten nicht korrekt entfernt werden. Bitte versuche es erneut." });
+        }
+
+        // 3. Insert the new code
+        await tokenCodesCollection.insertOne(newCodeDocument);
+
+        console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} hat ${count}x ${tokenValue} Codes zu einem neuen ${newTokenValue} Code zusammengeführt: ${newCodeString}.`);
+        res.status(201).json({
+            message: `Erfolgreich ${count} Codes zu einem neuen Code mit ${newTokenValue} Tokens zusammengeführt!`,
+            newCode: newCodeDocument
+        });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler bei /api/tokens/merge für User ${req.session.username}:`, err);
+        res.status(500).json({ error: "Serverfehler beim Zusammenführen der Codes." });
+    }
+});
+// END: New Endpoint for merging token codes
+
+
 // GLÜCKSRAD Endpoints
 app.post('/api/wheels', isAuthenticated, async (req, res) => {
     let { name, description, isPublic, segments, spinCost, creationCost } = req.body;
