@@ -2885,6 +2885,46 @@ app.post('/api/stonks/sell', isAuthenticated, async (req, res) => {
     }
 });
 
+// Portfolio des eingeloggten Benutzers abrufen (verbesserte Version)
+app.get('/api/stonks/portfolio', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const portfolioItems = await portfoliosCollection.find({ userId, quantityShares: { $gt: 0 } }).toArray();
+        
+        if (portfolioItems.length === 0) {
+            return res.json({ portfolio: [] });
+        }
+
+        // IDs aller Produkte im Portfolio sammeln
+        const productIdsInPortfolio = portfolioItems.map(item => item.productId);
+
+        // Aktuelle Daten (Name, Preis, Bild) für diese Produkte aus der 'products' Collection holen
+        const productDetails = await productsCollection.find(
+            { id: { $in: productIdsInPortfolio } },
+            { projection: { id: 1, name: 1, currentPrice: 1, image_url: 1, _id: 0 } }
+        ).toArray();
+        
+        // Eine Map für schnellen Zugriff erstellen: productId -> productDetail
+        const productDetailsMap = new Map(productDetails.map(p => [p.id, p]));
+
+        // Das Portfolio mit den aktuellen Produktdetails anreichern
+        const enrichedPortfolio = portfolioItems.map(item => {
+            const details = productDetailsMap.get(item.productId);
+            return {
+                ...item, // Enthält userId, productId, quantityShares, averageBuyPrice
+                name: details ? details.name : "Unbekanntes Produkt",
+                imageUrl: details ? details.image_url : "",
+                currentPrice: details ? details.currentPrice : 0
+            };
+        });
+
+        res.json({ portfolio: enrichedPortfolio });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Abrufen des Portfolios für User ${req.session.username}:`, err);
+        res.status(500).json({ error: 'Serverfehler beim Laden des Portfolios.' });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
