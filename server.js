@@ -59,7 +59,10 @@ const sessionSecret = process.env.SESSION_SECRET;
 const SALT_ROUNDS = 10;
 const frontendProdUrl = process.env.FRONTEND_URL;
 const frontendDevUrlHttp = 'http://127.0.0.1:8080';
-const frontendDevUrlHttps = 'https://127.0.0.1:8080';
+const frontendDevUrlHttps = 'https://127.0.0.1:8080
+const PRICE_UPDATE_INTERVAL_MS = 5 * 60 * 1000; // 5 Minuten
+const PRICE_VOLATILITY_FACTOR = 0.005; // Wie stark Preise reagieren
+const MINIMUM_PRODUCT_PRICE = 1.00; // Minimaler Preis für ein Produkt
 
 // --- Glücksrad & Token Konstanten ---
 const DEFAULT_STARTING_TOKENS = 10;
@@ -401,7 +404,7 @@ async function isAdmin(req, res, next) {
 }
 
 // --- Init MongoDB-Verbindung und Serverstart ---
-MongoClient.connect(mongoUri)
+setInterval(async () => {(mongoUri)
     .then(async client => {
         db = client.db(mongoDbName);
         productsCollection = db.collection(productsCollectionName);
@@ -469,6 +472,120 @@ MongoClient.connect(mongoUri)
         } catch (seedErr) { console.error(`${LOG_PREFIX_SERVER}    Fehler beim Überprüfen/Seeden regulärer Produkte:`, seedErr); }
         await seedTokenCardProducts();
         await seedDefaultPublicWheel();
+		// START: AUKTION-ENDE-JOB
+        setInterval(async () => {
+            console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Prüfe auf abgelaufene Auktionen...`);
+            const now = new Date();
+            try {
+                const expiredAuctions = await auctionsCollection.find({
+                    status: 'active',
+                    endTime: { $lte: now }
+                }).toArray();
+
+                if (expiredAuctions.length === 0) {
+                    console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Keine abgelaufenen Auktionen gefunden.`);
+                    return;
+                }
+
+                console.log(`${LOG_PREFIX_SERVER} [AuctionJob] ${expiredAuctions.length} Auktion(en) gefunden, die beendet werden müssen.`);
+
+                for (const auction of expiredAuctions) {
+                    if (auction.highestBidderId) {
+                        // Auktion wurde verkauft
+                        await inventoriesCollection.updateOne(
+                            { userId: auction.highestBidderId, productId: auction.productId },
+                            { $inc: { quantityOwned: auction.quantity } },
+                            { upsert: true }
+                        );
+                        await usersCollection.updateOne(
+                            { _id: auction.sellerId },
+                            { $inc: { balance: auction.currentBid } }
+                        );
+                        await auctionsCollection.updateOne(
+                            { _id: auction._id },
+                            { $set: { status: 'ended_sold' } }
+                        );
+                        console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Auktion ${auction._id} ("${auction.productName}") verkauft an ${auction.highestBidderUsername} für $${auction.currentBid}.`);
+                    } else {
+                        // Auktion nicht verkauft
+                        await inventoriesCollection.updateOne(
+                            { userId: auction.sellerId, productId: auction.productId },
+                            { $inc: { quantityOwned: auction.quantity } },
+                            { upsert: true }
+                        );
+                        await auctionsCollection.updateOne(
+                            { _id: auction._id },
+                            { $set: { status: 'ended_unsold' } }
+                        );
+                         console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Auktion ${auction._id} ("${auction.productName}") nicht verkauft. Item an ${auction.sellerUsername} zurückgegeben.`);
+                    }
+                }
+            } catch (err) {
+                console.error(`${LOG_PREFIX_SERVER} [AuctionJob] KRITISCHER FEHLER bei der Auktionsverarbeitung:`, err);
+            }
+        }, 60000); // Läuft jede Minute
+        // ENDE: AUKTION-ENDE-JOB
+	
+		        // START: BÖRSEN-PREIS-UPDATE-JOB
+        setInterval(async () => {
+            console.log(`${LOG_PREFIX_SERVER} [StockMarketJob] Starte Preis-Update-Zyklus...`);
+            const now = new Date();
+            try {
+                // Finde alle handelbaren Aktien
+                const stocksToUpdate = await productsCollection.find({
+                    isTokenCard: { $ne: true },
+                    currentPrice: { $exists: true }
+                }).toArray();
+
+                if (stocksToUpdate.length === 0) {
+                    console.log(`${LOG_PREFIX_SERVER} [StockMarketJob] Keine Aktien zum Aktualisieren gefunden.`);
+                    return;
+                }
+
+                const bulkOps = stocksToUpdate.map(stock => {
+                    const buys = stock.buysLastInterval || 0;
+                    const sells = stock.sellsLastInterval || 0;
+                    const oldPrice = stock.currentPrice;
+                    let newPrice = oldPrice;
+
+                    // Nur Preis anpassen, wenn Handel stattgefunden hat
+                    if (buys > 0 || sells > 0) {
+                        const netDemand = buys - sells;
+                        const priceChangeFactor = 1 + (netDemand * PRICE_VOLATILITY_FACTOR);
+                        newPrice = Math.max(MINIMUM_PRODUCT_PRICE, oldPrice * priceChangeFactor);
+                    }
+
+                    return {
+                        updateOne: {
+                            filter: { _id: stock._id },
+                            update: {
+                                $set: {
+                                    currentPrice: parseFloat(newPrice.toFixed(2)),
+                                    buysLastInterval: 0, // Zähler zurücksetzen
+                                    sellsLastInterval: 0 // Zähler zurücksetzen
+                                },
+                                $push: {
+                                    priceHistory: {
+                                        $each: [{ price: parseFloat(newPrice.toFixed(2)), timestamp: now }],
+                                        $slice: -30 // Nur die letzten 30 Preisänderungen behalten
+                                    }
+                                }
+                            }
+                        }
+                    };
+                });
+
+                if (bulkOps.length > 0) {
+                    const result = await productsCollection.bulkWrite(bulkOps);
+                    console.log(`${LOG_PREFIX_SERVER} [StockMarketJob] ${result.modifiedCount} Aktienpreise aktualisiert.`);
+                }
+
+            } catch (err) {
+                console.error(`${LOG_PREFIX_SERVER} [StockMarketJob] KRITISCHER FEHLER bei der Preisaktualisierung:`, err);
+            }
+        }, PRICE_UPDATE_INTERVAL_MS);
+        // ENDE: BÖRSEN-PREIS-UPDATE-JOB
+		
         http.createServer(app).listen(HTTP_PORT, () => {
             console.log(`${LOG_PREFIX_SERVER} 🌐 HTTP-Server läuft auf Port ${HTTP_PORT}`);
         });
@@ -2626,7 +2743,126 @@ app.post('/api/admin/convert-products-to-stocks', isAuthenticated, isAdmin, asyn
     }
 });
 
+// =========================================================
+// === LIMOSTONKS BÖRSEN ENDPUNKTE ===
+// =========================================================
 
+// Aktien KAUFEN
+app.post('/api/stonks/buy', isAuthenticated, async (req, res) => {
+    const { productId, quantity } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (typeof productId !== 'number' || typeof quantity !== 'number' || !Number.isInteger(quantity) || quantity <= 0) {
+        return res.status(400).json({ error: 'Ungültige Produkt-ID oder Menge.' });
+    }
+
+    try {
+        const stock = await productsCollection.findOne({ id: productId, isTokenCard: { $ne: true } });
+        if (!stock) {
+            return res.status(404).json({ error: 'Aktie nicht gefunden.' });
+        }
+
+        const pricePerShare = stock.currentPrice;
+        const totalCost = pricePerShare * quantity;
+
+        const user = await usersCollection.findOne({ _id: userId });
+        if (!user || user.balance < totalCost) {
+            return res.status(400).json({ error: `Nicht genügend Guthaben. Benötigt: $${totalCost.toFixed(2)}.` });
+        }
+
+        // --- Transaktion durchführen ---
+        // 1. Geld vom User abziehen
+        const debitResult = await usersCollection.updateOne({ _id: userId, balance: { $gte: totalCost } }, { $inc: { balance: -totalCost } });
+        if (debitResult.modifiedCount === 0) throw new Error("Guthabenabzug fehlgeschlagen.");
+
+        // 2. Kauf-Zähler für das Produkt erhöhen
+        await productsCollection.updateOne({ _id: stock._id }, { $inc: { buysLastInterval: quantity } });
+
+        // 3. Portfolio des Users aktualisieren
+        const portfolioItem = await portfoliosCollection.findOne({ userId, productId });
+        let newAveragePrice;
+        if (portfolioItem) {
+            const oldTotalValue = portfolioItem.averageBuyPrice * portfolioItem.quantityShares;
+            const newTotalValue = oldTotalValue + totalCost;
+            const newTotalQuantity = portfolioItem.quantityShares + quantity;
+            newAveragePrice = newTotalValue / newTotalQuantity;
+        } else {
+            newAveragePrice = pricePerShare;
+        }
+
+        await portfoliosCollection.updateOne(
+            { userId, productId },
+            {
+                $inc: { quantityShares: quantity },
+                $set: { averageBuyPrice: newAveragePrice }
+            },
+            { upsert: true }
+        );
+        
+        // 4. Transaktion loggen
+        await transactionsCollection.insertOne({ userId, productId, type: 'buy', quantity, pricePerShare, totalValue: totalCost, timestamp: new Date() });
+
+        res.json({ message: `Erfolgreich ${quantity} Anteile von "${stock.name}" für $${totalCost.toFixed(2)} gekauft.` });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler bei Aktienkauf für User ${req.session.username}:`, err);
+        // Rollback versuchen (Geld zurückgeben), falls etwas schiefging
+        const stock = await productsCollection.findOne({ id: productId });
+        if (stock) {
+            const totalCost = stock.currentPrice * quantity;
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: totalCost } });
+        }
+        res.status(500).json({ error: 'Serverfehler beim Aktienkauf. Transaktion wurde rückgängig gemacht.' });
+    }
+});
+
+// Aktien VERKAUFEN
+app.post('/api/stonks/sell', isAuthenticated, async (req, res) => {
+    const { productId, quantity } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+     if (typeof productId !== 'number' || typeof quantity !== 'number' || !Number.isInteger(quantity) || quantity <= 0) {
+        return res.status(400).json({ error: 'Ungültige Produkt-ID oder Menge.' });
+    }
+    
+    try {
+        const stock = await productsCollection.findOne({ id: productId, isTokenCard: { $ne: true } });
+        if (!stock) return res.status(404).json({ error: 'Aktie nicht gefunden.' });
+
+        const portfolioItem = await portfoliosCollection.findOne({ userId, productId });
+        if (!portfolioItem || portfolioItem.quantityShares < quantity) {
+            return res.status(400).json({ error: `Nicht genügend Anteile im Portfolio. Du besitzt nur ${portfolioItem ? portfolioItem.quantityShares : 0}.` });
+        }
+
+        const pricePerShare = stock.currentPrice;
+        const totalCredit = pricePerShare * quantity;
+
+        // --- Transaktion durchführen ---
+        // 1. Anteile aus Portfolio entfernen
+        const portfolioUpdateResult = await portfoliosCollection.updateOne({ userId, productId, quantityShares: { $gte: quantity } }, { $inc: { quantityShares: -quantity } });
+        if (portfolioUpdateResult.modifiedCount === 0) throw new Error("Portfolio-Update fehlgeschlagen.");
+        
+        // 2. Verkauf-Zähler für das Produkt erhöhen
+        await productsCollection.updateOne({ _id: stock._id }, { $inc: { sellsLastInterval: quantity } });
+        
+        // 3. User das Geld gutschreiben
+        await usersCollection.updateOne({ _id: userId }, { $inc: { balance: totalCredit } });
+
+        // 4. Transaktion loggen
+        await transactionsCollection.insertOne({ userId, productId, type: 'sell', quantity, pricePerShare, totalValue: totalCredit, timestamp: new Date() });
+
+        // Portfolio-Eintrag löschen, wenn keine Anteile mehr vorhanden
+        await portfoliosCollection.deleteOne({ userId, productId, quantityShares: 0 });
+
+        res.json({ message: `Erfolgreich ${quantity} Anteile von "${stock.name}" für $${totalCredit.toFixed(2)} verkauft.` });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler bei Aktienverkauf für User ${req.session.username}:`, err);
+        // Rollback versuchen (Anteile zurückgeben), falls etwas schiefging
+        await portfoliosCollection.updateOne({ userId, productId }, { $inc: { quantityShares: quantity } });
+        res.status(500).json({ error: 'Serverfehler beim Aktienverkauf. Transaktion wurde rückgängig gemacht.' });
+    }
+});
 
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
