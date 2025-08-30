@@ -106,6 +106,7 @@ let db;
 let productsCollection, usersCollection, ordersCollection, inventoriesCollection;
 let wheelsCollection, tokenCodesCollection, tokenTransactionsCollection;
 let limChatsCollection, limMessagesCollection, limUserChatSettingsCollection;
+let auctionsCollection;
 
 // --- Hilfsfunktionen ---
 async function generateUniqueUserShareCode() {
@@ -412,6 +413,8 @@ MongoClient.connect(mongoUri)
         limChatsCollection = db.collection(CHAT_COLLECTION_NAME);
         limMessagesCollection = db.collection(MESSAGE_COLLECTION_NAME);
         limUserChatSettingsCollection = db.collection(USER_CHAT_SETTINGS_COLLECTION_NAME);
+		auctionsCollection = db.collection('auctions');
+		console.log(`${LOG_PREFIX_SERVER} ✅ Auktionshaus-Collection initialisiert.`);
         console.log(`${LOG_PREFIX_SERVER} ✅ Chat-Collections initialisiert.`);
         console.log(`${LOG_PREFIX_SERVER} ✅ MongoDB erfolgreich verbunden und Collections initialisiert.`);
         try {
@@ -425,6 +428,7 @@ MongoClient.connect(mongoUri)
             await limMessagesCollection.createIndex({ senderId: 1 });
             await limMessagesCollection.createIndex({ content: "text" }); // Für Textsuche
             await limUserChatSettingsCollection.createIndex({ userId: 1, chatId: 1 }, { unique: true });
+			await auctionsCollection.createIndex({ status: 1, endTime: 1 }); // Wichtig für den Auktions-Ende-Job
             console.log(`${LOG_PREFIX_SERVER} ✅ Chat-Indizes erfolgreich erstellt oder bereits vorhanden.`);
             await productsCollection.createIndex({ id: 1 }, { unique: true });
             await usersCollection.createIndex({ username: 1 }, { unique: true });
@@ -2344,6 +2348,74 @@ app.get('/api/hall-of-fame', async (req, res) => {
     } catch (err) {
         console.error(`${LOG_PREFIX_SERVER} ❌ Fehler beim Abrufen der Hall of Fame:`, err);
         res.status(500).json({ error: "Fehler beim Laden der Halle des Ruhms. Die Legenden schlafen noch." });
+    }
+});
+
+// =========================================================
+// === AUKTIONSHAUS ENDPUNKTE ===
+// =========================================================
+
+app.post('/api/auctions', isAuthenticated, async (req, res) => {
+    const { productId, quantity, startingBid, durationInHours } = req.body;
+    const sellerId = new ObjectId(req.session.userId);
+
+    console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} erstellt Auktion:`, req.body);
+
+    if (typeof productId !== 'number' || typeof quantity !== 'number' || quantity <= 0 || typeof startingBid !== 'number' || startingBid <= 0 || typeof durationInHours !== 'number' || ![12, 24, 48].includes(durationInHours)) {
+        return res.status(400).json({ error: 'Ungültige Auktionsdaten. Menge/Preis müssen > 0 sein und Dauer muss 12, 24 oder 48 Stunden sein.' });
+    }
+
+    try {
+        const product = await productsCollection.findOne({ id: productId, isTokenCard: { $ne: true } });
+        if (!product) {
+            return res.status(404).json({ error: 'Produkt nicht gefunden oder nicht auktionsfähig.' });
+        }
+
+        const inventoryItem = await inventoriesCollection.findOne({ userId: sellerId, productId: productId });
+        if (!inventoryItem || inventoryItem.quantityOwned < quantity) {
+            return res.status(400).json({ error: `Nicht genügend Items im Inventar. Du besitzt nur ${inventoryItem ? inventoryItem.quantityOwned : 0} Stk.` });
+        }
+
+        // Item aus dem Inventar des Verkäufers entfernen (hinterlegen)
+        const updateResult = await inventoriesCollection.updateOne(
+            { userId: sellerId, productId: productId, quantityOwned: { $gte: quantity } },
+            { $inc: { quantityOwned: -quantity } }
+        );
+
+        if (updateResult.modifiedCount === 0) {
+            throw new Error("Inventar-Update fehlgeschlagen, Item konnte nicht hinterlegt werden.");
+        }
+
+        const now = new Date();
+        const endTime = new Date(now.getTime() + durationInHours * 60 * 60 * 1000);
+
+        const newAuction = {
+            sellerId,
+            sellerUsername: req.session.username,
+            productId,
+            productName: product.name,
+            productImageUrl: product.image_url,
+            quantity,
+            startingBid: parseFloat(startingBid.toFixed(2)),
+            currentBid: parseFloat(startingBid.toFixed(2)),
+            highestBidderId: null,
+            highestBidderUsername: null,
+            bids: [],
+            startTime: now,
+            endTime,
+            status: 'active' // active, ended_sold, ended_unsold, cancelled
+        };
+
+        const result = await auctionsCollection.insertOne(newAuction);
+        console.log(`${LOG_PREFIX_SERVER} Auktion ${result.insertedId} für "${product.name}" von ${req.session.username} erstellt.`);
+
+        res.status(201).json({ message: 'Auktion erfolgreich erstellt!', auction: newAuction });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Erstellen der Auktion für User ${req.session.username}:`, err);
+        // WICHTIG: Item zurückgeben, wenn etwas schiefgeht!
+        await inventoriesCollection.updateOne({ userId: sellerId, productId: productId }, { $inc: { quantityOwned: quantity } });
+        res.status(500).json({ error: 'Serverfehler beim Erstellen der Auktion. Das Item wurde deinem Inventar wieder gutgeschrieben.' });
     }
 });
 
