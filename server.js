@@ -2925,6 +2925,57 @@ app.get('/api/stonks/portfolio', isAuthenticated, async (req, res) => {
     }
 });
 
+// NEU: Admin-Endpunkt zum Normalisieren von extrem hohen oder fehlerhaften Kontoständen
+app.post('/api/admin/normalize-balances', isAuthenticated, isAdmin, async (req, res) => {
+    console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} startet die Normalisierung der Kontostände.`);
+    try {
+        const rozsahy_limit = 9999999999999999; // Vernünftiges Maximum (ca. 10 Billiarden)
+        const infinity_reset_value = 999999999999999; // Hoher, aber sicherer Wert für Infinity-User (ca. 1 Billiarde)
+        const default_reset_value = 5000; // Standardwert für normale User
+
+        // Finde alle User mit problematischen Kontoständen (zu hoch ODER ein String)
+        const usersToFix = await usersCollection.find({
+            $or: [
+                { balance: { $type: "string" } },
+                { balance: { $gt: rozsahy_limit } }
+            ]
+        }).toArray();
+
+        if (usersToFix.length === 0) {
+            return res.json({ message: "Keine Kontostände zum Normalisieren gefunden. Alles in Ordnung!" });
+        }
+
+        const bulkOps = usersToFix.map(user => {
+            let newBalance;
+            if (user.unlockedInfinityMoney || user.isAdmin) {
+                // User mit Infinity-Rechten bekommen den hohen Reset-Wert
+                newBalance = infinity_reset_value;
+            } else {
+                // Alle anderen (deren Kontostand wahrscheinlich durch einen Bug fehlerhaft ist)
+                // bekommen den Standard-Startwert.
+                newBalance = default_reset_value;
+            }
+
+            return {
+                updateOne: {
+                    filter: { _id: user._id },
+                    update: { $set: { balance: newBalance } }
+                }
+            };
+        });
+
+        const result = await usersCollection.bulkWrite(bulkOps);
+
+        const message = `Normalisierung abgeschlossen. ${result.modifiedCount} von ${usersToFix.length} Benutzerkontoständen wurden auf einen sicheren Wert zurückgesetzt.`;
+        console.log(`${LOG_PREFIX_SERVER} ${message}`);
+        res.json({ message, modifiedCount: result.modifiedCount });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler bei der Kontostand-Normalisierung:`, err);
+        res.status(500).json({ error: "Serverfehler bei der Normalisierung." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
