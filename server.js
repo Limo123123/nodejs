@@ -748,10 +748,19 @@ app.post('/api/admin/generate-token-code', isAdmin, async (req, res) => {
 });
 
 // PRODUCTS
-// PRODUCTS
 app.get('/api/products', async (req, res) => {
     try {
-        const prods = await productsCollection.find({}).sort({ id: 1 }).toArray();
+        // ==============================================================================
+        // === KORREKTUR 2: PERFORMANCE-OPTIMIERUNG DURCH PROJEKTION ====================
+        // Die `projection` weist die Datenbank an, das riesige `priceHistory`-Feld
+        // nicht für die allgemeine Produktliste zu laden. Dies reduziert die Datenmenge
+        // drastisch und beschleunigt das Laden der Seite erheblich.
+        // ==============================================================================
+        const prods = await productsCollection.find({}, { 
+            projection: { 
+                priceHistory: 0 
+            } 
+        }).sort({ id: 1 }).toArray();
 
         // Sanitize products for both classic shop and stonk market
         const sanitized = prods.map(p => {
@@ -903,7 +912,16 @@ app.post('/api/products/sell', isAuthenticated, async (req, res) => {
         const invItem = await inventoriesCollection.findOne({ userId: userId, productId: productId }); if (!invItem || invItem.quantityOwned < quantity) return res.status(400).json({ error: `Nicht ${quantity}x "${prodToSell.name}" im Bestand. Aktuell: ${invItem ? invItem.quantityOwned : 0}.` });
         let cooldowns = user.productSellCooldowns || {}; const lastAttCDISO = cooldowns[productId.toString()];
         if (lastAttCDISO) { const cdEndTime = new Date(lastAttCDISO).getTime(); if (Date.now() < cdEndTime) { const timeLeft = Math.ceil((cdEndTime - Date.now()) / 1000); return res.status(429).json({ success: false, error: `Cooldown aktiv: Warte ${timeLeft}s.`, cooldownActiveForProduct: productId, cooldownEndsAt: lastAttCDISO, productSellCooldowns: cooldowns }); } else { delete cooldowns[productId.toString()]; await usersCollection.updateOne({ _id: userId }, { $set: { productSellCooldowns: cooldowns } }); } }
-        const origPrice = parseFloat((prodToSell.price || "$0").replace(/[^0-9.]/g, '')) || 1; let prob = 1.0;
+        
+        // ==============================================================================
+        // === KORREKTUR 1: VERKAUFS-BUG BEHOBEN ========================================
+        // Die Logik greift jetzt auf `basePrice` (stabil) zu, um die Verkaufschance 
+        // zu berechnen. Falls dieser nicht existiert, wird auf die alte `price`-Logik
+        // zurückgegriffen, um Abwärtskompatibilität zu gewährleisten.
+        // ==============================================================================
+        const origPrice = prodToSell.basePrice || parseFloat((prodToSell.price || "$0").replace(/[^0-9.]/g, '')) || 1;
+        
+        let prob = 1.0;
         if (sellPrice > origPrice) prob = origPrice / sellPrice; else if (sellPrice < origPrice * 0.5) prob = 1.0;
         const globStock = prodToSell.stock || 0; const defGlobStock = prodToSell.default_stock || 20;
         if (globStock > defGlobStock * 2.5) prob *= 0.1; else if (globStock > defGlobStock * 1.8) prob *= 0.5; else if (globStock > defGlobStock * 1.2) prob *= 0.8;
