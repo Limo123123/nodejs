@@ -112,6 +112,142 @@ let limChatsCollection, limMessagesCollection, limUserChatSettingsCollection;
 let auctionsCollection;
 let portfoliosCollection, transactionsCollection; 
 
+// ==============================================================================
+// === NEU: AUTOMATISIERTE SICHERHEITS- & REPARATURFUNKTIONEN ====================
+// ==============================================================================
+const LOG_PREFIX_SECURITY = "[Security Check]";
+
+/**
+ * Findet Benutzer, deren Kontostand fälschlicherweise als String gespeichert ist, 
+ * und konvertiert ihn in eine Zahl.
+ */
+async function fixStringBalances() {
+    try {
+        console.log(`${LOG_PREFIX_SECURITY} Suche nach Kontoständen, die als String gespeichert sind...`);
+        const usersWithBadBalance = await usersCollection.find({ balance: { $type: "string" } }).toArray();
+
+        if (usersWithBadBalance.length === 0) {
+            console.log(`${LOG_PREFIX_SECURITY} ✅ Alle Kontostände haben den korrekten Datentyp (Zahl).`);
+            return { message: "Keine fehlerhaften Kontostände (String) gefunden.", modifiedCount: 0 };
+        }
+
+        console.warn(`${LOG_PREFIX_SECURITY} ❗ ${usersWithBadBalance.length} Benutzer mit String-Kontostand gefunden. Starte Reparatur...`);
+        const bulkOps = usersWithBadBalance.map(user => ({
+            updateOne: {
+                filter: { _id: user._id },
+                update: { $set: { balance: parseFloat(String(user.balance).replace(/[^0-9.]/g, '')) || 0 } }
+            }
+        }));
+        const result = await usersCollection.bulkWrite(bulkOps);
+        console.log(`${LOG_PREFIX_SECURITY} ✅ Reparatur abgeschlossen. ${result.modifiedCount} Kontostände korrigiert.`);
+        return { message: `${result.modifiedCount} Kontostände wurden korrigiert.`, modifiedCount: result.modifiedCount };
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SECURITY} ❌ FEHLER bei der Kontostand-Typ-Reparatur:`, err);
+        return { error: "Serverfehler bei der Reparatur von String-Kontoständen." };
+    }
+}
+
+/**
+ * Konvertiert reguläre Produkte in das neue Börsenformat, falls noch nicht geschehen.
+ * Dies ist hauptsächlich eine Migrationsaufgabe.
+ */
+async function convertProductsToStocks() {
+    try {
+        console.log(`${LOG_PREFIX_SECURITY} Suche nach Produkten, die noch nicht in das Börsenformat konvertiert wurden...`);
+        const productsToConvert = await productsCollection.find({
+            isTokenCard: { $ne: true },
+            currentPrice: { $exists: false }
+        }).toArray();
+
+        if (productsToConvert.length === 0) {
+            console.log(`${LOG_PREFIX_SECURITY} ✅ Alle Produkte sind bereits im Börsenformat.`);
+            return { message: "Keine Produkte zur Konvertierung gefunden.", modifiedCount: 0 };
+        }
+
+        console.log(`${LOG_PREFIX_SECURITY} ❗ ${productsToConvert.length} Produkte werden in das Börsenformat konvertiert...`);
+        const bulkOps = productsToConvert.map(prod => {
+            const priceAsNumber = parseFloat(String(prod.price).replace(/[^0-9.]/g, '')) || 100.0;
+            return {
+                updateOne: {
+                    filter: { _id: prod._id },
+                    update: {
+                        $set: {
+                            currentPrice: priceAsNumber,
+                            basePrice: priceAsNumber,
+                            priceHistory: [{ price: priceAsNumber, timestamp: new Date() }],
+                            buysLastInterval: 0,
+                            sellsLastInterval: 0
+                        },
+                        $unset: { price: "" }
+                    }
+                }
+            };
+        });
+        const result = await productsCollection.bulkWrite(bulkOps);
+        console.log(`${LOG_PREFIX_SECURITY} ✅ Konvertierung abgeschlossen. ${result.modifiedCount} Produkte umgewandelt.`);
+        return { message: `${result.modifiedCount} Produkte wurden konvertiert.`, modifiedCount: result.modifiedCount };
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SECURITY} ❌ FEHLER bei der Produkt-Konvertierung:`, err);
+        return { error: "Serverfehler bei der Produkt-Konvertierung." };
+    }
+}
+
+/**
+ * Findet Benutzer mit extrem hohen oder fehlerhaften Kontoständen und setzt sie
+ * auf einen sicheren Maximalwert zurück, um Datenkorruption und Exploits zu verhindern.
+ */
+async function normalizeExtremeBalances() {
+    try {
+        console.log(`${LOG_PREFIX_SECURITY} Suche nach extremen oder fehlerhaften Kontoständen...`);
+        const rozsahy_limit = 9999999999999999;
+        const infinity_reset_value = 999999999999999;
+        const default_reset_value = 5000;
+
+        const usersToFix = await usersCollection.find({
+            $or: [{ balance: { $type: "string" } }, { balance: { $gt: rozsahy_limit } }]
+        }).toArray();
+
+        if (usersToFix.length === 0) {
+            console.log(`${LOG_PREFIX_SECURITY} ✅ Keine extremen Kontostände gefunden. Alles in Ordnung.`);
+            return { message: "Keine Kontostände zum Normalisieren gefunden.", modifiedCount: 0 };
+        }
+
+        console.warn(`${LOG_PREFIX_SECURITY} ❗ ${usersToFix.length} Benutzer mit extremen/fehlerhaften Kontoständen gefunden. Starte Normalisierung...`);
+        const bulkOps = usersToFix.map(user => {
+            const newBalance = (user.unlockedInfinityMoney || user.isAdmin) ? infinity_reset_value : default_reset_value;
+            return {
+                updateOne: {
+                    filter: { _id: user._id },
+                    update: { $set: { balance: newBalance } }
+                }
+            };
+        });
+        const result = await usersCollection.bulkWrite(bulkOps);
+        console.log(`${LOG_PREFIX_SECURITY} ✅ Normalisierung abgeschlossen. ${result.modifiedCount} Kontostände zurückgesetzt.`);
+        return { message: `${result.modifiedCount} Kontostände wurden auf einen sicheren Wert zurückgesetzt.`, modifiedCount: result.modifiedCount };
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SECURITY} ❌ FEHLER bei der Kontostand-Normalisierung:`, err);
+        return { error: "Serverfehler bei der Kontostand-Normalisierung." };
+    }
+}
+
+/**
+ * Führt alle automatisierten Sicherheits- und Reparatur-Checks aus.
+ */
+async function runAutomatedSecurityChecks() {
+    console.log(`${LOG_PREFIX_SECURITY} Starte automatische Datenintegritäts-Prüfung...`);
+    try {
+        // Reihenfolge ist wichtig: Zuerst Strings fixen, dann Werte normalisieren.
+        await fixStringBalances();
+        await convertProductsToStocks();
+        await normalizeExtremeBalances();
+        console.log(`${LOG_PREFIX_SECURITY} Automatische Prüfung abgeschlossen.`);
+    } catch (error) {
+        console.error(`${LOG_PREFIX_SECURITY} ❌ Ein kritischer Fehler ist während der automatischen Prüfung aufgetreten:`, error);
+    }
+}
+
+
 // --- Hilfsfunktionen ---
 async function generateUniqueUserShareCode() {
     let code;
@@ -472,6 +608,18 @@ MongoClient.connect(mongoUri)
         } catch (seedErr) { console.error(`${LOG_PREFIX_SERVER}    Fehler beim Überprüfen/Seeden regulärer Produkte:`, seedErr); }
         await seedTokenCardProducts();
         await seedDefaultPublicWheel();
+        
+        // ==============================================================================
+        // === NEU: AUTOMATISIERTE SICHERHEITS-CHECKS BEIM START & PERIODISCH ==========
+        // ==============================================================================
+        console.log(`${LOG_PREFIX_SERVER} 🚀 Führe initiale Datenintegritäts-Prüfung beim Serverstart aus...`);
+        await runAutomatedSecurityChecks();
+        
+        // Richte den periodischen Sicherheits-Check ein (alle 1 Stunde)
+        const SECURITY_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+        setInterval(runAutomatedSecurityChecks, SECURITY_CHECK_INTERVAL_MS);
+        console.log(`${LOG_PREFIX_SERVER} ⏰ Automatische Sicherheits-Prüfung wird alle ${SECURITY_CHECK_INTERVAL_MS / 60000} Minuten ausgeführt.`);
+
 		// START: AUKTION-ENDE-JOB
         setInterval(async () => {
             console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Prüfe auf abgelaufene Auktionen...`);
@@ -483,7 +631,7 @@ MongoClient.connect(mongoUri)
                 }).toArray();
 
                 if (expiredAuctions.length === 0) {
-                    console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Keine abgelaufenen Auktionen gefunden.`);
+                    // console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Keine abgelaufenen Auktionen gefunden.`);
                     return;
                 }
 
@@ -528,7 +676,7 @@ MongoClient.connect(mongoUri)
 	
 		        // START: BÖRSEN-PREIS-UPDATE-JOB
         setInterval(async () => {
-            console.log(`${LOG_PREFIX_SERVER} [StockMarketJob] Starte Preis-Update-Zyklus...`);
+            // console.log(`${LOG_PREFIX_SERVER} [StockMarketJob] Starte Preis-Update-Zyklus...`);
             const now = new Date();
             try {
                 // Finde alle handelbaren Aktien
@@ -538,7 +686,7 @@ MongoClient.connect(mongoUri)
                 }).toArray();
 
                 if (stocksToUpdate.length === 0) {
-                    console.log(`${LOG_PREFIX_SERVER} [StockMarketJob] Keine Aktien zum Aktualisieren gefunden.`);
+                    // console.log(`${LOG_PREFIX_SERVER} [StockMarketJob] Keine Aktien zum Aktualisieren gefunden.`);
                     return;
                 }
 
@@ -577,7 +725,7 @@ MongoClient.connect(mongoUri)
 
                 if (bulkOps.length > 0) {
                     const result = await productsCollection.bulkWrite(bulkOps);
-                    console.log(`${LOG_PREFIX_SERVER} [StockMarketJob] ${result.modifiedCount} Aktienpreise aktualisiert.`);
+                    // console.log(`${LOG_PREFIX_SERVER} [StockMarketJob] ${result.modifiedCount} Aktienpreise aktualisiert.`);
                 }
 
             } catch (err) {
@@ -712,7 +860,7 @@ app.get('/api/inventory', isAuthenticated, async (req, res) => {
     try {
         const userInvItems = await inventoriesCollection.find({ userId: userId, quantityOwned: { $gt: 0 } }).toArray();
         const prodIds = userInvItems.map(item => item.productId);
-        const prodDetails = await productsCollection.find({ id: { $in: prodIds }, isTokenCard: { $ne: true } }, { projection: { name: 1, image_url: 1, price: 1, id: 1, _id: 0 } }).toArray();
+        const prodDetails = await productsCollection.find({ id: { $in: prodIds }, isTokenCard: { $ne: true } }, { projection: { name: 1, image_url: 1, price: 1, currentPrice: 1, basePrice: 1, id: 1, _id: 0 } }).toArray();
         const prodMap = new Map(prodDetails.map(p => [p.id, p]));
         const populatedInv = userInvItems.filter(item => prodMap.has(item.productId)).map(item => ({ ...item, productDetails: prodMap.get(item.productId) }));
         res.json({ inventory: populatedInv });
@@ -750,12 +898,7 @@ app.post('/api/admin/generate-token-code', isAdmin, async (req, res) => {
 // PRODUCTS
 app.get('/api/products', async (req, res) => {
     try {
-        // ==============================================================================
-        // === KORREKTUR 2: PERFORMANCE-OPTIMIERUNG DURCH PROJEKTION ====================
-        // Die `projection` weist die Datenbank an, das riesige `priceHistory`-Feld
-        // nicht für die allgemeine Produktliste zu laden. Dies reduziert die Datenmenge
-        // drastisch und beschleunigt das Laden der Seite erheblich.
-        // ==============================================================================
+        // === KORREKTUR 2: PERFORMANCE-OPTIMIERUNG DURCH PROJEKTION ===
         const prods = await productsCollection.find({}, { 
             projection: { 
                 priceHistory: 0 
@@ -765,17 +908,11 @@ app.get('/api/products', async (req, res) => {
         // Sanitize products for both classic shop and stonk market
         const sanitized = prods.map(p => {
             const s = { ...p };
-
-            // --- Kompatibilitäts-Logik für alten Shop ---
             if (p.hasOwnProperty('currentPrice') && !p.isTokenCard) {
-                // Wenn es eine Aktie ist, erstelle das alte 'price'-Feld als String
                 s.price = `$${parseFloat(p.currentPrice || 0).toFixed(2)}`;
             }
-            
-            // Standard-Bereinigung für stock etc.
             s.stock = (typeof p.stock === 'number' && p.stock >= 0) ? p.stock : 0;
             s.default_stock = (typeof p.default_stock === 'number' && p.default_stock >= 0) ? p.default_stock : (p.isTokenCard ? 99999 : 20);
-            
             delete s._id;
             return s;
         });
@@ -851,7 +988,8 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
             if (!item || typeof item.id !== 'number' || typeof item.quantity !== 'number' || item.quantity <= 0) { errors.push(`Ungültiges Item.`); continue; }
             productChecks.push(productsCollection.findOne({ id: item.id }).then(async pDb => {
                 if (!pDb) { errors.push(`Produkt "${item.name || item.id}" nicht gefunden.`); return null; }
-                const price = parseFloat((pDb.price || "$0").replace(/[^0-9.]/g, '')) || 0; totalOrderValue += price * item.quantity;
+                const price = pDb.currentPrice || parseFloat((pDb.price || "$0").replace(/[^0-9.]/g, '')) || 0;
+                totalOrderValue += price * item.quantity;
                 if (pDb.isTokenCard && pDb.tokenValue > 0) {
                     for (let i = 0; i < item.quantity; i++) { tokenCodeGenerationTasks.push({ tokenAmount: pDb.tokenValue, limazonProductId: pDb.id, generatedForUserId: userId, originalPricePaid: price }); }
                     productDataForOrder.push({ productId: pDb.id, name: pDb.name, quantity: item.quantity, price: price, image_url: pDb.image_url, isTokenCardPurchase: true });
@@ -913,12 +1051,7 @@ app.post('/api/products/sell', isAuthenticated, async (req, res) => {
         let cooldowns = user.productSellCooldowns || {}; const lastAttCDISO = cooldowns[productId.toString()];
         if (lastAttCDISO) { const cdEndTime = new Date(lastAttCDISO).getTime(); if (Date.now() < cdEndTime) { const timeLeft = Math.ceil((cdEndTime - Date.now()) / 1000); return res.status(429).json({ success: false, error: `Cooldown aktiv: Warte ${timeLeft}s.`, cooldownActiveForProduct: productId, cooldownEndsAt: lastAttCDISO, productSellCooldowns: cooldowns }); } else { delete cooldowns[productId.toString()]; await usersCollection.updateOne({ _id: userId }, { $set: { productSellCooldowns: cooldowns } }); } }
         
-        // ==============================================================================
-        // === KORREKTUR 1: VERKAUFS-BUG BEHOBEN ========================================
-        // Die Logik greift jetzt auf `basePrice` (stabil) zu, um die Verkaufschance 
-        // zu berechnen. Falls dieser nicht existiert, wird auf die alte `price`-Logik
-        // zurückgegriffen, um Abwärtskompatibilität zu gewährleisten.
-        // ==============================================================================
+        // === KORREKTUR 1: VERKAUFS-BUG BEHOBEN ===
         const origPrice = prodToSell.basePrice || parseFloat((prodToSell.price || "$0").replace(/[^0-9.]/g, '')) || 1;
         
         let prob = 1.0;
@@ -2707,80 +2840,33 @@ app.get('/api/auctions/:id', async (req, res) => {
 });
 
 // Admin Repair
-// NEU: Admin-Endpunkt zum Reparieren von String-Balances
 app.post('/api/admin/fix-balances', isAuthenticated, isAdmin, async (req, res) => {
-    console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} startet die Reparatur der Benutzer-Kontostände.`);
-    try {
-        const usersWithBadBalance = await usersCollection.find({ balance: { $type: "string" } }).toArray();
-
-        if (usersWithBadBalance.length === 0) {
-            return res.json({ message: "Keine Benutzer mit fehlerhaftem Kontostand (String) gefunden. Alles in Ordnung!" });
-        }
-
-        const bulkOps = usersWithBadBalance.map(user => {
-            // Bereinige den String und wandle ihn in eine Zahl um
-            const numericBalance = parseFloat(String(user.balance).replace(/[^0-9.]/g, '')) || 0;
-            return {
-                updateOne: {
-                    filter: { _id: user._id },
-                    update: { $set: { balance: numericBalance } }
-                }
-            };
-        });
-
-        const result = await usersCollection.bulkWrite(bulkOps);
-
-        const message = `Reparatur abgeschlossen. ${result.modifiedCount} von ${usersWithBadBalance.length} Benutzerkontoständen wurden korrigiert.`;
-        console.log(`${LOG_PREFIX_SERVER} ${message}`);
-        res.json({ message, modifiedCount: result.modifiedCount });
-
-    } catch (err) {
-        console.error(`${LOG_PREFIX_SERVER} Fehler bei der Kontostand-Reparatur:`, err);
-        res.status(500).json({ error: "Serverfehler bei der Reparatur." });
+    console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} startet die manuelle Reparatur der Kontostände.`);
+    const result = await fixStringBalances();
+    if (result.error) {
+        return res.status(500).json(result);
     }
+    res.json(result);
 });
 
 app.post('/api/admin/convert-products-to-stocks', isAuthenticated, isAdmin, async (req, res) => {
-    console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} startet die Konvertierung von Produkten zu Aktien.`);
-    try {
-        const productsToConvert = await productsCollection.find({
-            isTokenCard: { $ne: true },
-            currentPrice: { $exists: false } // Nur Produkte konvertieren, die noch nicht konvertiert wurden
-        }).toArray();
-
-        if (productsToConvert.length === 0) {
-            return res.json({ message: "Keine Produkte zur Konvertierung gefunden. Wahrscheinlich bereits erledigt." });
-        }
-
-        const bulkOps = productsToConvert.map(prod => {
-            const priceAsNumber = parseFloat(String(prod.price).replace(/[^0-9.]/g, '')) || 100.0; // Fallback-Preis 100
-            return {
-                updateOne: {
-                    filter: { _id: prod._id },
-                    update: {
-                        $set: {
-                            currentPrice: priceAsNumber,
-                            basePrice: priceAsNumber, // Speichert den ursprünglichen Preis
-                            priceHistory: [{ price: priceAsNumber, timestamp: new Date() }],
-                            buysLastInterval: 0,
-                            sellsLastInterval: 0
-                        },
-                        $unset: { price: "" } // Entfernt das alte 'price'-Feld (String)
-                    }
-                }
-            };
-        });
-
-        const result = await productsCollection.bulkWrite(bulkOps);
-        const message = `Konvertierung abgeschlossen. ${result.modifiedCount} Produkte wurden in das Börsenformat umgewandelt.`;
-        console.log(`${LOG_PREFIX_SERVER} ${message}`);
-        res.json({ message, modifiedCount: result.modifiedCount });
-
-    } catch (err) {
-        console.error(`${LOG_PREFIX_SERVER} Fehler bei der Produkt-Konvertierung:`, err);
-        res.status(500).json({ error: "Serverfehler bei der Konvertierung." });
+    console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} startet die manuelle Konvertierung von Produkten.`);
+    const result = await convertProductsToStocks();
+    if (result.error) {
+        return res.status(500).json(result);
     }
+    res.json(result);
 });
+
+app.post('/api/admin/normalize-balances', isAuthenticated, isAdmin, async (req, res) => {
+    console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} startet die manuelle Normalisierung der Kontostände.`);
+    const result = await normalizeExtremeBalances();
+    if (result.error) {
+        return res.status(500).json(result);
+    }
+    res.json(result);
+});
+
 
 // =========================================================
 // === LIMOSTONKS BÖRSEN ENDPUNKTE ===
@@ -2943,56 +3029,6 @@ app.get('/api/stonks/portfolio', isAuthenticated, async (req, res) => {
     }
 });
 
-// NEU: Admin-Endpunkt zum Normalisieren von extrem hohen oder fehlerhaften Kontoständen
-app.post('/api/admin/normalize-balances', isAuthenticated, isAdmin, async (req, res) => {
-    console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} startet die Normalisierung der Kontostände.`);
-    try {
-        const rozsahy_limit = 9999999999999999; // Vernünftiges Maximum (ca. 10 Billiarden)
-        const infinity_reset_value = 999999999999999; // Hoher, aber sicherer Wert für Infinity-User (ca. 1 Billiarde)
-        const default_reset_value = 5000; // Standardwert für normale User
-
-        // Finde alle User mit problematischen Kontoständen (zu hoch ODER ein String)
-        const usersToFix = await usersCollection.find({
-            $or: [
-                { balance: { $type: "string" } },
-                { balance: { $gt: rozsahy_limit } }
-            ]
-        }).toArray();
-
-        if (usersToFix.length === 0) {
-            return res.json({ message: "Keine Kontostände zum Normalisieren gefunden. Alles in Ordnung!" });
-        }
-
-        const bulkOps = usersToFix.map(user => {
-            let newBalance;
-            if (user.unlockedInfinityMoney || user.isAdmin) {
-                // User mit Infinity-Rechten bekommen den hohen Reset-Wert
-                newBalance = infinity_reset_value;
-            } else {
-                // Alle anderen (deren Kontostand wahrscheinlich durch einen Bug fehlerhaft ist)
-                // bekommen den Standard-Startwert.
-                newBalance = default_reset_value;
-            }
-
-            return {
-                updateOne: {
-                    filter: { _id: user._id },
-                    update: { $set: { balance: newBalance } }
-                }
-            };
-        });
-
-        const result = await usersCollection.bulkWrite(bulkOps);
-
-        const message = `Normalisierung abgeschlossen. ${result.modifiedCount} von ${usersToFix.length} Benutzerkontoständen wurden auf einen sicheren Wert zurückgesetzt.`;
-        console.log(`${LOG_PREFIX_SERVER} ${message}`);
-        res.json({ message, modifiedCount: result.modifiedCount });
-
-    } catch (err) {
-        console.error(`${LOG_PREFIX_SERVER} Fehler bei der Kontostand-Normalisierung:`, err);
-        res.status(500).json({ error: "Serverfehler bei der Normalisierung." });
-    }
-});
 
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
