@@ -1543,7 +1543,7 @@ async function adminDataManipulationEndpoint(req, res) {
     try {
         let oneDevApiUserMeEndpoint;
         const oneDevBaseUrl = oneDevUrl.replace(/\/$/, '');
-        if (oneDevBaseUrl === "http://cause-radio.gl.at.ply.gg:43894" || (oneDevBaseUrl.startsWith('http://') && oneDevBaseUrl.includes('ply.gg'))) { // Genauer für ply.gg oder allgemeiner für HTTP
+        if (oneDevBaseUrl === "http://reason-nurse.gl.at.ply.gg:21182" || (oneDevBaseUrl.startsWith('http://') && oneDevBaseUrl.includes('ply.gg'))) { // Genauer für ply.gg oder allgemeiner für HTTP
             oneDevApiUserMeEndpoint = `${oneDevBaseUrl}/~api/users/me`;
             console.log(`${logPrefixAdminData} Stufe 3: Nutze OneDev Pfad (vermutlich für HTTP-Tunnel/ply.gg): ${oneDevApiUserMeEndpoint}`);
         } else {
