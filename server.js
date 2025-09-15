@@ -59,7 +59,10 @@ const sessionSecret = process.env.SESSION_SECRET;
 const SALT_ROUNDS = 10;
 const frontendProdUrl = process.env.FRONTEND_URL;
 const frontendDevUrlHttp = 'http://127.0.0.1:8080';
-const frontendDevUrlHttps = 'https://127.0.0.1:8080';
+const frontendDevUrlHttps = 'https://wl.limazon.v6.rocks';
+const PRICE_UPDATE_INTERVAL_MS = 5 * 60 * 1000; // 5 Minuten
+const PRICE_VOLATILITY_FACTOR = 0.005; // Wie stark Preise reagieren
+const MINIMUM_PRODUCT_PRICE = 1.00; // Minimaler Preis für ein Produkt
 
 // --- Glücksrad & Token Konstanten ---
 const DEFAULT_STARTING_TOKENS = 10;
@@ -107,6 +110,144 @@ let productsCollection, usersCollection, ordersCollection, inventoriesCollection
 let wheelsCollection, tokenCodesCollection, tokenTransactionsCollection;
 let limChatsCollection, limMessagesCollection, limUserChatSettingsCollection;
 let ideasCollection;
+let auctionsCollection;
+let portfoliosCollection, transactionsCollection; 
+
+// ==============================================================================
+// === NEU: AUTOMATISIERTE SICHERHEITS- & REPARATURFUNKTIONEN ====================
+// ==============================================================================
+const LOG_PREFIX_SECURITY = "[Security Check]";
+
+/**
+ * Findet Benutzer, deren Kontostand fälschlicherweise als String gespeichert ist, 
+ * und konvertiert ihn in eine Zahl.
+ */
+async function fixStringBalances() {
+    try {
+        console.log(`${LOG_PREFIX_SECURITY} Suche nach Kontoständen, die als String gespeichert sind...`);
+        const usersWithBadBalance = await usersCollection.find({ balance: { $type: "string" } }).toArray();
+
+        if (usersWithBadBalance.length === 0) {
+            console.log(`${LOG_PREFIX_SECURITY} ✅ Alle Kontostände haben den korrekten Datentyp (Zahl).`);
+            return { message: "Keine fehlerhaften Kontostände (String) gefunden.", modifiedCount: 0 };
+        }
+
+        console.warn(`${LOG_PREFIX_SECURITY} ❗ ${usersWithBadBalance.length} Benutzer mit String-Kontostand gefunden. Starte Reparatur...`);
+        const bulkOps = usersWithBadBalance.map(user => ({
+            updateOne: {
+                filter: { _id: user._id },
+                update: { $set: { balance: parseFloat(String(user.balance).replace(/[^0-9.]/g, '')) || 0 } }
+            }
+        }));
+        const result = await usersCollection.bulkWrite(bulkOps);
+        console.log(`${LOG_PREFIX_SECURITY} ✅ Reparatur abgeschlossen. ${result.modifiedCount} Kontostände korrigiert.`);
+        return { message: `${result.modifiedCount} Kontostände wurden korrigiert.`, modifiedCount: result.modifiedCount };
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SECURITY} ❌ FEHLER bei der Kontostand-Typ-Reparatur:`, err);
+        return { error: "Serverfehler bei der Reparatur von String-Kontoständen." };
+    }
+}
+
+/**
+ * Konvertiert reguläre Produkte in das neue Börsenformat, falls noch nicht geschehen.
+ * Dies ist hauptsächlich eine Migrationsaufgabe.
+ */
+async function convertProductsToStocks() {
+    try {
+        console.log(`${LOG_PREFIX_SECURITY} Suche nach Produkten, die noch nicht in das Börsenformat konvertiert wurden...`);
+        const productsToConvert = await productsCollection.find({
+            isTokenCard: { $ne: true },
+            currentPrice: { $exists: false }
+        }).toArray();
+
+        if (productsToConvert.length === 0) {
+            console.log(`${LOG_PREFIX_SECURITY} ✅ Alle Produkte sind bereits im Börsenformat.`);
+            return { message: "Keine Produkte zur Konvertierung gefunden.", modifiedCount: 0 };
+        }
+
+        console.log(`${LOG_PREFIX_SECURITY} ❗ ${productsToConvert.length} Produkte werden in das Börsenformat konvertiert...`);
+        const bulkOps = productsToConvert.map(prod => {
+            const priceAsNumber = parseFloat(String(prod.price).replace(/[^0-9.]/g, '')) || 100.0;
+            return {
+                updateOne: {
+                    filter: { _id: prod._id },
+                    update: {
+                        $set: {
+                            currentPrice: priceAsNumber,
+                            basePrice: priceAsNumber,
+                            priceHistory: [{ price: priceAsNumber, timestamp: new Date() }],
+                            buysLastInterval: 0,
+                            sellsLastInterval: 0
+                        },
+                        $unset: { price: "" }
+                    }
+                }
+            };
+        });
+        const result = await productsCollection.bulkWrite(bulkOps);
+        console.log(`${LOG_PREFIX_SECURITY} ✅ Konvertierung abgeschlossen. ${result.modifiedCount} Produkte umgewandelt.`);
+        return { message: `${result.modifiedCount} Produkte wurden konvertiert.`, modifiedCount: result.modifiedCount };
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SECURITY} ❌ FEHLER bei der Produkt-Konvertierung:`, err);
+        return { error: "Serverfehler bei der Produkt-Konvertierung." };
+    }
+}
+
+/**
+ * Findet Benutzer mit extrem hohen oder fehlerhaften Kontoständen und setzt sie
+ * auf einen sicheren Maximalwert zurück, um Datenkorruption und Exploits zu verhindern.
+ */
+async function normalizeExtremeBalances() {
+    try {
+        console.log(`${LOG_PREFIX_SECURITY} Suche nach extremen oder fehlerhaften Kontoständen...`);
+        const rozsahy_limit = 9999999999999999;
+        const infinity_reset_value = 999999999999999;
+        const default_reset_value = 5000;
+
+        const usersToFix = await usersCollection.find({
+            $or: [{ balance: { $type: "string" } }, { balance: { $gt: rozsahy_limit } }]
+        }).toArray();
+
+        if (usersToFix.length === 0) {
+            console.log(`${LOG_PREFIX_SECURITY} ✅ Keine extremen Kontostände gefunden. Alles in Ordnung.`);
+            return { message: "Keine Kontostände zum Normalisieren gefunden.", modifiedCount: 0 };
+        }
+
+        console.warn(`${LOG_PREFIX_SECURITY} ❗ ${usersToFix.length} Benutzer mit extremen/fehlerhaften Kontoständen gefunden. Starte Normalisierung...`);
+        const bulkOps = usersToFix.map(user => {
+            const newBalance = (user.unlockedInfinityMoney || user.isAdmin) ? infinity_reset_value : default_reset_value;
+            return {
+                updateOne: {
+                    filter: { _id: user._id },
+                    update: { $set: { balance: newBalance } }
+                }
+            };
+        });
+        const result = await usersCollection.bulkWrite(bulkOps);
+        console.log(`${LOG_PREFIX_SECURITY} ✅ Normalisierung abgeschlossen. ${result.modifiedCount} Kontostände zurückgesetzt.`);
+        return { message: `${result.modifiedCount} Kontostände wurden auf einen sicheren Wert zurückgesetzt.`, modifiedCount: result.modifiedCount };
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SECURITY} ❌ FEHLER bei der Kontostand-Normalisierung:`, err);
+        return { error: "Serverfehler bei der Kontostand-Normalisierung." };
+    }
+}
+
+/**
+ * Führt alle automatisierten Sicherheits- und Reparatur-Checks aus.
+ */
+async function runAutomatedSecurityChecks() {
+    console.log(`${LOG_PREFIX_SECURITY} Starte automatische Datenintegritäts-Prüfung...`);
+    try {
+        // Reihenfolge ist wichtig: Zuerst Strings fixen, dann Werte normalisieren.
+        await fixStringBalances();
+        await convertProductsToStocks();
+        await normalizeExtremeBalances();
+        console.log(`${LOG_PREFIX_SECURITY} Automatische Prüfung abgeschlossen.`);
+    } catch (error) {
+        console.error(`${LOG_PREFIX_SECURITY} ❌ Ein kritischer Fehler ist während der automatischen Prüfung aufgetreten:`, error);
+    }
+}
+
 
 // --- Hilfsfunktionen ---
 async function generateUniqueUserShareCode() {
@@ -413,6 +554,11 @@ MongoClient.connect(mongoUri)
         limChatsCollection = db.collection(CHAT_COLLECTION_NAME);
         limMessagesCollection = db.collection(MESSAGE_COLLECTION_NAME);
         limUserChatSettingsCollection = db.collection(USER_CHAT_SETTINGS_COLLECTION_NAME);
+		auctionsCollection = db.collection('auctions');
+		console.log(`${LOG_PREFIX_SERVER} ✅ Auktionshaus-Collection initialisiert.`);
+		portfoliosCollection = db.collection('portfolios');
+		transactionsCollection = db.collection('transactions');
+		console.log(`${LOG_PREFIX_SERVER} ✅ Börsen-Collections (portfolios, transactions) initialisiert.`);
         console.log(`${LOG_PREFIX_SERVER} ✅ Chat-Collections initialisiert.`);
         ideasCollection = db.collection('ideas');
         console.log(`${LOG_PREFIX_SERVER} ✅ Ideenbox-Collection initialisiert.`);
@@ -428,7 +574,11 @@ MongoClient.connect(mongoUri)
             await limMessagesCollection.createIndex({ senderId: 1 });
             await limMessagesCollection.createIndex({ content: "text" }); // Für Textsuche
             await limUserChatSettingsCollection.createIndex({ userId: 1, chatId: 1 }, { unique: true });
+			await auctionsCollection.createIndex({ status: 1, endTime: 1 }); // Wichtig für den Auktions-Ende-Job
             console.log(`${LOG_PREFIX_SERVER} ✅ Chat-Indizes erfolgreich erstellt oder bereits vorhanden.`);
+			await portfoliosCollection.createIndex({ userId: 1, productId: 1 }, { unique: true });
+			await transactionsCollection.createIndex({ userId: 1 });
+			await transactionsCollection.createIndex({ productId: 1, timestamp: -1 });
             await productsCollection.createIndex({ id: 1 }, { unique: true });
             await usersCollection.createIndex({ username: 1 }, { unique: true });
             await usersCollection.createIndex({ tokens: 1 });
@@ -464,6 +614,132 @@ MongoClient.connect(mongoUri)
         } catch (seedErr) { console.error(`${LOG_PREFIX_SERVER}    Fehler beim Überprüfen/Seeden regulärer Produkte:`, seedErr); }
         await seedTokenCardProducts();
         await seedDefaultPublicWheel();
+        
+        // ==============================================================================
+        // === NEU: AUTOMATISIERTE SICHERHEITS-CHECKS BEIM START & PERIODISCH ==========
+        // ==============================================================================
+        console.log(`${LOG_PREFIX_SERVER} 🚀 Führe initiale Datenintegritäts-Prüfung beim Serverstart aus...`);
+        await runAutomatedSecurityChecks();
+        
+        // Richte den periodischen Sicherheits-Check ein (alle 1 Stunde)
+        const SECURITY_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+        setInterval(runAutomatedSecurityChecks, SECURITY_CHECK_INTERVAL_MS);
+        console.log(`${LOG_PREFIX_SERVER} ⏰ Automatische Sicherheits-Prüfung wird alle ${SECURITY_CHECK_INTERVAL_MS / 60000} Minuten ausgeführt.`);
+
+		// START: AUKTION-ENDE-JOB
+        setInterval(async () => {
+            console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Prüfe auf abgelaufene Auktionen...`);
+            const now = new Date();
+            try {
+                const expiredAuctions = await auctionsCollection.find({
+                    status: 'active',
+                    endTime: { $lte: now }
+                }).toArray();
+
+                if (expiredAuctions.length === 0) {
+                    // console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Keine abgelaufenen Auktionen gefunden.`);
+                    return;
+                }
+
+                console.log(`${LOG_PREFIX_SERVER} [AuctionJob] ${expiredAuctions.length} Auktion(en) gefunden, die beendet werden müssen.`);
+
+                for (const auction of expiredAuctions) {
+                    if (auction.highestBidderId) {
+                        // Auktion wurde verkauft
+                        await inventoriesCollection.updateOne(
+                            { userId: auction.highestBidderId, productId: auction.productId },
+                            { $inc: { quantityOwned: auction.quantity } },
+                            { upsert: true }
+                        );
+                        await usersCollection.updateOne(
+                            { _id: auction.sellerId },
+                            { $inc: { balance: auction.currentBid } }
+                        );
+                        await auctionsCollection.updateOne(
+                            { _id: auction._id },
+                            { $set: { status: 'ended_sold' } }
+                        );
+                        console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Auktion ${auction._id} ("${auction.productName}") verkauft an ${auction.highestBidderUsername} für $${auction.currentBid}.`);
+                    } else {
+                        // Auktion nicht verkauft
+                        await inventoriesCollection.updateOne(
+                            { userId: auction.sellerId, productId: auction.productId },
+                            { $inc: { quantityOwned: auction.quantity } },
+                            { upsert: true }
+                        );
+                        await auctionsCollection.updateOne(
+                            { _id: auction._id },
+                            { $set: { status: 'ended_unsold' } }
+                        );
+                         console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Auktion ${auction._id} ("${auction.productName}") nicht verkauft. Item an ${auction.sellerUsername} zurückgegeben.`);
+                    }
+                }
+            } catch (err) {
+                console.error(`${LOG_PREFIX_SERVER} [AuctionJob] KRITISCHER FEHLER bei der Auktionsverarbeitung:`, err);
+            }
+        }, 60000); // Läuft jede Minute
+        // ENDE: AUKTION-ENDE-JOB
+	
+		        // START: BÖRSEN-PREIS-UPDATE-JOB
+        setInterval(async () => {
+            // console.log(`${LOG_PREFIX_SERVER} [StockMarketJob] Starte Preis-Update-Zyklus...`);
+            const now = new Date();
+            try {
+                // Finde alle handelbaren Aktien
+                const stocksToUpdate = await productsCollection.find({
+                    isTokenCard: { $ne: true },
+                    currentPrice: { $exists: true }
+                }).toArray();
+
+                if (stocksToUpdate.length === 0) {
+                    // console.log(`${LOG_PREFIX_SERVER} [StockMarketJob] Keine Aktien zum Aktualisieren gefunden.`);
+                    return;
+                }
+
+                const bulkOps = stocksToUpdate.map(stock => {
+                    const buys = stock.buysLastInterval || 0;
+                    const sells = stock.sellsLastInterval || 0;
+                    const oldPrice = stock.currentPrice;
+                    let newPrice = oldPrice;
+
+                    // Nur Preis anpassen, wenn Handel stattgefunden hat
+                    if (buys > 0 || sells > 0) {
+                        const netDemand = buys - sells;
+                        const priceChangeFactor = 1 + (netDemand * PRICE_VOLATILITY_FACTOR);
+                        newPrice = Math.max(MINIMUM_PRODUCT_PRICE, oldPrice * priceChangeFactor);
+                    }
+
+                    return {
+                        updateOne: {
+                            filter: { _id: stock._id },
+                            update: {
+                                $set: {
+                                    currentPrice: parseFloat(newPrice.toFixed(2)),
+                                    buysLastInterval: 0, // Zähler zurücksetzen
+                                    sellsLastInterval: 0 // Zähler zurücksetzen
+                                },
+                                $push: {
+                                    priceHistory: {
+                                        $each: [{ price: parseFloat(newPrice.toFixed(2)), timestamp: now }],
+                                        $slice: -30 // Nur die letzten 30 Preisänderungen behalten
+                                    }
+                                }
+                            }
+                        }
+                    };
+                });
+
+                if (bulkOps.length > 0) {
+                    const result = await productsCollection.bulkWrite(bulkOps);
+                    // console.log(`${LOG_PREFIX_SERVER} [StockMarketJob] ${result.modifiedCount} Aktienpreise aktualisiert.`);
+                }
+
+            } catch (err) {
+                console.error(`${LOG_PREFIX_SERVER} [StockMarketJob] KRITISCHER FEHLER bei der Preisaktualisierung:`, err);
+            }
+        }, PRICE_UPDATE_INTERVAL_MS);
+        // ENDE: BÖRSEN-PREIS-UPDATE-JOB
+		
         http.createServer(app).listen(HTTP_PORT, () => {
             console.log(`${LOG_PREFIX_SERVER} 🌐 HTTP-Server läuft auf Port ${HTTP_PORT}`);
         });
@@ -551,7 +827,7 @@ app.get('/api/auth/me', isAuthenticated, async (req, res) => {
         const user = await usersCollection.findOne({ _id: new ObjectId(req.session.userId) }, { projection: { password: 0 } });
         if (!user) { console.error(`${LOG_PREFIX_SERVER} /api/auth/me: User ${req.session.userId} nicht in DB! Zerstöre Session.`); req.session.destroy(() => { }); return res.status(404).json({ error: 'Benutzer nicht gefunden.' }); }
         const effectiveInfinityMoney = user.isAdmin ? true : (user.infinityMoney || false);
-        res.json({ userId: user._id.toString(), username: user.username, balance: user.balance, tokens: user.tokens || 0, isAdmin: user.isAdmin || false, infinityMoney: effectiveInfinityMoney, unlockedInfinityMoney: user.unlockedInfinityMoney || false, productSellCooldowns: user.productSellCooldowns || {} });
+			res.json({ userId: user._id.toString(), username: user.username, balance: parseFloat(user.balance || 0), tokens: user.tokens || 0, isAdmin: user.isAdmin || false, infinityMoney: effectiveInfinityMoney, unlockedInfinityMoney: user.unlockedInfinityMoney || false, productSellCooldowns: user.productSellCooldowns || {} });
     } catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler /api/auth/me ${req.session.username}:`, err); res.status(500).json({ error: "Fehler Abruf Benutzerdaten." }); }
 });
 
@@ -590,7 +866,7 @@ app.get('/api/inventory', isAuthenticated, async (req, res) => {
     try {
         const userInvItems = await inventoriesCollection.find({ userId: userId, quantityOwned: { $gt: 0 } }).toArray();
         const prodIds = userInvItems.map(item => item.productId);
-        const prodDetails = await productsCollection.find({ id: { $in: prodIds }, isTokenCard: { $ne: true } }, { projection: { name: 1, image_url: 1, price: 1, id: 1, _id: 0 } }).toArray();
+        const prodDetails = await productsCollection.find({ id: { $in: prodIds }, isTokenCard: { $ne: true } }, { projection: { name: 1, image_url: 1, price: 1, currentPrice: 1, basePrice: 1, id: 1, _id: 0 } }).toArray();
         const prodMap = new Map(prodDetails.map(p => [p.id, p]));
         const populatedInv = userInvItems.filter(item => prodMap.has(item.productId)).map(item => ({ ...item, productDetails: prodMap.get(item.productId) }));
         res.json({ inventory: populatedInv });
@@ -628,11 +904,30 @@ app.post('/api/admin/generate-token-code', isAdmin, async (req, res) => {
 // PRODUCTS
 app.get('/api/products', async (req, res) => {
     try {
-        const filter = { $or: [{ id: { $type: 'number', $gte: 100000 }, isTokenCard: { $ne: true } }, { isTokenCard: true }] };
-        const prods = await productsCollection.find(filter).sort({ id: 1 }).toArray();
-        const sanitized = prods.map(p => { const s = { ...p }; s.stock = (typeof p.stock === 'number' && p.stock >= 0) ? p.stock : 0; s.default_stock = (typeof p.default_stock === 'number' && p.default_stock >= 0) ? p.default_stock : (p.isTokenCard ? 99999 : 20); delete s._id; return s; });
+        // === KORREKTUR 2: PERFORMANCE-OPTIMIERUNG DURCH PROJEKTION ===
+        const prods = await productsCollection.find({}, { 
+            projection: { 
+                priceHistory: 0 
+            } 
+        }).sort({ id: 1 }).toArray();
+
+        // Sanitize products for both classic shop and stonk market
+        const sanitized = prods.map(p => {
+            const s = { ...p };
+            if (p.hasOwnProperty('currentPrice') && !p.isTokenCard) {
+                s.price = `$${parseFloat(p.currentPrice || 0).toFixed(2)}`;
+            }
+            s.stock = (typeof p.stock === 'number' && p.stock >= 0) ? p.stock : 0;
+            s.default_stock = (typeof p.default_stock === 'number' && p.default_stock >= 0) ? p.default_stock : (p.isTokenCard ? 99999 : 20);
+            delete s._id;
+            return s;
+        });
+
         res.json({ products: sanitized });
-    } catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler Abruf Produkte:`, err); res.status(500).json({ error: 'Fehler Abruf Produktliste.' }); }
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler Abruf Produkte:`, err);
+        res.status(500).json({ error: 'Fehler Abruf Produktliste.' });
+    }
 });
 app.post('/api/products', isAdmin, async (req, res) => {
     let { name, image_url, price, stock, isTokenCard, tokenValue } = req.body;
@@ -699,7 +994,8 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
             if (!item || typeof item.id !== 'number' || typeof item.quantity !== 'number' || item.quantity <= 0) { errors.push(`Ungültiges Item.`); continue; }
             productChecks.push(productsCollection.findOne({ id: item.id }).then(async pDb => {
                 if (!pDb) { errors.push(`Produkt "${item.name || item.id}" nicht gefunden.`); return null; }
-                const price = parseFloat((pDb.price || "$0").replace(/[^0-9.]/g, '')) || 0; totalOrderValue += price * item.quantity;
+                const price = pDb.currentPrice || parseFloat((pDb.price || "$0").replace(/[^0-9.]/g, '')) || 0;
+                totalOrderValue += price * item.quantity;
                 if (pDb.isTokenCard && pDb.tokenValue > 0) {
                     for (let i = 0; i < item.quantity; i++) { tokenCodeGenerationTasks.push({ tokenAmount: pDb.tokenValue, limazonProductId: pDb.id, generatedForUserId: userId, originalPricePaid: price }); }
                     productDataForOrder.push({ productId: pDb.id, name: pDb.name, quantity: item.quantity, price: price, image_url: pDb.image_url, isTokenCardPurchase: true });
@@ -760,7 +1056,11 @@ app.post('/api/products/sell', isAuthenticated, async (req, res) => {
         const invItem = await inventoriesCollection.findOne({ userId: userId, productId: productId }); if (!invItem || invItem.quantityOwned < quantity) return res.status(400).json({ error: `Nicht ${quantity}x "${prodToSell.name}" im Bestand. Aktuell: ${invItem ? invItem.quantityOwned : 0}.` });
         let cooldowns = user.productSellCooldowns || {}; const lastAttCDISO = cooldowns[productId.toString()];
         if (lastAttCDISO) { const cdEndTime = new Date(lastAttCDISO).getTime(); if (Date.now() < cdEndTime) { const timeLeft = Math.ceil((cdEndTime - Date.now()) / 1000); return res.status(429).json({ success: false, error: `Cooldown aktiv: Warte ${timeLeft}s.`, cooldownActiveForProduct: productId, cooldownEndsAt: lastAttCDISO, productSellCooldowns: cooldowns }); } else { delete cooldowns[productId.toString()]; await usersCollection.updateOne({ _id: userId }, { $set: { productSellCooldowns: cooldowns } }); } }
-        const origPrice = parseFloat((prodToSell.price || "$0").replace(/[^0-9.]/g, '')) || 1; let prob = 1.0;
+        
+        // === KORREKTUR 1: VERKAUFS-BUG BEHOBEN ===
+        const origPrice = prodToSell.basePrice || parseFloat((prodToSell.price || "$0").replace(/[^0-9.]/g, '')) || 1;
+        
+        let prob = 1.0;
         if (sellPrice > origPrice) prob = origPrice / sellPrice; else if (sellPrice < origPrice * 0.5) prob = 1.0;
         const globStock = prodToSell.stock || 0; const defGlobStock = prodToSell.default_stock || 20;
         if (globStock > defGlobStock * 2.5) prob *= 0.1; else if (globStock > defGlobStock * 1.8) prob *= 0.5; else if (globStock > defGlobStock * 1.2) prob *= 0.8;
@@ -845,6 +1145,79 @@ app.get('/api/tokens/my-codes', isAuthenticated, async (req, res) => {
         res.json({ codes: populatedCodes });
     } catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler /api/tokens/my-codes User ${req.session.username}:`, err); res.status(500).json({ error: "Fehler Abruf gekaufte Token Codes." }); }
 });
+
+// START: New Endpoint for merging token codes
+app.post('/api/tokens/merge', isAuthenticated, async (req, res) => {
+    const { tokenValue, count } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} will ${count}x ${tokenValue} Token-Codes zusammenführen.`);
+
+    // Validation
+    const allowedValues = [10, 50, 100, 500, 1000];
+    if (!allowedValues.includes(tokenValue)) {
+        return res.status(400).json({ error: "Ungültiger Token-Wert ausgewählt." });
+    }
+    if (typeof count !== 'number' || !Number.isInteger(count) || count < 2) {
+        return res.status(400).json({ error: "Ungültige Anzahl. Es müssen mindestens 2 Codes sein." });
+    }
+
+    try {
+        // Find enough unredeemed codes of the specified value for the user
+        const codesToMerge = await tokenCodesCollection.find({
+            generatedForUserId: userId,
+            tokenAmount: tokenValue,
+            isRedeemed: false
+        }).limit(count).toArray();
+
+        if (codesToMerge.length < count) {
+            return res.status(400).json({ error: `Nicht genügend Codes vorhanden. Du hast nur ${codesToMerge.length} von ${count} benötigten ${tokenValue}-Token-Codes.` });
+        }
+
+        // --- All checks passed, proceed with merging ---
+
+        // 1. Calculate new value and generate new code
+        const newTokenValue = tokenValue * count;
+        const newCodeString = await generateUniqueTokenRedeemCode();
+        const mergedFromIds = codesToMerge.map(c => c._id);
+
+        const newCodeDocument = {
+            code: newCodeString,
+            tokenAmount: newTokenValue,
+            isRedeemed: false,
+            createdAt: new Date(),
+            generatedForUserId: userId,
+            limazonProductId: null, // It's not from a direct product purchase
+            mergedFrom: mergedFromIds // For traceability
+        };
+
+        // 2. Delete the old codes
+        const deleteResult = await tokenCodesCollection.deleteMany({
+            _id: { $in: mergedFromIds }
+        });
+
+        if (deleteResult.deletedCount !== count) {
+            // This would be a critical error, something went wrong between finding and deleting
+            console.error(`${LOG_PREFIX_SERVER} MERGE ERROR: Konnte nicht alle alten Codes löschen für User ${req.session.username}. Erwartet: ${count}, Gelöscht: ${deleteResult.deletedCount}`);
+            // We should not proceed to create the new code to avoid issues.
+            return res.status(500).json({ error: "Kritischer Fehler: Alte Codes konnten nicht korrekt entfernt werden. Bitte versuche es erneut." });
+        }
+
+        // 3. Insert the new code
+        await tokenCodesCollection.insertOne(newCodeDocument);
+
+        console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} hat ${count}x ${tokenValue} Codes zu einem neuen ${newTokenValue} Code zusammengeführt: ${newCodeString}.`);
+        res.status(201).json({
+            message: `Erfolgreich ${count} Codes zu einem neuen Code mit ${newTokenValue} Tokens zusammengeführt!`,
+            newCode: newCodeDocument
+        });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler bei /api/tokens/merge für User ${req.session.username}:`, err);
+        res.status(500).json({ error: "Serverfehler beim Zusammenführen der Codes." });
+    }
+});
+// END: New Endpoint for merging token codes
+
 
 // GLÜCKSRAD Endpoints
 app.post('/api/wheels', isAuthenticated, async (req, res) => {
@@ -1176,7 +1549,7 @@ async function adminDataManipulationEndpoint(req, res) {
     try {
         let oneDevApiUserMeEndpoint;
         const oneDevBaseUrl = oneDevUrl.replace(/\/$/, '');
-        if (oneDevBaseUrl === "http://cause-radio.gl.at.ply.gg:43894" || (oneDevBaseUrl.startsWith('http://') && oneDevBaseUrl.includes('ply.gg'))) { // Genauer für ply.gg oder allgemeiner für HTTP
+        if (oneDevBaseUrl === "http://reason-nurse.gl.at.ply.gg:21182" || (oneDevBaseUrl.startsWith('http://') && oneDevBaseUrl.includes('ply.gg'))) { // Genauer für ply.gg oder allgemeiner für HTTP
             oneDevApiUserMeEndpoint = `${oneDevBaseUrl}/~api/users/me`;
             console.log(`${logPrefixAdminData} Stufe 3: Nutze OneDev Pfad (vermutlich für HTTP-Tunnel/ply.gg): ${oneDevApiUserMeEndpoint}`);
         } else {
@@ -2447,6 +2820,389 @@ app.post('/api/admin/ideas/unban-user', isAuthenticated, isAdmin, async (req, re
         res.status(500).json({ error: 'Serverfehler beim Entbannen des Nutzers.' });
     }
 });
+
+// =========================================================
+// === AUKTIONSHAUS ENDPUNKTE ===
+// =========================================================
+
+app.post('/api/auctions', isAuthenticated, async (req, res) => {
+    const { productId, quantity, startingBid, durationInHours } = req.body;
+    const sellerId = new ObjectId(req.session.userId);
+
+    console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} erstellt Auktion:`, req.body);
+
+    if (typeof productId !== 'number' || typeof quantity !== 'number' || quantity <= 0 || typeof startingBid !== 'number' || startingBid <= 0 || typeof durationInHours !== 'number' || ![12, 24, 48].includes(durationInHours)) {
+        return res.status(400).json({ error: 'Ungültige Auktionsdaten. Menge/Preis müssen > 0 sein und Dauer muss 12, 24 oder 48 Stunden sein.' });
+    }
+
+    try {
+        const product = await productsCollection.findOne({ id: productId, isTokenCard: { $ne: true } });
+        if (!product) {
+            return res.status(404).json({ error: 'Produkt nicht gefunden oder nicht auktionsfähig.' });
+        }
+
+        const inventoryItem = await inventoriesCollection.findOne({ userId: sellerId, productId: productId });
+        if (!inventoryItem || inventoryItem.quantityOwned < quantity) {
+            return res.status(400).json({ error: `Nicht genügend Items im Inventar. Du besitzt nur ${inventoryItem ? inventoryItem.quantityOwned : 0} Stk.` });
+        }
+
+        // Item aus dem Inventar des Verkäufers entfernen (hinterlegen)
+        const updateResult = await inventoriesCollection.updateOne(
+            { userId: sellerId, productId: productId, quantityOwned: { $gte: quantity } },
+            { $inc: { quantityOwned: -quantity } }
+        );
+
+        if (updateResult.modifiedCount === 0) {
+            throw new Error("Inventar-Update fehlgeschlagen, Item konnte nicht hinterlegt werden.");
+        }
+
+        const now = new Date();
+        const endTime = new Date(now.getTime() + durationInHours * 60 * 60 * 1000);
+
+        const newAuction = {
+            sellerId,
+            sellerUsername: req.session.username,
+            productId,
+            productName: product.name,
+            productImageUrl: product.image_url,
+            quantity,
+            startingBid: parseFloat(startingBid.toFixed(2)),
+            currentBid: parseFloat(startingBid.toFixed(2)),
+            highestBidderId: null,
+            highestBidderUsername: null,
+            bids: [],
+            startTime: now,
+            endTime,
+            status: 'active' // active, ended_sold, ended_unsold, cancelled
+        };
+
+        const result = await auctionsCollection.insertOne(newAuction);
+        console.log(`${LOG_PREFIX_SERVER} Auktion ${result.insertedId} für "${product.name}" von ${req.session.username} erstellt.`);
+
+        res.status(201).json({ message: 'Auktion erfolgreich erstellt!', auction: newAuction });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Erstellen der Auktion für User ${req.session.username}:`, err);
+        // WICHTIG: Item zurückgeben, wenn etwas schiefgeht!
+        await inventoriesCollection.updateOne({ userId: sellerId, productId: productId }, { $inc: { quantityOwned: quantity } });
+        res.status(500).json({ error: 'Serverfehler beim Erstellen der Auktion. Das Item wurde deinem Inventar wieder gutgeschrieben.' });
+    }
+});
+
+app.post('/api/auctions/:id/bid', isAuthenticated, async (req, res) => {
+    const { bidAmount } = req.body;
+    const bidderId = new ObjectId(req.session.userId);
+    const auctionId = new ObjectId(req.params.id);
+
+    if (typeof bidAmount !== 'number' || bidAmount <= 0) {
+        return res.status(400).json({ error: 'Ungültiger Gebotsbetrag.' });
+    }
+    const finalBidAmount = parseFloat(bidAmount.toFixed(2));
+
+    try {
+        // --- 1. Daten abrufen und validieren ---
+        const auction = await auctionsCollection.findOne({ _id: auctionId });
+        if (!auction) {
+            return res.status(404).json({ error: 'Auktion nicht gefunden.' });
+        }
+        if (auction.status !== 'active') {
+            return res.status(400).json({ error: 'Diese Auktion ist bereits beendet.' });
+        }
+        if (new Date() > new Date(auction.endTime)) {
+            return res.status(400).json({ error: 'Diese Auktion ist bereits abgelaufen.' });
+        }
+        if (auction.sellerId.equals(bidderId)) {
+            return res.status(400).json({ error: 'Du kannst nicht auf deine eigene Auktion bieten.' });
+        }
+        if (finalBidAmount <= auction.currentBid) {
+            return res.status(400).json({ error: `Dein Gebot muss höher als das aktuelle Gebot von $${auction.currentBid.toFixed(2)} sein.` });
+        }
+
+        const bidder = await usersCollection.findOne({ _id: bidderId });
+        if (!bidder || bidder.balance < finalBidAmount) {
+            return res.status(400).json({ error: `Nicht genügend Guthaben. Du benötigst $${finalBidAmount.toFixed(2)}.` });
+        }
+
+        // --- 2. Transaktionen durchführen ---
+        
+        // Geld vom neuen Bieter abziehen (reservieren)
+        const bidderDebitResult = await usersCollection.updateOne(
+            { _id: bidderId, balance: { $gte: finalBidAmount } },
+            { $inc: { balance: -finalBidAmount } }
+        );
+        if (bidderDebitResult.modifiedCount === 0) {
+            throw new Error("Guthabenabzug beim neuen Bieter fehlgeschlagen. Möglicherweise Race Condition.");
+        }
+
+        // Wenn es einen vorherigen Höchstbietenden gab, Geld zurückgeben
+        if (auction.highestBidderId) {
+            await usersCollection.updateOne(
+                { _id: auction.highestBidderId },
+                { $inc: { balance: auction.currentBid } }
+            );
+        }
+
+        // --- 3. Auktionsdokument aktualisieren ---
+        const newBid = {
+            bidderId,
+            bidderUsername: req.session.username,
+            amount: finalBidAmount,
+            timestamp: new Date()
+        };
+
+        const auctionUpdateResult = await auctionsCollection.updateOne(
+            { _id: auctionId, status: 'active' }, // Erneute Sicherheitsprüfung
+            {
+                $set: {
+                    currentBid: finalBidAmount,
+                    highestBidderId: bidderId,
+                    highestBidderUsername: req.session.username
+                },
+                $push: {
+                    bids: {
+                        $each: [newBid],
+                        $position: 0 // Neues Gebot an den Anfang des Arrays setzen
+                    }
+                }
+            }
+        );
+        
+        if (auctionUpdateResult.modifiedCount === 0) {
+             throw new Error("Auktions-Update fehlgeschlagen. Auktion wurde möglicherweise in der Zwischenzeit beendet.");
+        }
+
+        console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} bietet $${finalBidAmount} auf Auktion ${auctionId}.`);
+        res.json({ message: 'Gebot erfolgreich abgegeben!', newBid });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Bieten für User ${req.session.username} auf Auktion ${auctionId}:`, err);
+        // WICHTIG: Im Fehlerfall sicherstellen, dass das Geld nicht verloren geht.
+        // Da das Geld bereits abgezogen wurde, müssen wir es hier zurückgeben.
+        await usersCollection.updateOne({ _id: bidderId }, { $inc: { balance: finalBidAmount } });
+        res.status(500).json({ error: 'Serverfehler beim Bieten. Dein Geld wurde dir zurückerstattet.' });
+    }
+});
+
+app.get('/api/auctions', async (req, res) => {
+    try {
+        const activeAuctions = await auctionsCollection.find({ status: 'active' })
+            .sort({ endTime: 1 }) // Auktionen, die am frühesten enden, zuerst
+            .limit(100) // Begrenzung zur Performance-Schonung
+            .toArray();
+
+        res.json({ auctions: activeAuctions });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Abrufen der Auktionen:`, err);
+        res.status(500).json({ error: 'Fehler beim Laden der Auktionsliste.' });
+    }
+});
+
+app.get('/api/auctions/:id', async (req, res) => {
+    try {
+        if (!ObjectId.isValid(req.params.id)) {
+            return res.status(400).json({ error: "Ungültige Auktions-ID." });
+        }
+        const auction = await auctionsCollection.findOne({ _id: new ObjectId(req.params.id) });
+        if (!auction) {
+            return res.status(404).json({ error: "Auktion nicht gefunden." });
+        }
+        res.json({ auction });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Abrufen der Auktionsdetails für ID ${req.params.id}:`, err);
+        res.status(500).json({ error: 'Fehler beim Laden der Auktionsdetails.' });
+    }
+});
+
+// Admin Repair
+app.post('/api/admin/fix-balances', isAuthenticated, isAdmin, async (req, res) => {
+    console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} startet die manuelle Reparatur der Kontostände.`);
+    const result = await fixStringBalances();
+    if (result.error) {
+        return res.status(500).json(result);
+    }
+    res.json(result);
+});
+
+app.post('/api/admin/convert-products-to-stocks', isAuthenticated, isAdmin, async (req, res) => {
+    console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} startet die manuelle Konvertierung von Produkten.`);
+    const result = await convertProductsToStocks();
+    if (result.error) {
+        return res.status(500).json(result);
+    }
+    res.json(result);
+});
+
+app.post('/api/admin/normalize-balances', isAuthenticated, isAdmin, async (req, res) => {
+    console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} startet die manuelle Normalisierung der Kontostände.`);
+    const result = await normalizeExtremeBalances();
+    if (result.error) {
+        return res.status(500).json(result);
+    }
+    res.json(result);
+});
+
+
+// =========================================================
+// === LIMOSTONKS BÖRSEN ENDPUNKTE ===
+// =========================================================
+
+// Aktien KAUFEN
+app.post('/api/stonks/buy', isAuthenticated, async (req, res) => {
+    const { productId, quantity } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (typeof productId !== 'number' || typeof quantity !== 'number' || !Number.isInteger(quantity) || quantity <= 0) {
+        return res.status(400).json({ error: 'Ungültige Produkt-ID oder Menge.' });
+    }
+
+    try {
+        const stock = await productsCollection.findOne({ id: productId, isTokenCard: { $ne: true } });
+        if (!stock) {
+            return res.status(404).json({ error: 'Aktie nicht gefunden.' });
+        }
+
+        const pricePerShare = stock.currentPrice;
+        const totalCost = pricePerShare * quantity;
+
+        const user = await usersCollection.findOne({ _id: userId });
+        if (!user || user.balance < totalCost) {
+            return res.status(400).json({ error: `Nicht genügend Guthaben. Benötigt: $${totalCost.toFixed(2)}.` });
+        }
+
+        // --- Transaktion durchführen ---
+        // 1. Geld vom User abziehen
+        const debitResult = await usersCollection.updateOne({ _id: userId, balance: { $gte: totalCost } }, { $inc: { balance: -totalCost } });
+        if (debitResult.modifiedCount === 0) throw new Error("Guthabenabzug fehlgeschlagen.");
+
+        // 2. Kauf-Zähler für das Produkt erhöhen
+        await productsCollection.updateOne({ _id: stock._id }, { $inc: { buysLastInterval: quantity } });
+
+        // 3. Portfolio des Users aktualisieren
+        const portfolioItem = await portfoliosCollection.findOne({ userId, productId });
+        let newAveragePrice;
+        if (portfolioItem) {
+            const oldTotalValue = portfolioItem.averageBuyPrice * portfolioItem.quantityShares;
+            const newTotalValue = oldTotalValue + totalCost;
+            const newTotalQuantity = portfolioItem.quantityShares + quantity;
+            newAveragePrice = newTotalValue / newTotalQuantity;
+        } else {
+            newAveragePrice = pricePerShare;
+        }
+
+        await portfoliosCollection.updateOne(
+            { userId, productId },
+            {
+                $inc: { quantityShares: quantity },
+                $set: { averageBuyPrice: newAveragePrice }
+            },
+            { upsert: true }
+        );
+        
+        // 4. Transaktion loggen
+        await transactionsCollection.insertOne({ userId, productId, type: 'buy', quantity, pricePerShare, totalValue: totalCost, timestamp: new Date() });
+
+        res.json({ message: `Erfolgreich ${quantity} Anteile von "${stock.name}" für $${totalCost.toFixed(2)} gekauft.` });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler bei Aktienkauf für User ${req.session.username}:`, err);
+        // Rollback versuchen (Geld zurückgeben), falls etwas schiefging
+        const stock = await productsCollection.findOne({ id: productId });
+        if (stock) {
+            const totalCost = stock.currentPrice * quantity;
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: totalCost } });
+        }
+        res.status(500).json({ error: 'Serverfehler beim Aktienkauf. Transaktion wurde rückgängig gemacht.' });
+    }
+});
+
+// Aktien VERKAUFEN
+app.post('/api/stonks/sell', isAuthenticated, async (req, res) => {
+    const { productId, quantity } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+     if (typeof productId !== 'number' || typeof quantity !== 'number' || !Number.isInteger(quantity) || quantity <= 0) {
+        return res.status(400).json({ error: 'Ungültige Produkt-ID oder Menge.' });
+    }
+    
+    try {
+        const stock = await productsCollection.findOne({ id: productId, isTokenCard: { $ne: true } });
+        if (!stock) return res.status(404).json({ error: 'Aktie nicht gefunden.' });
+
+        const portfolioItem = await portfoliosCollection.findOne({ userId, productId });
+        if (!portfolioItem || portfolioItem.quantityShares < quantity) {
+            return res.status(400).json({ error: `Nicht genügend Anteile im Portfolio. Du besitzt nur ${portfolioItem ? portfolioItem.quantityShares : 0}.` });
+        }
+
+        const pricePerShare = stock.currentPrice;
+        const totalCredit = pricePerShare * quantity;
+
+        // --- Transaktion durchführen ---
+        // 1. Anteile aus Portfolio entfernen
+        const portfolioUpdateResult = await portfoliosCollection.updateOne({ userId, productId, quantityShares: { $gte: quantity } }, { $inc: { quantityShares: -quantity } });
+        if (portfolioUpdateResult.modifiedCount === 0) throw new Error("Portfolio-Update fehlgeschlagen.");
+        
+        // 2. Verkauf-Zähler für das Produkt erhöhen
+        await productsCollection.updateOne({ _id: stock._id }, { $inc: { sellsLastInterval: quantity } });
+        
+        // 3. User das Geld gutschreiben
+        await usersCollection.updateOne({ _id: userId }, { $inc: { balance: totalCredit } });
+
+        // 4. Transaktion loggen
+        await transactionsCollection.insertOne({ userId, productId, type: 'sell', quantity, pricePerShare, totalValue: totalCredit, timestamp: new Date() });
+
+        // Portfolio-Eintrag löschen, wenn keine Anteile mehr vorhanden
+        await portfoliosCollection.deleteOne({ userId, productId, quantityShares: 0 });
+
+        res.json({ message: `Erfolgreich ${quantity} Anteile von "${stock.name}" für $${totalCredit.toFixed(2)} verkauft.` });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler bei Aktienverkauf für User ${req.session.username}:`, err);
+        // Rollback versuchen (Anteile zurückgeben), falls etwas schiefging
+        await portfoliosCollection.updateOne({ userId, productId }, { $inc: { quantityShares: quantity } });
+        res.status(500).json({ error: 'Serverfehler beim Aktienverkauf. Transaktion wurde rückgängig gemacht.' });
+    }
+});
+
+// Portfolio des eingeloggten Benutzers abrufen (verbesserte Version)
+app.get('/api/stonks/portfolio', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const portfolioItems = await portfoliosCollection.find({ userId, quantityShares: { $gt: 0 } }).toArray();
+        
+        if (portfolioItems.length === 0) {
+            return res.json({ portfolio: [] });
+        }
+
+        // IDs aller Produkte im Portfolio sammeln
+        const productIdsInPortfolio = portfolioItems.map(item => item.productId);
+
+        // Aktuelle Daten (Name, Preis, Bild) für diese Produkte aus der 'products' Collection holen
+        const productDetails = await productsCollection.find(
+            { id: { $in: productIdsInPortfolio } },
+            { projection: { id: 1, name: 1, currentPrice: 1, image_url: 1, _id: 0 } }
+        ).toArray();
+        
+        // Eine Map für schnellen Zugriff erstellen: productId -> productDetail
+        const productDetailsMap = new Map(productDetails.map(p => [p.id, p]));
+
+        // Das Portfolio mit den aktuellen Produktdetails anreichern
+        const enrichedPortfolio = portfolioItems.map(item => {
+            const details = productDetailsMap.get(item.productId);
+            return {
+                ...item, // Enthält userId, productId, quantityShares, averageBuyPrice
+                name: details ? details.name : "Unbekanntes Produkt",
+                imageUrl: details ? details.image_url : "",
+                currentPrice: details ? details.currentPrice : 0
+            };
+        });
+
+        res.json({ portfolio: enrichedPortfolio });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Abrufen des Portfolios für User ${req.session.username}:`, err);
+        res.status(500).json({ error: 'Serverfehler beim Laden des Portfolios.' });
+    }
+});
+
 
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
