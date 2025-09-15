@@ -106,6 +106,7 @@ let db;
 let productsCollection, usersCollection, ordersCollection, inventoriesCollection;
 let wheelsCollection, tokenCodesCollection, tokenTransactionsCollection;
 let limChatsCollection, limMessagesCollection, limUserChatSettingsCollection;
+let ideasCollection;
 
 // --- Hilfsfunktionen ---
 async function generateUniqueUserShareCode() {
@@ -413,6 +414,8 @@ MongoClient.connect(mongoUri)
         limMessagesCollection = db.collection(MESSAGE_COLLECTION_NAME);
         limUserChatSettingsCollection = db.collection(USER_CHAT_SETTINGS_COLLECTION_NAME);
         console.log(`${LOG_PREFIX_SERVER} ✅ Chat-Collections initialisiert.`);
+        ideasCollection = db.collection('ideas');
+        console.log(`${LOG_PREFIX_SERVER} ✅ Ideenbox-Collection initialisiert.`);
         console.log(`${LOG_PREFIX_SERVER} ✅ MongoDB erfolgreich verbunden und Collections initialisiert.`);
         try {
             await usersCollection.createIndex({ userShareCode: 1 }, { unique: true, sparse: true }); // sparse, da nicht alle User sofort einen haben
@@ -436,6 +439,9 @@ MongoClient.connect(mongoUri)
             await wheelsCollection.createIndex({ creatorId: 1 });
             await wheelsCollection.createIndex({ isPublic: 1 });
             await wheelsCollection.createIndex({ shareCode: 1 }, { unique: true, sparse: true });
+            await ideasCollection.createIndex({ status: 1, createdAt: -1 });
+            await ideasCollection.createIndex({ submitterId: 1 });
+            await usersCollection.createIndex({ isBannedFromIdeaBox: 1 });
             await tokenCodesCollection.createIndex({ code: 1 }, { unique: true });
             await tokenCodesCollection.createIndex({ redeemedByUserId: 1 });
             await tokenCodesCollection.createIndex({ generatedForUserId: 1, isRedeemed: 1 });
@@ -2184,7 +2190,7 @@ app.put('/api/chat/chats/:chatId/settings/mute', isAuthenticated, isChatParticip
 // === CHAT ENDPOINTS ENDE===
 
 app.get('/health', (req, res) => {
-  res.status(200).send('OK');
+    res.status(200).send('OK');
 });
 
 // =========================================================
@@ -2217,7 +2223,7 @@ app.get('/api/hall-of-fame', async (req, res) => {
 
             // 2. Die User mit den meisten Tokens (NUR User OHNE Infinity-Status)
             usersCollection.aggregate([
-                 // Stufe 1: Nur User ohne Admin-Rechte UND ohne freigeschalteten Infinity-Modus
+                // Stufe 1: Nur User ohne Admin-Rechte UND ohne freigeschalteten Infinity-Modus
                 { $match: finiteUserCondition },
                 // Stufe 2: Ein neues Feld 'numericTokens' erstellen
                 { $addFields: { "numericTokens": { $toDouble: "$tokens" } } },
@@ -2231,15 +2237,15 @@ app.get('/api/hall-of-fame', async (req, res) => {
 
             // 3. Die Mitglieder des "Infinity Clubs" (Diese Liste bleibt unverändert)
             usersCollection.find(
-                { 
+                {
                     isAdmin: { $ne: true },
                     unlockedInfinityMoney: true
                 },
                 { projection: { username: 1, createdAt: 1, _id: 0 } }
             )
-            .sort({ createdAt: 1 })
-            .limit(10)
-            .toArray()
+                .sort({ createdAt: 1 })
+                .limit(10)
+                .toArray()
         ]);
 
         // Die JSON-Antwort bleibt strukturell gleich.
@@ -2271,6 +2277,174 @@ app.get('/api/hall-of-fame', async (req, res) => {
     } catch (err) {
         console.error(`${LOG_PREFIX_SERVER} ❌ Fehler beim Abrufen der Hall of Fame:`, err);
         res.status(500).json({ error: "Fehler beim Laden der Halle des Ruhms. Die Legenden schlafen noch." });
+    }
+});
+
+// =========================================================
+// === IDEENBOX ENDPUNKTE ===
+// =========================================================
+const LOG_PREFIX_IDEAS = "[IdeaBox API]";
+
+// Eine neue Middleware, um zu prüfen, ob ein Nutzer von der Ideenbox gebannt ist.
+async function isNotBannedFromIdeaBox(req, res, next) {
+    try {
+        const user = await usersCollection.findOne({ _id: new ObjectId(req.session.userId) });
+        if (user && user.isBannedFromIdeaBox === true) {
+            console.warn(`${LOG_PREFIX_IDEAS} Zugriff verweigert für gebannten User ${req.session.username}.`);
+            return res.status(403).json({ error: 'Du wurdest von der Ideenbox gesperrt und kannst keine neuen Ideen einreichen.' });
+        }
+        next();
+    } catch (err) {
+        console.error(`${LOG_PREFIX_IDEAS} Fehler bei der Überprüfung des Bann-Status für User ${req.session.username}:`, err);
+        res.status(500).json({ error: "Fehler bei der Überprüfung der Berechtigungen." });
+    }
+}
+
+
+// Idee einreichen
+app.post('/api/ideas', isAuthenticated, isNotBannedFromIdeaBox, async (req, res) => {
+    const { title, description } = req.body;
+    const submitterId = new ObjectId(req.session.userId);
+    const submitterUsername = req.session.username;
+
+    if (!title || typeof title !== 'string' || title.trim().length < 5 || title.trim().length > 100) {
+        return res.status(400).json({ error: 'Ein Titel mit 5 bis 100 Zeichen ist erforderlich.' });
+    }
+    if (!description || typeof description !== 'string' || description.trim().length < 10 || description.trim().length > 2000) {
+        return res.status(400).json({ error: 'Eine Beschreibung mit 10 bis 2000 Zeichen ist erforderlich.' });
+    }
+
+    console.log(`${LOG_PREFIX_IDEAS} User ${submitterUsername} reicht neue Idee ein: "${title}"`);
+
+    try {
+        const newIdea = {
+            title: title.trim(),
+            description: description.trim(),
+            submitterId,
+            submitterUsername,
+            status: 'new', // 'new', 'in-progress', 'done', 'rejected'
+            createdAt: new Date(),
+            updatedAt: new Date()
+        };
+        await ideasCollection.insertOne(newIdea);
+        res.status(201).json({ message: 'Deine Idee wurde erfolgreich eingereicht!', idea: newIdea });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_IDEAS} Fehler beim Einreichen der Idee von User ${submitterUsername}:`, err);
+        res.status(500).json({ error: 'Serverfehler beim Einreichen der Idee.' });
+    }
+});
+
+// Alle Ideen abrufen (für alle Nutzer sichtbar)
+app.get('/api/ideas', async (req, res) => {
+    console.log(`${LOG_PREFIX_IDEAS} Rufe Ideenliste ab.`);
+    try {
+        const ideas = await ideasCollection.find({}).sort({ createdAt: -1 }).limit(200).toArray();
+        res.json({ ideas });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_IDEAS} Fehler beim Abrufen der Ideenliste:`, err);
+        res.status(500).json({ error: 'Fehler beim Laden der Ideen.' });
+    }
+});
+
+// Admin: Status einer Idee ändern
+app.patch('/api/ideas/:id/status', isAuthenticated, isAdmin, async (req, res) => {
+    const { status } = req.body;
+    const ideaIdStr = req.params.id;
+    const adminUsername = req.session.username;
+
+    if (!ObjectId.isValid(ideaIdStr)) {
+        return res.status(400).json({ error: 'Ungültige Ideen-ID.' });
+    }
+    const ideaId = new ObjectId(ideaIdStr);
+
+    const validStatus = ['new', 'in-progress', 'done', 'rejected'];
+    if (!status || !validStatus.includes(status)) {
+        return res.status(400).json({ error: `Ungültiger Status. Erlaubt sind: ${validStatus.join(', ')}.` });
+    }
+
+    console.log(`${LOG_PREFIX_IDEAS} Admin ${adminUsername} ändert Status von Idee ${ideaId} zu "${status}"`);
+
+    try {
+        const result = await ideasCollection.updateOne(
+            { _id: ideaId },
+            { $set: { status: status, updatedAt: new Date() } }
+        );
+        if (result.matchedCount === 0) {
+            return res.status(404).json({ error: 'Idee nicht gefunden.' });
+        }
+        const updatedIdea = await ideasCollection.findOne({ _id: ideaId });
+        res.json({ message: 'Status der Idee erfolgreich aktualisiert.', idea: updatedIdea });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_IDEAS} Admin-Fehler beim Ändern des Ideen-Status:`, err);
+        res.status(500).json({ error: 'Serverfehler beim Aktualisieren des Status.' });
+    }
+});
+
+// Admin: Idee löschen
+app.delete('/api/ideas/:id', isAuthenticated, isAdmin, async (req, res) => {
+    const ideaIdStr = req.params.id;
+    const adminUsername = req.session.username;
+
+    if (!ObjectId.isValid(ideaIdStr)) {
+        return res.status(400).json({ error: 'Ungültige Ideen-ID.' });
+    }
+    const ideaId = new ObjectId(ideaIdStr);
+
+    console.log(`${LOG_PREFIX_IDEAS} Admin ${adminUsername} löscht Idee ${ideaId}`);
+
+    try {
+        const result = await ideasCollection.deleteOne({ _id: ideaId });
+        if (result.deletedCount === 0) {
+            return res.status(404).json({ error: 'Idee nicht gefunden.' });
+        }
+        res.json({ message: 'Idee erfolgreich gelöscht.' });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_IDEAS} Admin-Fehler beim Löschen der Idee:`, err);
+        res.status(500).json({ error: 'Serverfehler beim Löschen der Idee.' });
+    }
+});
+
+// Admin: Nutzer von der Ideenbox bannen
+app.post('/api/admin/ideas/ban-user', isAuthenticated, isAdmin, async (req, res) => {
+    const { userIdToBan } = req.body;
+    if (!ObjectId.isValid(userIdToBan)) {
+        return res.status(400).json({ error: 'Ungültige User-ID.' });
+    }
+    console.log(`${LOG_PREFIX_IDEAS} Admin ${req.session.username} bannt User ${userIdToBan} von der Ideenbox.`);
+    try {
+        const result = await usersCollection.updateOne(
+            { _id: new ObjectId(userIdToBan) },
+            { $set: { isBannedFromIdeaBox: true } }
+        );
+        if (result.matchedCount === 0) {
+            return res.status(404).json({ error: 'Nutzer nicht gefunden.' });
+        }
+        res.json({ message: 'Nutzer wurde erfolgreich von der Ideenbox gebannt.' });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_IDEAS} Admin-Fehler beim Bannen des Nutzers:`, err);
+        res.status(500).json({ error: 'Serverfehler beim Bannen des Nutzers.' });
+    }
+});
+
+// Admin: Nutzer-Bann von der Ideenbox aufheben
+app.post('/api/admin/ideas/unban-user', isAuthenticated, isAdmin, async (req, res) => {
+    const { userIdToUnban } = req.body;
+    if (!ObjectId.isValid(userIdToUnban)) {
+        return res.status(400).json({ error: 'Ungültige User-ID.' });
+    }
+    console.log(`${LOG_PREFIX_IDEAS} Admin ${req.session.username} entbannt User ${userIdToUnban} von der Ideenbox.`);
+    try {
+        const result = await usersCollection.updateOne(
+            { _id: new ObjectId(userIdToUnban) },
+            { $set: { isBannedFromIdeaBox: false } }
+        );
+        if (result.matchedCount === 0) {
+            return res.status(404).json({ error: 'Nutzer nicht gefunden.' });
+        }
+        res.json({ message: 'Der Bann des Nutzers von der Ideenbox wurde aufgehoben.' });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_IDEAS} Admin-Fehler beim Entbannen des Nutzers:`, err);
+        res.status(500).json({ error: 'Serverfehler beim Entbannen des Nutzers.' });
     }
 });
 
