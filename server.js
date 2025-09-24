@@ -111,7 +111,8 @@ let wheelsCollection, tokenCodesCollection, tokenTransactionsCollection;
 let limChatsCollection, limMessagesCollection, limUserChatSettingsCollection;
 let ideasCollection;
 let auctionsCollection;
-let portfoliosCollection, transactionsCollection; 
+let portfoliosCollection, transactionsCollection;
+let dontBlameMeCollection;
 
 // ==============================================================================
 // === NEU: AUTOMATISIERTE SICHERHEITS- & REPARATURFUNKTIONEN ====================
@@ -554,11 +555,13 @@ MongoClient.connect(mongoUri)
         limChatsCollection = db.collection(CHAT_COLLECTION_NAME);
         limMessagesCollection = db.collection(MESSAGE_COLLECTION_NAME);
         limUserChatSettingsCollection = db.collection(USER_CHAT_SETTINGS_COLLECTION_NAME);
-		auctionsCollection = db.collection('auctions');
-		console.log(`${LOG_PREFIX_SERVER} ✅ Auktionshaus-Collection initialisiert.`);
-		portfoliosCollection = db.collection('portfolios');
-		transactionsCollection = db.collection('transactions');
-		console.log(`${LOG_PREFIX_SERVER} ✅ Börsen-Collections (portfolios, transactions) initialisiert.`);
+        auctionsCollection = db.collection('auctions');
+        console.log(`${LOG_PREFIX_SERVER} ✅ Auktionshaus-Collection initialisiert.`);
+        dontBlameMeCollection = db.collection('dontBlameMePosts');
+        console.log(`${LOG_PREFIX_SERVER} ✅ DontBlameMe-Collection initialisiert.`);
+        portfoliosCollection = db.collection('portfolios');
+        transactionsCollection = db.collection('transactions');
+        console.log(`${LOG_PREFIX_SERVER} ✅ Börsen-Collections (portfolios, transactions) initialisiert.`);
         console.log(`${LOG_PREFIX_SERVER} ✅ Chat-Collections initialisiert.`);
         ideasCollection = db.collection('ideas');
         console.log(`${LOG_PREFIX_SERVER} ✅ Ideenbox-Collection initialisiert.`);
@@ -574,11 +577,11 @@ MongoClient.connect(mongoUri)
             await limMessagesCollection.createIndex({ senderId: 1 });
             await limMessagesCollection.createIndex({ content: "text" }); // Für Textsuche
             await limUserChatSettingsCollection.createIndex({ userId: 1, chatId: 1 }, { unique: true });
-			await auctionsCollection.createIndex({ status: 1, endTime: 1 }); // Wichtig für den Auktions-Ende-Job
+            await auctionsCollection.createIndex({ status: 1, endTime: 1 }); // Wichtig für den Auktions-Ende-Job
             console.log(`${LOG_PREFIX_SERVER} ✅ Chat-Indizes erfolgreich erstellt oder bereits vorhanden.`);
-			await portfoliosCollection.createIndex({ userId: 1, productId: 1 }, { unique: true });
-			await transactionsCollection.createIndex({ userId: 1 });
-			await transactionsCollection.createIndex({ productId: 1, timestamp: -1 });
+            await portfoliosCollection.createIndex({ userId: 1, productId: 1 }, { unique: true });
+            await transactionsCollection.createIndex({ userId: 1 });
+            await transactionsCollection.createIndex({ productId: 1, timestamp: -1 });
             await productsCollection.createIndex({ id: 1 }, { unique: true });
             await usersCollection.createIndex({ username: 1 }, { unique: true });
             await usersCollection.createIndex({ tokens: 1 });
@@ -600,6 +603,11 @@ MongoClient.connect(mongoUri)
                 await tokenTransactionsCollection.createIndex({ type: 1 });
                 await tokenTransactionsCollection.createIndex({ timestamp: -1 });
             }
+            await dontBlameMeCollection.createIndex(
+                { "createdAt": 1 },
+                { expireAfterSeconds: 72 * 60 * 60 } // 72 Stunden * 60 Minuten * 60 Sekunden
+            );
+            console.log(`${LOG_PREFIX_SERVER} ✅ TTL-Index für DontBlameMe-Posts auf 72 Stunden gesetzt.`);
             console.log(`${LOG_PREFIX_SERVER} ✅ Alle Indizes erfolgreich erstellt oder bereits vorhanden.`);
         }
         catch (indexErr) { console.error(`${LOG_PREFIX_SERVER} ❌ Fehler bei der Indexerstellung:`, indexErr); }
@@ -614,19 +622,19 @@ MongoClient.connect(mongoUri)
         } catch (seedErr) { console.error(`${LOG_PREFIX_SERVER}    Fehler beim Überprüfen/Seeden regulärer Produkte:`, seedErr); }
         await seedTokenCardProducts();
         await seedDefaultPublicWheel();
-        
+
         // ==============================================================================
         // === NEU: AUTOMATISIERTE SICHERHEITS-CHECKS BEIM START & PERIODISCH ==========
         // ==============================================================================
         console.log(`${LOG_PREFIX_SERVER} 🚀 Führe initiale Datenintegritäts-Prüfung beim Serverstart aus...`);
         await runAutomatedSecurityChecks();
-        
+
         // Richte den periodischen Sicherheits-Check ein (alle 1 Stunde)
         const SECURITY_CHECK_INTERVAL_MS = 60 * 60 * 1000;
         setInterval(runAutomatedSecurityChecks, SECURITY_CHECK_INTERVAL_MS);
         console.log(`${LOG_PREFIX_SERVER} ⏰ Automatische Sicherheits-Prüfung wird alle ${SECURITY_CHECK_INTERVAL_MS / 60000} Minuten ausgeführt.`);
 
-		// START: AUKTION-ENDE-JOB
+        // START: AUKTION-ENDE-JOB
         setInterval(async () => {
             console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Prüfe auf abgelaufene Auktionen...`);
             const now = new Date();
@@ -671,7 +679,7 @@ MongoClient.connect(mongoUri)
                             { _id: auction._id },
                             { $set: { status: 'ended_unsold' } }
                         );
-                         console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Auktion ${auction._id} ("${auction.productName}") nicht verkauft. Item an ${auction.sellerUsername} zurückgegeben.`);
+                        console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Auktion ${auction._id} ("${auction.productName}") nicht verkauft. Item an ${auction.sellerUsername} zurückgegeben.`);
                     }
                 }
             } catch (err) {
@@ -679,8 +687,8 @@ MongoClient.connect(mongoUri)
             }
         }, 60000); // Läuft jede Minute
         // ENDE: AUKTION-ENDE-JOB
-	
-		        // START: BÖRSEN-PREIS-UPDATE-JOB
+
+        // START: BÖRSEN-PREIS-UPDATE-JOB
         setInterval(async () => {
             // console.log(`${LOG_PREFIX_SERVER} [StockMarketJob] Starte Preis-Update-Zyklus...`);
             const now = new Date();
@@ -739,7 +747,7 @@ MongoClient.connect(mongoUri)
             }
         }, PRICE_UPDATE_INTERVAL_MS);
         // ENDE: BÖRSEN-PREIS-UPDATE-JOB
-		
+
         http.createServer(app).listen(HTTP_PORT, () => {
             console.log(`${LOG_PREFIX_SERVER} 🌐 HTTP-Server läuft auf Port ${HTTP_PORT}`);
         });
@@ -827,7 +835,7 @@ app.get('/api/auth/me', isAuthenticated, async (req, res) => {
         const user = await usersCollection.findOne({ _id: new ObjectId(req.session.userId) }, { projection: { password: 0 } });
         if (!user) { console.error(`${LOG_PREFIX_SERVER} /api/auth/me: User ${req.session.userId} nicht in DB! Zerstöre Session.`); req.session.destroy(() => { }); return res.status(404).json({ error: 'Benutzer nicht gefunden.' }); }
         const effectiveInfinityMoney = user.isAdmin ? true : (user.infinityMoney || false);
-			res.json({ userId: user._id.toString(), username: user.username, balance: parseFloat(user.balance || 0), tokens: user.tokens || 0, isAdmin: user.isAdmin || false, infinityMoney: effectiveInfinityMoney, unlockedInfinityMoney: user.unlockedInfinityMoney || false, productSellCooldowns: user.productSellCooldowns || {} });
+        res.json({ userId: user._id.toString(), username: user.username, balance: parseFloat(user.balance || 0), tokens: user.tokens || 0, isAdmin: user.isAdmin || false, infinityMoney: effectiveInfinityMoney, unlockedInfinityMoney: user.unlockedInfinityMoney || false, productSellCooldowns: user.productSellCooldowns || {} });
     } catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler /api/auth/me ${req.session.username}:`, err); res.status(500).json({ error: "Fehler Abruf Benutzerdaten." }); }
 });
 
@@ -905,10 +913,10 @@ app.post('/api/admin/generate-token-code', isAdmin, async (req, res) => {
 app.get('/api/products', async (req, res) => {
     try {
         // === KORREKTUR 2: PERFORMANCE-OPTIMIERUNG DURCH PROJEKTION ===
-        const prods = await productsCollection.find({}, { 
-            projection: { 
-                priceHistory: 0 
-            } 
+        const prods = await productsCollection.find({}, {
+            projection: {
+                priceHistory: 0
+            }
         }).sort({ id: 1 }).toArray();
 
         // Sanitize products for both classic shop and stonk market
@@ -1056,10 +1064,10 @@ app.post('/api/products/sell', isAuthenticated, async (req, res) => {
         const invItem = await inventoriesCollection.findOne({ userId: userId, productId: productId }); if (!invItem || invItem.quantityOwned < quantity) return res.status(400).json({ error: `Nicht ${quantity}x "${prodToSell.name}" im Bestand. Aktuell: ${invItem ? invItem.quantityOwned : 0}.` });
         let cooldowns = user.productSellCooldowns || {}; const lastAttCDISO = cooldowns[productId.toString()];
         if (lastAttCDISO) { const cdEndTime = new Date(lastAttCDISO).getTime(); if (Date.now() < cdEndTime) { const timeLeft = Math.ceil((cdEndTime - Date.now()) / 1000); return res.status(429).json({ success: false, error: `Cooldown aktiv: Warte ${timeLeft}s.`, cooldownActiveForProduct: productId, cooldownEndsAt: lastAttCDISO, productSellCooldowns: cooldowns }); } else { delete cooldowns[productId.toString()]; await usersCollection.updateOne({ _id: userId }, { $set: { productSellCooldowns: cooldowns } }); } }
-        
+
         // === KORREKTUR 1: VERKAUFS-BUG BEHOBEN ===
         const origPrice = prodToSell.basePrice || parseFloat((prodToSell.price || "$0").replace(/[^0-9.]/g, '')) || 1;
-        
+
         let prob = 1.0;
         if (sellPrice > origPrice) prob = origPrice / sellPrice; else if (sellPrice < origPrice * 0.5) prob = 1.0;
         const globStock = prodToSell.stock || 0; const defGlobStock = prodToSell.default_stock || 20;
@@ -2924,7 +2932,7 @@ app.post('/api/auctions/:id/bid', isAuthenticated, async (req, res) => {
         }
 
         // --- 2. Transaktionen durchführen ---
-        
+
         // Geld vom neuen Bieter abziehen (reservieren)
         const bidderDebitResult = await usersCollection.updateOne(
             { _id: bidderId, balance: { $gte: finalBidAmount } },
@@ -2966,9 +2974,9 @@ app.post('/api/auctions/:id/bid', isAuthenticated, async (req, res) => {
                 }
             }
         );
-        
+
         if (auctionUpdateResult.modifiedCount === 0) {
-             throw new Error("Auktions-Update fehlgeschlagen. Auktion wurde möglicherweise in der Zwischenzeit beendet.");
+            throw new Error("Auktions-Update fehlgeschlagen. Auktion wurde möglicherweise in der Zwischenzeit beendet.");
         }
 
         console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} bietet $${finalBidAmount} auf Auktion ${auctionId}.`);
@@ -3097,7 +3105,7 @@ app.post('/api/stonks/buy', isAuthenticated, async (req, res) => {
             },
             { upsert: true }
         );
-        
+
         // 4. Transaktion loggen
         await transactionsCollection.insertOne({ userId, productId, type: 'buy', quantity, pricePerShare, totalValue: totalCost, timestamp: new Date() });
 
@@ -3120,10 +3128,10 @@ app.post('/api/stonks/sell', isAuthenticated, async (req, res) => {
     const { productId, quantity } = req.body;
     const userId = new ObjectId(req.session.userId);
 
-     if (typeof productId !== 'number' || typeof quantity !== 'number' || !Number.isInteger(quantity) || quantity <= 0) {
+    if (typeof productId !== 'number' || typeof quantity !== 'number' || !Number.isInteger(quantity) || quantity <= 0) {
         return res.status(400).json({ error: 'Ungültige Produkt-ID oder Menge.' });
     }
-    
+
     try {
         const stock = await productsCollection.findOne({ id: productId, isTokenCard: { $ne: true } });
         if (!stock) return res.status(404).json({ error: 'Aktie nicht gefunden.' });
@@ -3140,10 +3148,10 @@ app.post('/api/stonks/sell', isAuthenticated, async (req, res) => {
         // 1. Anteile aus Portfolio entfernen
         const portfolioUpdateResult = await portfoliosCollection.updateOne({ userId, productId, quantityShares: { $gte: quantity } }, { $inc: { quantityShares: -quantity } });
         if (portfolioUpdateResult.modifiedCount === 0) throw new Error("Portfolio-Update fehlgeschlagen.");
-        
+
         // 2. Verkauf-Zähler für das Produkt erhöhen
         await productsCollection.updateOne({ _id: stock._id }, { $inc: { sellsLastInterval: quantity } });
-        
+
         // 3. User das Geld gutschreiben
         await usersCollection.updateOne({ _id: userId }, { $inc: { balance: totalCredit } });
 
@@ -3168,7 +3176,7 @@ app.get('/api/stonks/portfolio', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
     try {
         const portfolioItems = await portfoliosCollection.find({ userId, quantityShares: { $gt: 0 } }).toArray();
-        
+
         if (portfolioItems.length === 0) {
             return res.json({ portfolio: [] });
         }
@@ -3181,7 +3189,7 @@ app.get('/api/stonks/portfolio', isAuthenticated, async (req, res) => {
             { id: { $in: productIdsInPortfolio } },
             { projection: { id: 1, name: 1, currentPrice: 1, image_url: 1, _id: 0 } }
         ).toArray();
-        
+
         // Eine Map für schnellen Zugriff erstellen: productId -> productDetail
         const productDetailsMap = new Map(productDetails.map(p => [p.id, p]));
 
@@ -3203,6 +3211,77 @@ app.get('/api/stonks/portfolio', isAuthenticated, async (req, res) => {
     }
 });
 
+// =========================================================
+// === DONT BLAME ME ENDPUNKTE ===
+// =========================================================
+const LOG_PREFIX_DBM = "[DontBlameMe API]";
+
+// Hilfsfunktion zur Generierung von zufälligen Bildparametern
+function generateImageParams() {
+    const bgColors = ['#f4a261', '#e76f51', '#2a9d8f', '#264653', '#e9c46a', '#fefae0', '#606c38'];
+    const textColors = ['#ffffff', '#000000', '#2d3436'];
+    const fonts = ['Arial', 'Verdana', 'Helvetica', 'Georgia', 'Courier New', 'Comic Sans MS'];
+
+    const bgColor = bgColors[Math.floor(Math.random() * bgColors.length)];
+    // Stelle sicher, dass der Text lesbar ist (einfache Kontrastprüfung)
+    let textColor = textColors[Math.floor(Math.random() * textColors.length)];
+    if (bgColor === '#264653' && textColor === '#000000') {
+        textColor = '#ffffff'; // Dunkler Hintergrund -> heller Text
+    }
+    if (bgColor === '#fefae0' && textColor === '#ffffff') {
+        textColor = '#000000'; // Heller Hintergrund -> dunkler Text
+    }
+
+    return {
+        backgroundColor: bgColor,
+        textColor: textColor,
+        fontFamily: fonts[Math.floor(Math.random() * fonts.length)],
+        fontSize: Math.floor(Math.random() * 10) + 24, // Größe zwischen 24px und 34px
+        textAlign: ['center', 'left', 'right'][Math.floor(Math.random() * 3)],
+        padding: Math.floor(Math.random() * 20) + 10 // Padding zwischen 10px und 30px
+    };
+}
+
+// GET-Endpunkt, um alle Posts abzurufen
+app.get('/api/dont-blame-me', async (req, res) => {
+    console.log(`${LOG_PREFIX_DBM} Rufe alle Posts ab.`);
+    try {
+        const posts = await dontBlameMeCollection.find({}).sort({ createdAt: -1 }).toArray();
+        res.json({ posts });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_DBM} Fehler beim Abrufen der Posts:`, err);
+        res.status(500).json({ error: 'Fehler beim Laden der Posts.' });
+    }
+});
+
+// POST-Endpunkt, um einen neuen Post zu erstellen
+app.post('/api/dont-blame-me', isAuthenticated, async (req, res) => {
+    const { reason } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const username = req.session.username;
+
+    if (!reason || typeof reason !== 'string' || reason.trim().length < 5 || reason.trim().length > 280) {
+        return res.status(400).json({ error: 'Ein Grund (5-280 Zeichen) ist erforderlich.' });
+    }
+
+    console.log(`${LOG_PREFIX_DBM} User ${username} reicht einen neuen Post ein.`);
+
+    try {
+        const imageParams = generateImageParams();
+        const newPost = {
+            userId,
+            username,
+            reason: reason.trim(),
+            imageParams, // Speichert die "Anleitung" für den Generator
+            createdAt: new Date()
+        };
+        await dontBlameMeCollection.insertOne(newPost);
+        res.status(201).json({ message: 'Post erfolgreich erstellt!', post: newPost });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_DBM} Fehler beim Erstellen des Posts für User ${username}:`, err);
+        res.status(500).json({ error: 'Serverfehler beim Erstellen des Posts.' });
+    }
+});
 
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
