@@ -16,7 +16,7 @@ if (configPath) { const result = dotenv.config({ path: configPath }); if (result
 // --- Requires ---
 const express = require('express');
 const http = require('http');
-const cors = require('cors');
+//const cors = require('cors');
 const { MongoClient, ObjectId } = require('mongodb');
 const bcrypt = require('bcrypt');
 const session = require('express-session');
@@ -78,17 +78,17 @@ const allowedOrigins = [frontendDevUrlHttp, frontendDevUrlHttps];
 if (frontendProdUrl) { allowedOrigins.push(frontendProdUrl); }
 console.log(`${LOG_PREFIX_SERVER} Erlaubte CORS Origins:`, allowedOrigins);
 
-app.use(cors({
-    origin: function (origin, callback) {
-        if (!origin || allowedOrigins.includes(origin)) {
-            callback(null, true);
-        } else {
-            console.error(`${LOG_PREFIX_SERVER} CORS Fehler: Origin ${origin} nicht erlaubt.`);
-            callback(new Error(`Origin ${origin} nicht durch CORS erlaubt`));
-        }
-    },
-    credentials: true
-}));
+// app.use(cors({
+//    origin: function (origin, callback) {
+//         if (!origin || allowedOrigins.includes(origin)) {
+// // // // //             callback(null, true);
+// // // //         } else {
+// // //             console.error(`${LOG_PREFIX_SERVER} CORS Fehler: Origin ${origin} nicht erlaubt.`);
+// //             callback(new Error(`Origin ${origin} nicht durch CORS erlaubt`));
+//         }
+// // //     },
+// //     credentials: true
+// }));
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true, parameterLimit: 50000 }));
 app.use(session({
