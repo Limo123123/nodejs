@@ -1,26 +1,27 @@
-version: 40
+version: 43
 jobs:
 - name: Generate NPM Package
-  jobExecutor: Local-Pi5
   steps:
-  - !CheckoutStep
+  - type: CheckoutStep
     name: Get Repo
-    cloneCredential: !DefaultCredential {}
+    cloneCredential:
+      type: DefaultCredential
     withLfs: false
     withSubmodules: false
     condition: SUCCESSFUL
     optional: false
-  - !CommandStep
+  - type: CommandStep
     name: NodeJS Builder
     runInContainer: true
     image: node:20
-    interpreter: !ShellInterpreter
+    interpreter:
+      type: ShellInterpreter
       shell: bash
       commands: "wget http://ftp.de.debian.org/debian/pool/main/z/zip/zip_3.0-13_arm64.deb\n\ndpkg -i zip_3.0-13_arm64.deb \n\nnpm install\nnpm install cors\nnpm install express\nnpm run build\nls\nrm -rf .git\nzip -r latest.zip .\n"
     useTTY: true
     condition: SUCCESSFUL
     optional: false
-  - !PublishSiteStep
+  - type: PublishSiteStep
     name: Publish ZIP
     artifacts: latest.zip
     condition: SUCCESSFUL
@@ -31,14 +32,15 @@ jobs:
   timeout: 14400
 - name: Push to Github
   steps:
-  - !CheckoutStep
+  - type: CheckoutStep
     name: Get Code
-    cloneCredential: !DefaultCredential {}
+    cloneCredential:
+      type: DefaultCredential
     withLfs: false
     withSubmodules: false
     condition: SUCCESSFUL
     optional: false
-  - !PushRepository
+  - type: PushRepository
     name: Push to Github
     remoteUrl: https://github.com/Limo123123/nodejs.git
     userName: Limo123123
@@ -47,7 +49,8 @@ jobs:
     condition: SUCCESSFUL
     optional: false
   triggers:
-  - !BranchUpdateTrigger {}
+  - type: BranchUpdateTrigger
+    userMatch: anyone
   retryCondition: never
   maxRetries: 3
   retryDelay: 30
