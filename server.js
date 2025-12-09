@@ -3451,6 +3451,34 @@ app.post('/api/school/rate', isAuthenticated, async (req, res) => {
     res.json({ message: "Bewertung gespeichert." });
 });
 
+// 5b. Admin: Lehrer löschen
+app.delete('/api/school/admin/teachers/:id', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const tId = new ObjectId(req.params.id);
+        // Lehrer löschen
+        const result = await teachersCollection.deleteOne({ _id: tId });
+        // Alle Bewertungen zu diesem Lehrer auch löschen (Aufräumen)
+        await ratingsCollection.deleteMany({ teacherId: tId });
+        
+        if (result.deletedCount === 0) return res.status(404).json({ error: "Lehrer nicht gefunden." });
+        res.json({ message: "Lehrer und zugehörige Bewertungen gelöscht." });
+    } catch (e) { res.status(500).json({ error: "Fehler beim Löschen." }); }
+});
+
+// 5c. Admin: Lehrer bearbeiten (Name & Fächer)
+app.put('/api/school/admin/teachers/:id', isAuthenticated, isAdmin, async (req, res) => {
+    const { name, subjectIds } = req.body;
+    try {
+        const tId = new ObjectId(req.params.id);
+        
+        await teachersCollection.updateOne(
+            { _id: tId },
+            { $set: { name: name, subjectIds: subjectIds || [] } }
+        );
+        res.json({ message: "Lehrer aktualisiert." });
+    } catch (e) { res.status(500).json({ error: "Fehler beim Aktualisieren." }); }
+});
+
 // Notfall-Button: Fächer zurücksetzen/erzwingen
 app.post('/api/school/admin/force-seed-subjects', isAuthenticated, isAdmin, async (req, res) => {
     try {
