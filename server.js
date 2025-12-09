@@ -3321,6 +3321,8 @@ async function seedSubjects() {
         console.log(`${LOG_PREFIX_SERVER} Standardfächer für Anne Frank Realschule angelegt.`);
     }
 }
+// Einmalig beim Start ausführen
+seedSubjects().catch(console.error);
 
 // Hilfsfunktion: Durchschnitt dynamisch berechnen
 async function updateTeacherAverage(teacherId) {
