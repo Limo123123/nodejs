@@ -3293,140 +3293,159 @@ app.post('/api/dont-blame-me', isAuthenticated, async (req, res) => {
 });
 
 // =========================================================
-// === LEHRER BEWERTUNG (RATE MY TEACHER) ===
+// === DYNAMISCHE SCHUL-VERWALTUNG (ANNE FRANK REALSCHULE) ===
 // =========================================================
 
-// Hilfsfunktion: Durchschnitt berechnen
-async function updateTeacherAverage(teacherId) {
-    const tId = new ObjectId(teacherId);
-    const result = await ratingsCollection.aggregate([
-        { $match: { teacherId: tId } },
-        {
-            $group: {
-                _id: "$teacherId",
-                avgRel: { $avg: "$grades.religion" },
-                avgDeu: { $avg: "$grades.deutsch" },
-                avgMat: { $avg: "$grades.mathe" },
-                avgEng: { $avg: "$grades.englisch" },
-                avgAwt: { $avg: "$grades.awt" },
-                avgPcb: { $avg: "$grades.pcb" },
-                avgGse: { $avg: "$grades.gse" },
-                avgSpo: { $avg: "$grades.sport" },
-                avgTec: { $avg: "$grades.technik" },
-                count: { $sum: 1 }
-            }
-        }
-    ]).toArray();
-
-    if (result.length > 0) {
-        const r = result[0];
-        // Gesamt-Durchschnitt aller Fächer berechnen
-        const allAvgs = [r.avgRel, r.avgDeu, r.avgMat, r.avgEng, r.avgAwt, r.avgPcb, r.avgGse, r.avgSpo, r.avgTec].filter(n => n !== null);
-        const totalAvg = allAvgs.reduce((a, b) => a + b, 0) / allAvgs.length;
-
-        await teachersCollection.updateOne(
-            { _id: tId },
-            { $set: { averages: r, totalAverage: totalAvg, ratingCount: r.count } }
-        );
+// Initialisiert Standardfächer, falls DB leer ist
+async function seedSubjects() {
+    const count = await subjectsCollection.countDocuments();
+    if (count === 0) {
+        const defaults = [
+            { id: 'rel', label: 'Religionslehre', type: 'pflicht' },
+            { id: 'deu', label: 'Deutsch', type: 'pflicht' },
+            { id: 'mat', label: 'Mathematik', type: 'pflicht' },
+            { id: 'eng', label: 'Englisch', type: 'pflicht' },
+            { id: 'bio', label: 'Biologie', type: 'pflicht' },
+            { id: 'spo', label: 'Sport', type: 'pflicht' },
+            { id: 'inf', label: 'Informatik', type: 'wahl' },
+            { id: 'tec', label: 'Technik', type: 'wahl' },
+            { id: 'fra', label: 'Französisch', type: 'wahl' },
+            { id: 'ndl', label: 'Niederländisch', type: 'wahl' },
+			{ id: 'phy', label: 'Physik', type: 'pflicht' },
+			{ id: 'che', label: 'Chemie', type: 'pflicht' }
+        ];
+        await subjectsCollection.insertMany(defaults);
+        console.log(`${LOG_PREFIX_SERVER} Standardfächer für Anne Frank Realschule angelegt.`);
     }
 }
+// Einmalig beim Start ausführen
+seedSubjects().catch(console.error);
 
-// 1. Lehrer abrufen (Öffentlich)
-app.get('/api/school/teachers', async (req, res) => {
-    try {
-        const teachers = await teachersCollection.find({}).sort({ name: 1 }).toArray();
-        res.json({ teachers });
-    } catch (e) { res.status(500).json({ error: "Fehler beim Laden der Lehrer." }); }
-});
-
-// 2. Lehrer bewerten (Nur eingeloggte User)
-app.post('/api/school/rate', isAuthenticated, async (req, res) => {
-    const { teacherId, grades } = req.body; // grades = { mathe: 2, deutsch: 1, ... }
-    const userId = new ObjectId(req.session.userId);
-
-    if (!ObjectId.isValid(teacherId)) return res.status(400).json({ error: "Ungültige Lehrer ID" });
+// Hilfsfunktion: Durchschnitt dynamisch berechnen
+async function updateTeacherAverage(teacherId) {
+    const tId = new ObjectId(teacherId);
+    // Hole alle Bewertungen für diesen Lehrer
+    const ratings = await ratingsCollection.find({ teacherId: tId }).toArray();
     
-    // Validierung: Noten müssen 1-6 sein oder null (wenn Fach nicht belegt)
-    // Wir filtern ungültige Werte serverseitig
-    const cleanGrades = {};
-    const validSubjects = ['religion', 'deutsch', 'mathe', 'englisch', 'awt', 'pcb', 'gse', 'sport', 'technik'];
-    
-    for (const sub of validSubjects) {
-        if (grades[sub]) {
-            let val = parseInt(grades[sub]);
-            if (val >= 1 && val <= 6) cleanGrades[sub] = val;
-        }
+    if (ratings.length === 0) {
+        await teachersCollection.updateOne({ _id: tId }, { $set: { averages: {}, totalAverage: 0, ratingCount: 0 } });
+        return;
     }
 
-    if (Object.keys(cleanGrades).length === 0) return res.status(400).json({ error: "Mindestens eine gültige Note muss vergeben werden." });
+    // Summen und Anzahl pro Fach berechnen
+    const subjectStats = {}; // { 'mat': { sum: 10, count: 4 }, ... }
+    let totalSum = 0;
+    let totalCount = 0;
 
-    try {
-        await ratingsCollection.updateOne(
-            { teacherId: new ObjectId(teacherId), userId: userId },
-            { 
-                $set: { 
-                    grades: cleanGrades, 
-                    timestamp: new Date(),
-                    username: req.session.username // Für Admins sichtbar
-                } 
-            },
-            { upsert: true }
-        );
-        
-        // Asynchron Durchschnitt neu berechnen
-        updateTeacherAverage(teacherId);
+    ratings.forEach(r => {
+        if (!r.grades) return;
+        Object.keys(r.grades).forEach(subjectId => {
+            const grade = r.grades[subjectId];
+            if (grade >= 1 && grade <= 6) {
+                if (!subjectStats[subjectId]) subjectStats[subjectId] = { sum: 0, count: 0 };
+                subjectStats[subjectId].sum += grade;
+                subjectStats[subjectId].count += 1;
+                
+                // Für den Gesamt-Schnitt des Lehrers zählen wir jede einzelne Note
+                totalSum += grade;
+                totalCount += 1;
+            }
+        });
+    });
 
-        res.json({ message: "Bewertung abgegeben!" });
-    } catch (e) { res.status(500).json({ error: "Fehler beim Speichern der Bewertung." }); }
+    // Durchschnitte pro Fach berechnen
+    const averages = {};
+    Object.keys(subjectStats).forEach(sId => {
+        averages[sId] = subjectStats[sId].sum / subjectStats[sId].count;
+    });
+
+    const totalAverage = totalCount > 0 ? (totalSum / totalCount) : 0;
+
+    await teachersCollection.updateOne(
+        { _id: tId },
+        { $set: { averages: averages, totalAverage: totalAverage, ratingCount: ratings.length } }
+    );
+}
+
+// --- API ENDPOINTS ---
+
+// 1. Fächer abrufen
+app.get('/api/school/subjects', async (req, res) => {
+    const subs = await subjectsCollection.find({}).sort({ label: 1 }).toArray();
+    res.json({ subjects: subs });
 });
 
-// 3. Admin: Lehrer hinzufügen
+// 2. Admin: Fach hinzufügen
+app.post('/api/school/admin/subjects', isAuthenticated, isAdmin, async (req, res) => {
+    const { label, type } = req.body;
+    // ID generieren aus Label (z.B. "Sozialwissenschaften" -> "sozialwissenschaften")
+    const id = label.toLowerCase().replace(/[^a-z0-9]/g, '').substring(0, 10);
+    
+    try {
+        await subjectsCollection.insertOne({ id, label, type: type || 'pflicht' });
+        res.json({ message: "Fach hinzugefügt." });
+    } catch (e) { res.status(500).json({ error: "Fehler (Fach existiert evtl. schon)." }); }
+});
+
+// 3. Admin: Fach löschen
+app.delete('/api/school/admin/subjects/:id', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        await subjectsCollection.deleteOne({ id: req.params.id });
+        res.json({ message: "Fach gelöscht." });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// 4. Lehrer abrufen
+app.get('/api/school/teachers', async (req, res) => {
+    const teachers = await teachersCollection.find({}).sort({ name: 1 }).toArray();
+    res.json({ teachers });
+});
+
+// 5. Admin: Lehrer erstellen (Mit zugeordneten Fächern)
 app.post('/api/school/admin/teachers', isAuthenticated, isAdmin, async (req, res) => {
-    const { name, disabledSubjects } = req.body; // disabledSubjects = ['religion', 'sport']
+    const { name, subjectIds } = req.body; // subjectIds = ['mat', 'inf', 'bio']
     if (!name) return res.status(400).json({ error: "Name fehlt" });
 
-    try {
-        const newTeacher = {
-            name,
-            disabledSubjects: disabledSubjects || [], // Fächer, die der Lehrer NICHT unterrichtet
-            averages: {},
-            totalAverage: 0,
-            ratingCount: 0,
-            createdAt: new Date()
-        };
-        await teachersCollection.insertOne(newTeacher);
-        res.json({ message: "Lehrer angelegt." });
-    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+    const newTeacher = {
+        name,
+        subjectIds: subjectIds || [], // Nur diese Fächer darf man bewerten
+        averages: {},
+        totalAverage: 0,
+        ratingCount: 0,
+        createdAt: new Date()
+    };
+    await teachersCollection.insertOne(newTeacher);
+    res.json({ message: "Lehrer angelegt." });
 });
 
-// 4. Admin: Bewertungen einsehen (Moderation)
-app.get('/api/school/admin/ratings/:teacherId', isAuthenticated, isAdmin, async (req, res) => {
-    try {
-        const ratings = await ratingsCollection.find({ teacherId: new ObjectId(req.params.teacherId) }).toArray();
-        res.json({ ratings });
-    } catch (e) { res.status(500).json({ error: "Fehler." }); }
-});
+// 6. Bewerten
+app.post('/api/school/rate', isAuthenticated, async (req, res) => {
+    const { teacherId, grades } = req.body;
+    const userId = new ObjectId(req.session.userId);
 
-// 5. Admin: Bewertung löschen (Ban-Logik kannst du über deine bestehende User-Logik machen)
-app.delete('/api/school/admin/ratings/:id', isAuthenticated, isAdmin, async (req, res) => {
-    try {
-        const r = await ratingsCollection.findOne({_id: new ObjectId(req.params.id)});
-        await ratingsCollection.deleteOne({ _id: new ObjectId(req.params.id) });
-        if(r) updateTeacherAverage(r.teacherId);
-        res.json({ message: "Bewertung gelöscht." });
-    } catch (e) { res.status(500).json({ error: "Fehler." }); }
-});
+    // Validierung
+    const teacher = await teachersCollection.findOne({ _id: new ObjectId(teacherId) });
+    if (!teacher) return res.status(404).json({ error: "Lehrer nicht gefunden" });
 
-// 6. Admin: Lehrer Fächer bearbeiten (Update)
-app.patch('/api/school/admin/teachers/:id', isAuthenticated, isAdmin, async (req, res) => {
-    const { disabledSubjects } = req.body;
-    try {
-        await teachersCollection.updateOne(
-            { _id: new ObjectId(req.params.id) },
-            { $set: { disabledSubjects: disabledSubjects || [] } }
-        );
-        res.json({ message: "Fächer aktualisiert." });
-    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+    const cleanGrades = {};
+    // Nur Noten speichern für Fächer, die der Lehrer auch hat
+    teacher.subjectIds.forEach(sId => {
+        if (grades[sId]) {
+            const val = parseInt(grades[sId]);
+            if (val >= 1 && val <= 6) cleanGrades[sId] = val;
+        }
+    });
+
+    if (Object.keys(cleanGrades).length === 0) return res.status(400).json({ error: "Keine gültigen Noten eingegeben." });
+
+    await ratingsCollection.updateOne(
+        { teacherId: teacher._id, userId: userId },
+        { $set: { grades: cleanGrades, timestamp: new Date(), username: req.session.username } },
+        { upsert: true }
+    );
+
+    updateTeacherAverage(teacherId);
+    res.json({ message: "Bewertung gespeichert." });
 });
 
 app.use((req, res) => {
