@@ -573,6 +573,7 @@ MongoClient.connect(mongoUri)
         console.log(`${LOG_PREFIX_SERVER} ✅ MongoDB erfolgreich verbunden und Collections initialisiert.`);
 		teachersCollection = db.collection('teachers');
 		ratingsCollection = db.collection('ratings');
+		subjectsCollection = db.collection('subjects');
         try {
             await usersCollection.createIndex({ userShareCode: 1 }, { unique: true, sparse: true }); // sparse, da nicht alle User sofort einen haben
             await limChatsCollection.createIndex({ participants: 1 });
@@ -607,6 +608,7 @@ MongoClient.connect(mongoUri)
             await tokenCodesCollection.createIndex({ code: 1 }, { unique: true });
             await tokenCodesCollection.createIndex({ redeemedByUserId: 1 });
             await tokenCodesCollection.createIndex({ generatedForUserId: 1, isRedeemed: 1 });
+			await subjectsCollection.createIndex({ id: 1 }, { unique: true });
             if (tokenTransactionsCollection) {
                 await tokenTransactionsCollection.createIndex({ userId: 1 });
                 await tokenTransactionsCollection.createIndex({ type: 1 });
