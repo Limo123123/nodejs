@@ -603,8 +603,8 @@ MongoClient.connect(mongoUri)
             await wheelsCollection.createIndex({ shareCode: 1 }, { unique: true, sparse: true });
             await ideasCollection.createIndex({ status: 1, createdAt: -1 });
             await ideasCollection.createIndex({ submitterId: 1 });
-			await ratingsCollection.createIndex({ teacherId: 1, userId: 1 }, { unique: true }); // Ein Rating pro User pro Lehrer
-			await ratingsCollection.createIndex({ teacherId: 1 });
+			await ratingsCollection.createIndex({ teacherId: 1, userId: 1 }, { unique: true });
+            await subjectsCollection.createIndex({ id: 1 }, { unique: true });
             await usersCollection.createIndex({ isBannedFromIdeaBox: 1 });
             await tokenCodesCollection.createIndex({ code: 1 }, { unique: true });
             await tokenCodesCollection.createIndex({ redeemedByUserId: 1 });
