@@ -74,7 +74,12 @@ if (!sessionSecret) { console.error(`${LOG_PREFIX_SERVER} !!! FEHLER: Kein SESSI
 if (!mongoUri) { console.error(`${LOG_PREFIX_SERVER} !!! FEHLER: Keine MongoDB URI (MONGO_URI oder User/PW/Cluster) in Umgebungsvariablen! Server stoppt.`); process.exit(1); }
 
 // --- Middleware ---
-const allowedOrigins = [frontendDevUrlHttp, frontendDevUrlHttps];
+const allowedOrigins = [
+    frontendDevUrlHttp, 
+    frontendDevUrlHttps,
+    'https://tcg.limazon.v6.rocks',
+	'https://app.limazon.v6.rocks'
+];
 if (frontendProdUrl) { allowedOrigins.push(frontendProdUrl); }
 console.log(`${LOG_PREFIX_SERVER} Erlaubte CORS Origins:`, allowedOrigins);
 
