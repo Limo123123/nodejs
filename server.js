@@ -3451,6 +3451,41 @@ app.post('/api/school/rate', isAuthenticated, async (req, res) => {
     res.json({ message: "Bewertung gespeichert." });
 });
 
+// Notfall-Button: Fächer zurücksetzen/erzwingen
+app.post('/api/school/admin/force-seed-subjects', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        // Lösche alle existierenden Fächer
+        await subjectsCollection.deleteMany({});
+        
+        // Liste der Fächer
+        const defaults = [
+            { id: 'rel', label: 'Religionslehre', type: 'pflicht' },
+            { id: 'deu', label: 'Deutsch', type: 'pflicht' },
+            { id: 'mat', label: 'Mathematik', type: 'pflicht' },
+            { id: 'eng', label: 'Englisch', type: 'pflicht' },
+            { id: 'bio', label: 'Biologie', type: 'pflicht' },
+            { id: 'spo', label: 'Sport', type: 'pflicht' },
+            { id: 'inf', label: 'Informatik', type: 'wahl' },
+            { id: 'tec', label: 'Technik', type: 'wahl' },
+            { id: 'fra', label: 'Französisch', type: 'wahl' },
+            { id: 'ndl', label: 'Niederländisch', type: 'wahl' },
+            { id: 'phy', label: 'Physik', type: 'pflicht' },
+            { id: 'che', label: 'Chemie', type: 'pflicht' },
+            { id: 'art', label: 'Kunst', type: 'pflicht' },
+            { id: 'mus', label: 'Musik', type: 'pflicht' },
+            { id: 'pol', label: 'Politik', type: 'pflicht' },
+            { id: 'geo', label: 'Erdkunde', type: 'pflicht' },
+            { id: 'his', label: 'Geschichte', type: 'pflicht' }
+        ];
+        
+        await subjectsCollection.insertMany(defaults);
+        res.json({ message: "Alle Fächer wurden erfolgreich neu angelegt." });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Reset." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
