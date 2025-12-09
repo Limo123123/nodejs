@@ -571,6 +571,8 @@ MongoClient.connect(mongoUri)
         ideasCollection = db.collection('ideas');
         console.log(`${LOG_PREFIX_SERVER} ✅ Ideenbox-Collection initialisiert.`);
         console.log(`${LOG_PREFIX_SERVER} ✅ MongoDB erfolgreich verbunden und Collections initialisiert.`);
+		teachersCollection = db.collection('teachers');
+		ratingsCollection = db.collection('ratings');
         try {
             await usersCollection.createIndex({ userShareCode: 1 }, { unique: true, sparse: true }); // sparse, da nicht alle User sofort einen haben
             await limChatsCollection.createIndex({ participants: 1 });
@@ -599,6 +601,8 @@ MongoClient.connect(mongoUri)
             await wheelsCollection.createIndex({ shareCode: 1 }, { unique: true, sparse: true });
             await ideasCollection.createIndex({ status: 1, createdAt: -1 });
             await ideasCollection.createIndex({ submitterId: 1 });
+			await ratingsCollection.createIndex({ teacherId: 1, userId: 1 }, { unique: true }); // Ein Rating pro User pro Lehrer
+			await ratingsCollection.createIndex({ teacherId: 1 });
             await usersCollection.createIndex({ isBannedFromIdeaBox: 1 });
             await tokenCodesCollection.createIndex({ code: 1 }, { unique: true });
             await tokenCodesCollection.createIndex({ redeemedByUserId: 1 });
@@ -3286,6 +3290,143 @@ app.post('/api/dont-blame-me', isAuthenticated, async (req, res) => {
         console.error(`${LOG_PREFIX_DBM} Fehler beim Erstellen des Posts für User ${username}:`, err);
         res.status(500).json({ error: 'Serverfehler beim Erstellen des Posts.' });
     }
+});
+
+// =========================================================
+// === LEHRER BEWERTUNG (RATE MY TEACHER) ===
+// =========================================================
+
+// Hilfsfunktion: Durchschnitt berechnen
+async function updateTeacherAverage(teacherId) {
+    const tId = new ObjectId(teacherId);
+    const result = await ratingsCollection.aggregate([
+        { $match: { teacherId: tId } },
+        {
+            $group: {
+                _id: "$teacherId",
+                avgRel: { $avg: "$grades.religion" },
+                avgDeu: { $avg: "$grades.deutsch" },
+                avgMat: { $avg: "$grades.mathe" },
+                avgEng: { $avg: "$grades.englisch" },
+                avgAwt: { $avg: "$grades.awt" },
+                avgPcb: { $avg: "$grades.pcb" },
+                avgGse: { $avg: "$grades.gse" },
+                avgSpo: { $avg: "$grades.sport" },
+                avgTec: { $avg: "$grades.technik" },
+                count: { $sum: 1 }
+            }
+        }
+    ]).toArray();
+
+    if (result.length > 0) {
+        const r = result[0];
+        // Gesamt-Durchschnitt aller Fächer berechnen
+        const allAvgs = [r.avgRel, r.avgDeu, r.avgMat, r.avgEng, r.avgAwt, r.avgPcb, r.avgGse, r.avgSpo, r.avgTec].filter(n => n !== null);
+        const totalAvg = allAvgs.reduce((a, b) => a + b, 0) / allAvgs.length;
+
+        await teachersCollection.updateOne(
+            { _id: tId },
+            { $set: { averages: r, totalAverage: totalAvg, ratingCount: r.count } }
+        );
+    }
+}
+
+// 1. Lehrer abrufen (Öffentlich)
+app.get('/api/school/teachers', async (req, res) => {
+    try {
+        const teachers = await teachersCollection.find({}).sort({ name: 1 }).toArray();
+        res.json({ teachers });
+    } catch (e) { res.status(500).json({ error: "Fehler beim Laden der Lehrer." }); }
+});
+
+// 2. Lehrer bewerten (Nur eingeloggte User)
+app.post('/api/school/rate', isAuthenticated, async (req, res) => {
+    const { teacherId, grades } = req.body; // grades = { mathe: 2, deutsch: 1, ... }
+    const userId = new ObjectId(req.session.userId);
+
+    if (!ObjectId.isValid(teacherId)) return res.status(400).json({ error: "Ungültige Lehrer ID" });
+    
+    // Validierung: Noten müssen 1-6 sein oder null (wenn Fach nicht belegt)
+    // Wir filtern ungültige Werte serverseitig
+    const cleanGrades = {};
+    const validSubjects = ['religion', 'deutsch', 'mathe', 'englisch', 'awt', 'pcb', 'gse', 'sport', 'technik'];
+    
+    for (const sub of validSubjects) {
+        if (grades[sub]) {
+            let val = parseInt(grades[sub]);
+            if (val >= 1 && val <= 6) cleanGrades[sub] = val;
+        }
+    }
+
+    if (Object.keys(cleanGrades).length === 0) return res.status(400).json({ error: "Mindestens eine gültige Note muss vergeben werden." });
+
+    try {
+        await ratingsCollection.updateOne(
+            { teacherId: new ObjectId(teacherId), userId: userId },
+            { 
+                $set: { 
+                    grades: cleanGrades, 
+                    timestamp: new Date(),
+                    username: req.session.username // Für Admins sichtbar
+                } 
+            },
+            { upsert: true }
+        );
+        
+        // Asynchron Durchschnitt neu berechnen
+        updateTeacherAverage(teacherId);
+
+        res.json({ message: "Bewertung abgegeben!" });
+    } catch (e) { res.status(500).json({ error: "Fehler beim Speichern der Bewertung." }); }
+});
+
+// 3. Admin: Lehrer hinzufügen
+app.post('/api/school/admin/teachers', isAuthenticated, isAdmin, async (req, res) => {
+    const { name, disabledSubjects } = req.body; // disabledSubjects = ['religion', 'sport']
+    if (!name) return res.status(400).json({ error: "Name fehlt" });
+
+    try {
+        const newTeacher = {
+            name,
+            disabledSubjects: disabledSubjects || [], // Fächer, die der Lehrer NICHT unterrichtet
+            averages: {},
+            totalAverage: 0,
+            ratingCount: 0,
+            createdAt: new Date()
+        };
+        await teachersCollection.insertOne(newTeacher);
+        res.json({ message: "Lehrer angelegt." });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// 4. Admin: Bewertungen einsehen (Moderation)
+app.get('/api/school/admin/ratings/:teacherId', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const ratings = await ratingsCollection.find({ teacherId: new ObjectId(req.params.teacherId) }).toArray();
+        res.json({ ratings });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// 5. Admin: Bewertung löschen (Ban-Logik kannst du über deine bestehende User-Logik machen)
+app.delete('/api/school/admin/ratings/:id', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const r = await ratingsCollection.findOne({_id: new ObjectId(req.params.id)});
+        await ratingsCollection.deleteOne({ _id: new ObjectId(req.params.id) });
+        if(r) updateTeacherAverage(r.teacherId);
+        res.json({ message: "Bewertung gelöscht." });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// 6. Admin: Lehrer Fächer bearbeiten (Update)
+app.patch('/api/school/admin/teachers/:id', isAuthenticated, isAdmin, async (req, res) => {
+    const { disabledSubjects } = req.body;
+    try {
+        await teachersCollection.updateOne(
+            { _id: new ObjectId(req.params.id) },
+            { $set: { disabledSubjects: disabledSubjects || [] } }
+        );
+        res.json({ message: "Fächer aktualisiert." });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
 });
 
 app.use((req, res) => {
