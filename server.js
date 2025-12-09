@@ -118,6 +118,7 @@ let ideasCollection;
 let auctionsCollection;
 let portfoliosCollection, transactionsCollection;
 let dontBlameMeCollection;
+let teachersCollection, ratingsCollection, subjectsCollection;
 
 // ==============================================================================
 // === NEU: AUTOMATISIERTE SICHERHEITS- & REPARATURFUNKTIONEN ====================
