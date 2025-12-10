@@ -557,6 +557,8 @@ async function isAdmin(req, res, next) {
 MongoClient.connect(mongoUri)
     .then(async client => {
         db = client.db(mongoDbName);
+        
+        // --- 1. Collections Initialisieren ---
         productsCollection = db.collection(productsCollectionName);
         usersCollection = db.collection(usersCollectionName);
         ordersCollection = db.collection(ordersCollectionName);
@@ -568,33 +570,47 @@ MongoClient.connect(mongoUri)
         limMessagesCollection = db.collection(MESSAGE_COLLECTION_NAME);
         limUserChatSettingsCollection = db.collection(USER_CHAT_SETTINGS_COLLECTION_NAME);
         auctionsCollection = db.collection('auctions');
-        console.log(`${LOG_PREFIX_SERVER} ✅ Auktionshaus-Collection initialisiert.`);
         dontBlameMeCollection = db.collection('dontBlameMePosts');
-        console.log(`${LOG_PREFIX_SERVER} ✅ DontBlameMe-Collection initialisiert.`);
         portfoliosCollection = db.collection('portfolios');
         transactionsCollection = db.collection('transactions');
-        console.log(`${LOG_PREFIX_SERVER} ✅ Börsen-Collections (portfolios, transactions) initialisiert.`);
-        console.log(`${LOG_PREFIX_SERVER} ✅ Chat-Collections initialisiert.`);
         ideasCollection = db.collection('ideas');
-        console.log(`${LOG_PREFIX_SERVER} ✅ Ideenbox-Collection initialisiert.`);
-        console.log(`${LOG_PREFIX_SERVER} ✅ MongoDB erfolgreich verbunden und Collections initialisiert.`);
-		humansCollection = db.collection('humans'); // Früher teachers
+        
+        // NEU: Human Grades Collections
+        humansCollection = db.collection('humans');      // Früher teachers
         ratingsCollection = db.collection('ratings');
-        criteriaCollection = db.collection('criteria'); // Früher subjects
-        categoriesCollection = db.collection('categories'); // NEU
+        criteriaCollection = db.collection('criteria');  // Früher subjects
+        categoriesCollection = db.collection('categories');
+
+        console.log(`${LOG_PREFIX_SERVER} ✅ MongoDB verbunden & alle Collections initialisiert.`);
+
+        // --- 2. Indizes & Reparaturen ---
         try {
-            await usersCollection.createIndex({ userShareCode: 1 }, { unique: true, sparse: true }); // sparse, da nicht alle User sofort einen haben
+            // WICHTIG: Alten, fehlerhaften Index löschen (falls vorhanden), um Crash zu verhindern
+            try {
+                await ratingsCollection.dropIndex("teacherId_1_userId_1");
+                console.log(`${LOG_PREFIX_SERVER} ♻️ Alter Index 'teacherId_1_userId_1' erfolgreich entfernt.`);
+            } catch (e) { /* Index existiert nicht mehr, alles gut */ }
+
+            // Neuen korrekten Index für Human Grades erstellen
+            await ratingsCollection.createIndex({ humanId: 1, userId: 1 }, { unique: true });
+
+            // Standard Indizes
+            await humansCollection.createIndex({ id: 1 }, { unique: true, sparse: true });
+            await criteriaCollection.createIndex({ id: 1 }, { unique: true });
+            await categoriesCollection.createIndex({ id: 1 }, { unique: true });
+
+            // Bestehende Indizes
+            await usersCollection.createIndex({ userShareCode: 1 }, { unique: true, sparse: true });
             await limChatsCollection.createIndex({ participants: 1 });
             await limChatsCollection.createIndex({ type: 1 });
             await limChatsCollection.createIndex({ groupShareCode: 1 }, { unique: true, sparse: true });
             await limChatsCollection.createIndex({ ownerId: 1 });
-            await limChatsCollection.createIndex({ updatedAt: -1 }); // Für Chat-Listen-Sortierung
-            await limMessagesCollection.createIndex({ chatId: 1, timestamp: -1 }); // Wichtig für Nachrichtenabruf
+            await limChatsCollection.createIndex({ updatedAt: -1 });
+            await limMessagesCollection.createIndex({ chatId: 1, timestamp: -1 });
             await limMessagesCollection.createIndex({ senderId: 1 });
-            await limMessagesCollection.createIndex({ content: "text" }); // Für Textsuche
+            await limMessagesCollection.createIndex({ content: "text" });
             await limUserChatSettingsCollection.createIndex({ userId: 1, chatId: 1 }, { unique: true });
-            await auctionsCollection.createIndex({ status: 1, endTime: 1 }); // Wichtig für den Auktions-Ende-Job
-            console.log(`${LOG_PREFIX_SERVER} ✅ Chat-Indizes erfolgreich erstellt oder bereits vorhanden.`);
+            await auctionsCollection.createIndex({ status: 1, endTime: 1 });
             await portfoliosCollection.createIndex({ userId: 1, productId: 1 }, { unique: true });
             await transactionsCollection.createIndex({ userId: 1 });
             await transactionsCollection.createIndex({ productId: 1, timestamp: -1 });
@@ -610,14 +626,11 @@ MongoClient.connect(mongoUri)
             await wheelsCollection.createIndex({ shareCode: 1 }, { unique: true, sparse: true });
             await ideasCollection.createIndex({ status: 1, createdAt: -1 });
             await ideasCollection.createIndex({ submitterId: 1 });
-			await ratingsCollection.createIndex({ humanId: 1, userId: 1 }, { unique: true });
-        	await criteriaCollection.createIndex({ id: 1 }, { unique: true });
-        	await categoriesCollection.createIndex({ id: 1 }, { unique: true });
             await usersCollection.createIndex({ isBannedFromIdeaBox: 1 });
             await tokenCodesCollection.createIndex({ code: 1 }, { unique: true });
             await tokenCodesCollection.createIndex({ redeemedByUserId: 1 });
             await tokenCodesCollection.createIndex({ generatedForUserId: 1, isRedeemed: 1 });
-			await subjectsCollection.createIndex({ id: 1 }, { unique: true });
+            
             if (tokenTransactionsCollection) {
                 await tokenTransactionsCollection.createIndex({ userId: 1 });
                 await tokenTransactionsCollection.createIndex({ type: 1 });
@@ -625,155 +638,102 @@ MongoClient.connect(mongoUri)
             }
             await dontBlameMeCollection.createIndex(
                 { "createdAt": 1 },
-                { expireAfterSeconds: 72 * 60 * 60 } // 72 Stunden * 60 Minuten * 60 Sekunden
+                { expireAfterSeconds: 72 * 60 * 60 }
             );
-            console.log(`${LOG_PREFIX_SERVER} ✅ TTL-Index für DontBlameMe-Posts auf 72 Stunden gesetzt.`);
-            console.log(`${LOG_PREFIX_SERVER} ✅ Alle Indizes erfolgreich erstellt oder bereits vorhanden.`);
+
+            console.log(`${LOG_PREFIX_SERVER} ✅ Alle Indizes erfolgreich geprüft/erstellt.`);
+        } catch (indexErr) { 
+            console.error(`${LOG_PREFIX_SERVER} ❌ Fehler bei der Indexerstellung:`, indexErr); 
         }
-        catch (indexErr) { console.error(`${LOG_PREFIX_SERVER} ❌ Fehler bei der Indexerstellung:`, indexErr); }
+
+        // --- 3. Seeding (Datenbank befüllen) ---
         try {
             const regularProductCount = await productsCollection.countDocuments({ isTokenCard: { $ne: true } });
             if (regularProductCount === 0) {
                 console.log(`${LOG_PREFIX_SERVER}    Datenbank (reguläre Produkte) ist leer. Starte initiales Seeding...`);
                 await seedDatabaseFromLocalJson();
-            } else {
-                console.log(`${LOG_PREFIX_SERVER}    Datenbank enthält bereits ${regularProductCount} reguläre Produkte.`);
             }
-        } catch (seedErr) { console.error(`${LOG_PREFIX_SERVER}    Fehler beim Überprüfen/Seeden regulärer Produkte:`, seedErr); }
+        } catch (seedErr) { console.error(`${LOG_PREFIX_SERVER}    Fehler beim Produkt-Seeding:`, seedErr); }
+        
         await seedTokenCardProducts();
         await seedDefaultPublicWheel();
-		await seedHumanGradesDefaults();
+        
+        // WICHTIG: Human Grades Defaults laden (hier an der richtigen Stelle!)
+        await seedHumanGradesDefaults(); 
 
-        // ==============================================================================
-        // === NEU: AUTOMATISIERTE SICHERHEITS-CHECKS BEIM START & PERIODISCH ==========
-        // ==============================================================================
-        console.log(`${LOG_PREFIX_SERVER} 🚀 Führe initiale Datenintegritäts-Prüfung beim Serverstart aus...`);
+        // --- 4. Automatisierte Checks & Jobs ---
+        console.log(`${LOG_PREFIX_SERVER} 🚀 Führe initiale Datenintegritäts-Prüfung aus...`);
         await runAutomatedSecurityChecks();
 
-        // Richte den periodischen Sicherheits-Check ein (alle 1 Stunde)
         const SECURITY_CHECK_INTERVAL_MS = 60 * 60 * 1000;
         setInterval(runAutomatedSecurityChecks, SECURITY_CHECK_INTERVAL_MS);
-        console.log(`${LOG_PREFIX_SERVER} ⏰ Automatische Sicherheits-Prüfung wird alle ${SECURITY_CHECK_INTERVAL_MS / 60000} Minuten ausgeführt.`);
+        console.log(`${LOG_PREFIX_SERVER} ⏰ Automatische Sicherheits-Prüfung aktiv.`);
 
-        // START: AUKTION-ENDE-JOB
+        // AUKTION-ENDE-JOB
         setInterval(async () => {
-            console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Prüfe auf abgelaufene Auktionen...`);
+            // console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Prüfe...`);
             const now = new Date();
             try {
-                const expiredAuctions = await auctionsCollection.find({
-                    status: 'active',
-                    endTime: { $lte: now }
-                }).toArray();
-
-                if (expiredAuctions.length === 0) {
-                    // console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Keine abgelaufenen Auktionen gefunden.`);
-                    return;
-                }
-
-                console.log(`${LOG_PREFIX_SERVER} [AuctionJob] ${expiredAuctions.length} Auktion(en) gefunden, die beendet werden müssen.`);
-
-                for (const auction of expiredAuctions) {
-                    if (auction.highestBidderId) {
-                        // Auktion wurde verkauft
-                        await inventoriesCollection.updateOne(
-                            { userId: auction.highestBidderId, productId: auction.productId },
-                            { $inc: { quantityOwned: auction.quantity } },
-                            { upsert: true }
-                        );
-                        await usersCollection.updateOne(
-                            { _id: auction.sellerId },
-                            { $inc: { balance: auction.currentBid } }
-                        );
-                        await auctionsCollection.updateOne(
-                            { _id: auction._id },
-                            { $set: { status: 'ended_sold' } }
-                        );
-                        console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Auktion ${auction._id} ("${auction.productName}") verkauft an ${auction.highestBidderUsername} für $${auction.currentBid}.`);
-                    } else {
-                        // Auktion nicht verkauft
-                        await inventoriesCollection.updateOne(
-                            { userId: auction.sellerId, productId: auction.productId },
-                            { $inc: { quantityOwned: auction.quantity } },
-                            { upsert: true }
-                        );
-                        await auctionsCollection.updateOne(
-                            { _id: auction._id },
-                            { $set: { status: 'ended_unsold' } }
-                        );
-                        console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Auktion ${auction._id} ("${auction.productName}") nicht verkauft. Item an ${auction.sellerUsername} zurückgegeben.`);
+                const expiredAuctions = await auctionsCollection.find({ status: 'active', endTime: { $lte: now } }).toArray();
+                if (expiredAuctions.length > 0) {
+                    console.log(`${LOG_PREFIX_SERVER} [AuctionJob] ${expiredAuctions.length} Auktion(en) beendet.`);
+                    for (const auction of expiredAuctions) {
+                        if (auction.highestBidderId) {
+                            await inventoriesCollection.updateOne({ userId: auction.highestBidderId, productId: auction.productId }, { $inc: { quantityOwned: auction.quantity } }, { upsert: true });
+                            await usersCollection.updateOne({ _id: auction.sellerId }, { $inc: { balance: auction.currentBid } });
+                            await auctionsCollection.updateOne({ _id: auction._id }, { $set: { status: 'ended_sold' } });
+                            console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Auktion ${auction._id} verkauft.`);
+                        } else {
+                            await inventoriesCollection.updateOne({ userId: auction.sellerId, productId: auction.productId }, { $inc: { quantityOwned: auction.quantity } }, { upsert: true });
+                            await auctionsCollection.updateOne({ _id: auction._id }, { $set: { status: 'ended_unsold' } });
+                            console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Auktion ${auction._id} nicht verkauft (Rückgabe).`);
+                        }
                     }
                 }
-            } catch (err) {
-                console.error(`${LOG_PREFIX_SERVER} [AuctionJob] KRITISCHER FEHLER bei der Auktionsverarbeitung:`, err);
-            }
-        }, 60000); // Läuft jede Minute
-        // ENDE: AUKTION-ENDE-JOB
+            } catch (err) { console.error(`${LOG_PREFIX_SERVER} [AuctionJob] Fehler:`, err); }
+        }, 60000);
 
-        // START: BÖRSEN-PREIS-UPDATE-JOB
+        // BÖRSEN-JOB
         setInterval(async () => {
-            // console.log(`${LOG_PREFIX_SERVER} [StockMarketJob] Starte Preis-Update-Zyklus...`);
             const now = new Date();
             try {
-                // Finde alle handelbaren Aktien
-                const stocksToUpdate = await productsCollection.find({
-                    isTokenCard: { $ne: true },
-                    currentPrice: { $exists: true }
-                }).toArray();
-
-                if (stocksToUpdate.length === 0) {
-                    // console.log(`${LOG_PREFIX_SERVER} [StockMarketJob] Keine Aktien zum Aktualisieren gefunden.`);
-                    return;
-                }
-
+                const stocksToUpdate = await productsCollection.find({ isTokenCard: { $ne: true }, currentPrice: { $exists: true } }).toArray();
+                if (stocksToUpdate.length === 0) return;
+                
                 const bulkOps = stocksToUpdate.map(stock => {
                     const buys = stock.buysLastInterval || 0;
                     const sells = stock.sellsLastInterval || 0;
                     const oldPrice = stock.currentPrice;
                     let newPrice = oldPrice;
 
-                    // Nur Preis anpassen, wenn Handel stattgefunden hat
                     if (buys > 0 || sells > 0) {
                         const netDemand = buys - sells;
                         const priceChangeFactor = 1 + (netDemand * PRICE_VOLATILITY_FACTOR);
                         newPrice = Math.max(MINIMUM_PRODUCT_PRICE, oldPrice * priceChangeFactor);
                     }
-
                     return {
                         updateOne: {
                             filter: { _id: stock._id },
                             update: {
-                                $set: {
-                                    currentPrice: parseFloat(newPrice.toFixed(2)),
-                                    buysLastInterval: 0, // Zähler zurücksetzen
-                                    sellsLastInterval: 0 // Zähler zurücksetzen
-                                },
-                                $push: {
-                                    priceHistory: {
-                                        $each: [{ price: parseFloat(newPrice.toFixed(2)), timestamp: now }],
-                                        $slice: -30 // Nur die letzten 30 Preisänderungen behalten
-                                    }
-                                }
+                                $set: { currentPrice: parseFloat(newPrice.toFixed(2)), buysLastInterval: 0, sellsLastInterval: 0 },
+                                $push: { priceHistory: { $each: [{ price: parseFloat(newPrice.toFixed(2)), timestamp: now }], $slice: -30 } }
                             }
                         }
                     };
                 });
-
-                if (bulkOps.length > 0) {
-                    const result = await productsCollection.bulkWrite(bulkOps);
-                    // console.log(`${LOG_PREFIX_SERVER} [StockMarketJob] ${result.modifiedCount} Aktienpreise aktualisiert.`);
-                }
-
-            } catch (err) {
-                console.error(`${LOG_PREFIX_SERVER} [StockMarketJob] KRITISCHER FEHLER bei der Preisaktualisierung:`, err);
-            }
+                if (bulkOps.length > 0) await productsCollection.bulkWrite(bulkOps);
+            } catch (err) { console.error(`${LOG_PREFIX_SERVER} [StockMarketJob] Fehler:`, err); }
         }, PRICE_UPDATE_INTERVAL_MS);
-        // ENDE: BÖRSEN-PREIS-UPDATE-JOB
 
+        // --- 5. HTTP Server Starten ---
         http.createServer(app).listen(HTTP_PORT, () => {
             console.log(`${LOG_PREFIX_SERVER} 🌐 HTTP-Server läuft auf Port ${HTTP_PORT}`);
         });
     })
-    .catch(err => { console.error(`${LOG_PREFIX_SERVER} ❌ Kritischer Fehler: MongoDB-Verbindung fehlgeschlagen:`, err); process.exit(1); });
+    .catch(err => { 
+        console.error(`${LOG_PREFIX_SERVER} ❌ Kritischer Fehler: MongoDB-Verbindung fehlgeschlagen:`, err); 
+        process.exit(1); 
+    });
 
 // === API ENDPOINTS ===
 
