@@ -3552,6 +3552,91 @@ app.post('/api/human/admin/reset-defaults', isAuthenticated, isAdmin, async (req
     } catch(e) { res.status(500).json({ error: "Fehler beim Reset." }); }
 });
 
+// =========================================================
+// === ADMIN MODERATION (RATING MANAGEMENT) ===
+// =========================================================
+
+// 1. Liste aller User holen, die Bewertungen abgegeben haben
+app.get('/api/human/admin/raters', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        // Aggregation: Gruppiere nach UserID und zähle Bewertungen
+        const raters = await ratingsCollection.aggregate([
+            {
+                $group: {
+                    _id: "$userId",
+                    username: { $first: "$username" }, // Username ist im Rating gespeichert
+                    ratingCount: { $sum: 1 },
+                    lastActive: { $max: "$timestamp" }
+                }
+            },
+            { $sort: { lastActive: -1 } } // Die neusten zuerst
+        ]).toArray();
+        
+        res.json({ raters });
+    } catch(e) { 
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Laden der User." }); 
+    }
+});
+
+// 2. Alle Bewertungen eines spezifischen Users holen
+app.get('/api/human/admin/raters/:userId', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const uId = new ObjectId(req.params.userId);
+        
+        // Hole Ratings und joine mit Humans-Collection, um den Namen der bewerteten Person zu haben
+        const userRatings = await ratingsCollection.aggregate([
+            { $match: { userId: uId } },
+            {
+                $lookup: {
+                    from: "humans",       // Name der Humans Collection
+                    localField: "humanId",
+                    foreignField: "_id",
+                    as: "humanInfo"
+                }
+            },
+            { $unwind: "$humanInfo" }, // Array auflösen
+            { 
+                $project: {
+                    _id: 1,
+                    grades: 1,
+                    timestamp: 1,
+                    humanName: "$humanInfo.name",
+                    humanId: "$humanId"
+                }
+            },
+            { $sort: { timestamp: -1 } }
+        ]).toArray();
+
+        res.json({ ratings: userRatings });
+    } catch(e) { 
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Laden der Bewertungen." }); 
+    }
+});
+
+// 3. Einzelne Bewertung löschen
+app.delete('/api/human/admin/ratings/:id', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const rId = new ObjectId(req.params.id);
+        
+        // Zuerst Bewertung finden, um HumanID für Neuberechnung zu haben
+        const rating = await ratingsCollection.findOne({ _id: rId });
+        if (!rating) return res.status(404).json({ error: "Bewertung nicht gefunden." });
+
+        // Löschen
+        await ratingsCollection.deleteOne({ _id: rId });
+
+        // Durchschnitt des betroffenen Menschen neu berechnen
+        await updateHumanAverage(rating.humanId);
+
+        res.json({ message: "Bewertung gelöscht und Durchschnitt aktualisiert." });
+    } catch(e) { 
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Löschen." }); 
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
