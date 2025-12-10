@@ -3308,34 +3308,95 @@ app.post('/api/dont-blame-me', isAuthenticated, async (req, res) => {
 // === HUMAN GRADES (CORE LOGIC) ===
 // =========================================================
 
+// Erweiterter Seed mit echten Fächern für Lehrer UND Beispiel-Personen
 async function seedHumanGradesDefaults() {
+    // 1. Kategorien & Kriterien anlegen (falls leer)
     const catCount = await categoriesCollection.countDocuments();
     if (catCount === 0) {
-        // 1. Kategorien
         await categoriesCollection.insertMany([
             { id: 'lehrer', label: 'Lehrer' },
             { id: 'politiker', label: 'Politiker' },
             { id: 'promis', label: 'Prominente' }
         ]);
 
-        // 2. Kriterien (Fächer/Eigenschaften)
         await criteriaCollection.insertMany([
-            // Lehrer
-            { id: 'ped', label: 'Pädagogik', type: 'main', categoryId: 'lehrer' },
-            { id: 'hum', label: 'Humor', type: 'main', categoryId: 'lehrer' },
-            { id: 'fair', label: 'Fairness', type: 'main', categoryId: 'lehrer' },
-            { id: 'know', label: 'Fachwissen', type: 'main', categoryId: 'lehrer' },
-            // Politiker
+            // --- LEHRER (Echte Fächer) ---
+            { id: 'mat', label: 'Mathematik', type: 'main', categoryId: 'lehrer' },
+            { id: 'deu', label: 'Deutsch', type: 'main', categoryId: 'lehrer' },
+            { id: 'eng', label: 'Englisch', type: 'main', categoryId: 'lehrer' },
+            { id: 'rel', label: 'Religionslehre', type: 'main', categoryId: 'lehrer' },
+            { id: 'spo', label: 'Sport', type: 'main', categoryId: 'lehrer' },
+            { id: 'bio', label: 'Biologie', type: 'main', categoryId: 'lehrer' },
+            { id: 'phy', label: 'Physik', type: 'main', categoryId: 'lehrer' },
+            { id: 'che', label: 'Chemie', type: 'main', categoryId: 'lehrer' },
+            { id: 'his', label: 'Geschichte', type: 'main', categoryId: 'lehrer' },
+            { id: 'geo', label: 'Erdkunde', type: 'main', categoryId: 'lehrer' },
+            { id: 'pol', label: 'Politik', type: 'main', categoryId: 'lehrer' },
+            { id: 'kun', label: 'Kunst', type: 'main', categoryId: 'lehrer' },
+            { id: 'mus', label: 'Musik', type: 'main', categoryId: 'lehrer' },
+            { id: 'inf', label: 'Informatik', type: 'sec', categoryId: 'lehrer' }, 
+            { id: 'tec', label: 'Technik', type: 'sec', categoryId: 'lehrer' },     
+            { id: 'fra', label: 'Französisch', type: 'sec', categoryId: 'lehrer' }, 
+            { id: 'ndl', label: 'Niederländisch', type: 'sec', categoryId: 'lehrer' }, 
+
+            // --- POLITIKER ---
             { id: 'glaub', label: 'Glaubwürdigkeit', type: 'main', categoryId: 'politiker' },
             { id: 'rhet', label: 'Rhetorik', type: 'main', categoryId: 'politiker' },
-            { id: 'komp', label: 'Kompetenz', type: 'main', categoryId: 'politiker' },
+            { id: 'komp', label: 'Fachkompetenz', type: 'main', categoryId: 'politiker' },
+            { id: 'durch', label: 'Durchsetzungsvermögen', type: 'main', categoryId: 'politiker' },
             { id: 'symp', label: 'Sympathie', type: 'sec', categoryId: 'politiker' },
-            // Promis
+            { id: 'social', label: 'Social Media Präsenz', type: 'sec', categoryId: 'politiker' },
+
+            // --- PROMIS ---
             { id: 'ent', label: 'Entertainment', type: 'main', categoryId: 'promis' },
-            { id: 'style', label: 'Style', type: 'main', categoryId: 'promis' },
-            { id: 'vorbild', label: 'Vorbildfunktion', type: 'sec', categoryId: 'promis' }
+            { id: 'tal', label: 'Talent', type: 'main', categoryId: 'promis' },
+            { id: 'style', label: 'Style / Auftreten', type: 'main', categoryId: 'promis' },
+            { id: 'vorbild', label: 'Vorbildfunktion', type: 'sec', categoryId: 'promis' },
+            { id: 'skandal', label: 'Skandalfreiheit', type: 'sec', categoryId: 'promis' }
         ]);
-        console.log(`${LOG_PREFIX_SERVER} Human Grades Defaults initialisiert.`);
+        console.log(`${LOG_PREFIX_SERVER} Human Grades Kategorien & Kriterien initialisiert.`);
+    }
+
+    // 2. Default Menschen anlegen (falls leer)
+    const humanCount = await humansCollection.countDocuments();
+    if (humanCount === 0) {
+        const defaultHumans = [
+            // Promis
+            {
+                name: "Taylor Swift",
+                categoryId: "promis",
+                criteriaIds: ["ent", "tal", "style", "vorbild", "skandal"],
+                averages: {}, totalAverage: 0, ratingCount: 0, createdAt: new Date()
+            },
+            {
+                name: "Elon Musk",
+                categoryId: "promis",
+                criteriaIds: ["ent", "tal", "style", "vorbild", "skandal"],
+                averages: {}, totalAverage: 0, ratingCount: 0, createdAt: new Date()
+            },
+            // Politiker
+            {
+                name: "Olaf Scholz",
+                categoryId: "politiker",
+                criteriaIds: ["glaub", "rhet", "komp", "durch", "symp", "social"],
+                averages: {}, totalAverage: 0, ratingCount: 0, createdAt: new Date()
+            },
+            {
+                name: "Christian Lindner",
+                categoryId: "politiker",
+                criteriaIds: ["glaub", "rhet", "komp", "durch", "symp", "social"],
+                averages: {}, totalAverage: 0, ratingCount: 0, createdAt: new Date()
+            },
+            {
+                name: "Robert Habeck",
+                categoryId: "politiker",
+                criteriaIds: ["glaub", "rhet", "komp", "durch", "symp", "social"],
+                averages: {}, totalAverage: 0, ratingCount: 0, createdAt: new Date()
+            }
+        ];
+
+        await humansCollection.insertMany(defaultHumans);
+        console.log(`${LOG_PREFIX_SERVER} Default Menschen (Promis/Politiker) angelegt.`);
     }
 }
 
@@ -3479,6 +3540,16 @@ app.post('/api/human/rate', isAuthenticated, async (req, res) => {
 
     updateHumanAverage(humanId);
     res.json({ message: "Bewertung gespeichert." });
+});
+
+// Admin Endpoint zum Zurücksetzen der Datenbank (damit die neuen Fächer laden)
+app.post('/api/human/admin/reset-defaults', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        await categoriesCollection.deleteMany({});
+        await criteriaCollection.deleteMany({});
+        await seedHumanGradesDefaults();
+        res.json({ message: "Datenbank auf Standardwerte (Fächer/Kategorien) zurückgesetzt." });
+    } catch(e) { res.status(500).json({ error: "Fehler beim Reset." }); }
 });
 
 app.use((req, res) => {
