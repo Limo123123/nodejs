@@ -123,7 +123,8 @@ let ideasCollection;
 let auctionsCollection;
 let portfoliosCollection, transactionsCollection;
 let dontBlameMeCollection;
-let teachersCollection, ratingsCollection, subjectsCollection;
+// NEUE NAMEN:
+let humansCollection, ratingsCollection, criteriaCollection, categoriesCollection;
 
 // ==============================================================================
 // === NEU: AUTOMATISIERTE SICHERHEITS- & REPARATURFUNKTIONEN ====================
@@ -577,9 +578,10 @@ MongoClient.connect(mongoUri)
         ideasCollection = db.collection('ideas');
         console.log(`${LOG_PREFIX_SERVER} ✅ Ideenbox-Collection initialisiert.`);
         console.log(`${LOG_PREFIX_SERVER} ✅ MongoDB erfolgreich verbunden und Collections initialisiert.`);
-		teachersCollection = db.collection('teachers');
-		ratingsCollection = db.collection('ratings');
-		subjectsCollection = db.collection('subjects');
+		humansCollection = db.collection('humans'); // Früher teachers
+        ratingsCollection = db.collection('ratings');
+        criteriaCollection = db.collection('criteria'); // Früher subjects
+        categoriesCollection = db.collection('categories'); // NEU
         try {
             await usersCollection.createIndex({ userShareCode: 1 }, { unique: true, sparse: true }); // sparse, da nicht alle User sofort einen haben
             await limChatsCollection.createIndex({ participants: 1 });
@@ -608,8 +610,9 @@ MongoClient.connect(mongoUri)
             await wheelsCollection.createIndex({ shareCode: 1 }, { unique: true, sparse: true });
             await ideasCollection.createIndex({ status: 1, createdAt: -1 });
             await ideasCollection.createIndex({ submitterId: 1 });
-			await ratingsCollection.createIndex({ teacherId: 1, userId: 1 }, { unique: true });
-            await subjectsCollection.createIndex({ id: 1 }, { unique: true });
+			await ratingsCollection.createIndex({ humanId: 1, userId: 1 }, { unique: true });
+        	await criteriaCollection.createIndex({ id: 1 }, { unique: true });
+        	await categoriesCollection.createIndex({ id: 1 }, { unique: true });
             await usersCollection.createIndex({ isBannedFromIdeaBox: 1 });
             await tokenCodesCollection.createIndex({ code: 1 }, { unique: true });
             await tokenCodesCollection.createIndex({ redeemedByUserId: 1 });
@@ -639,6 +642,7 @@ MongoClient.connect(mongoUri)
         } catch (seedErr) { console.error(`${LOG_PREFIX_SERVER}    Fehler beim Überprüfen/Seeden regulärer Produkte:`, seedErr); }
         await seedTokenCardProducts();
         await seedDefaultPublicWheel();
+		await seedHumanGradesDefaults();
 
         // ==============================================================================
         // === NEU: AUTOMATISIERTE SICHERHEITS-CHECKS BEIM START & PERIODISCH ==========
@@ -3301,222 +3305,180 @@ app.post('/api/dont-blame-me', isAuthenticated, async (req, res) => {
 });
 
 // =========================================================
-// === DYNAMISCHE SCHUL-VERWALTUNG (ANNE FRANK REALSCHULE) ===
+// === HUMAN GRADES (CORE LOGIC) ===
 // =========================================================
 
-// Initialisiert Standardfächer, falls DB leer ist
-async function seedSubjects() {
-    const count = await subjectsCollection.countDocuments();
-    if (count === 0) {
-        const defaults = [
-            { id: 'rel', label: 'Religionslehre', type: 'pflicht' },
-            { id: 'deu', label: 'Deutsch', type: 'pflicht' },
-            { id: 'mat', label: 'Mathematik', type: 'pflicht' },
-            { id: 'eng', label: 'Englisch', type: 'pflicht' },
-            { id: 'bio', label: 'Biologie', type: 'pflicht' },
-            { id: 'spo', label: 'Sport', type: 'pflicht' },
-            { id: 'inf', label: 'Informatik', type: 'wahl' },
-            { id: 'tec', label: 'Technik', type: 'wahl' },
-            { id: 'fra', label: 'Französisch', type: 'wahl' },
-            { id: 'ndl', label: 'Niederländisch', type: 'wahl' },
-			{ id: 'phy', label: 'Physik', type: 'pflicht' },
-			{ id: 'che', label: 'Chemie', type: 'pflicht' }
-        ];
-        await subjectsCollection.insertMany(defaults);
-        console.log(`${LOG_PREFIX_SERVER} Standardfächer für Anne Frank Realschule angelegt.`);
+async function seedHumanGradesDefaults() {
+    const catCount = await categoriesCollection.countDocuments();
+    if (catCount === 0) {
+        // 1. Kategorien
+        await categoriesCollection.insertMany([
+            { id: 'lehrer', label: 'Lehrer' },
+            { id: 'politiker', label: 'Politiker' },
+            { id: 'promis', label: 'Prominente' }
+        ]);
+
+        // 2. Kriterien (Fächer/Eigenschaften)
+        await criteriaCollection.insertMany([
+            // Lehrer
+            { id: 'ped', label: 'Pädagogik', type: 'main', categoryId: 'lehrer' },
+            { id: 'hum', label: 'Humor', type: 'main', categoryId: 'lehrer' },
+            { id: 'fair', label: 'Fairness', type: 'main', categoryId: 'lehrer' },
+            { id: 'know', label: 'Fachwissen', type: 'main', categoryId: 'lehrer' },
+            // Politiker
+            { id: 'glaub', label: 'Glaubwürdigkeit', type: 'main', categoryId: 'politiker' },
+            { id: 'rhet', label: 'Rhetorik', type: 'main', categoryId: 'politiker' },
+            { id: 'komp', label: 'Kompetenz', type: 'main', categoryId: 'politiker' },
+            { id: 'symp', label: 'Sympathie', type: 'sec', categoryId: 'politiker' },
+            // Promis
+            { id: 'ent', label: 'Entertainment', type: 'main', categoryId: 'promis' },
+            { id: 'style', label: 'Style', type: 'main', categoryId: 'promis' },
+            { id: 'vorbild', label: 'Vorbildfunktion', type: 'sec', categoryId: 'promis' }
+        ]);
+        console.log(`${LOG_PREFIX_SERVER} Human Grades Defaults initialisiert.`);
     }
 }
-// Einmalig beim Start ausführen
-seedSubjects().catch(console.error);
 
-// Hilfsfunktion: Durchschnitt dynamisch berechnen
-async function updateTeacherAverage(teacherId) {
-    const tId = new ObjectId(teacherId);
-    // Hole alle Bewertungen für diesen Lehrer
-    const ratings = await ratingsCollection.find({ teacherId: tId }).toArray();
+// Durchschnittsberechnung (Generisch)
+async function updateHumanAverage(humanId) {
+    const hId = new ObjectId(humanId);
+    const ratings = await ratingsCollection.find({ humanId: hId }).toArray();
     
     if (ratings.length === 0) {
-        await teachersCollection.updateOne({ _id: tId }, { $set: { averages: {}, totalAverage: 0, ratingCount: 0 } });
+        await humansCollection.updateOne({ _id: hId }, { $set: { averages: {}, totalAverage: 0, ratingCount: 0 } });
         return;
     }
 
-    // Summen und Anzahl pro Fach berechnen
-    const subjectStats = {}; // { 'mat': { sum: 10, count: 4 }, ... }
+    const criteriaStats = {}; 
     let totalSum = 0;
     let totalCount = 0;
 
     ratings.forEach(r => {
         if (!r.grades) return;
-        Object.keys(r.grades).forEach(subjectId => {
-            const grade = r.grades[subjectId];
+        Object.keys(r.grades).forEach(cId => {
+            const grade = r.grades[cId];
             if (grade >= 1 && grade <= 6) {
-                if (!subjectStats[subjectId]) subjectStats[subjectId] = { sum: 0, count: 0 };
-                subjectStats[subjectId].sum += grade;
-                subjectStats[subjectId].count += 1;
-                
-                // Für den Gesamt-Schnitt des Lehrers zählen wir jede einzelne Note
+                if (!criteriaStats[cId]) criteriaStats[cId] = { sum: 0, count: 0 };
+                criteriaStats[cId].sum += grade;
+                criteriaStats[cId].count += 1;
                 totalSum += grade;
                 totalCount += 1;
             }
         });
     });
 
-    // Durchschnitte pro Fach berechnen
     const averages = {};
-    Object.keys(subjectStats).forEach(sId => {
-        averages[sId] = subjectStats[sId].sum / subjectStats[sId].count;
+    Object.keys(criteriaStats).forEach(cId => {
+        averages[cId] = criteriaStats[cId].sum / criteriaStats[cId].count;
     });
 
     const totalAverage = totalCount > 0 ? (totalSum / totalCount) : 0;
 
-    await teachersCollection.updateOne(
-        { _id: tId },
+    await humansCollection.updateOne(
+        { _id: hId },
         { $set: { averages: averages, totalAverage: totalAverage, ratingCount: ratings.length } }
     );
 }
 
-// --- API ENDPOINTS ---
+// --- API ROUTES ---
 
-// 1. Fächer abrufen
-app.get('/api/school/subjects', async (req, res) => {
-    const subs = await subjectsCollection.find({}).sort({ label: 1 }).toArray();
-    res.json({ subjects: subs });
+// Kategorien & Kriterien
+app.get('/api/human/meta', async (req, res) => {
+    const [cats, crits] = await Promise.all([
+        categoriesCollection.find({}).toArray(),
+        criteriaCollection.find({}).toArray()
+    ]);
+    res.json({ categories: cats, criteria: crits });
 });
 
-// 2. Admin: Fach hinzufügen
-app.post('/api/school/admin/subjects', isAuthenticated, isAdmin, async (req, res) => {
-    const { label, type } = req.body;
-    // ID generieren aus Label (z.B. "Sozialwissenschaften" -> "sozialwissenschaften")
-    const id = label.toLowerCase().replace(/[^a-z0-9]/g, '').substring(0, 10);
-    
+// Admin: Kategorie erstellen
+app.post('/api/human/admin/categories', isAuthenticated, isAdmin, async (req, res) => {
+    const { label } = req.body;
+    const id = label.toLowerCase().replace(/[^a-z0-9]/g, '');
     try {
-        await subjectsCollection.insertOne({ id, label, type: type || 'pflicht' });
-        res.json({ message: "Fach hinzugefügt." });
-    } catch (e) { res.status(500).json({ error: "Fehler (Fach existiert evtl. schon)." }); }
+        await categoriesCollection.insertOne({ id, label });
+        res.json({ message: "Kategorie erstellt." });
+    } catch(e) { res.status(500).json({ error: "Fehler." }); }
 });
 
-// 3. Admin: Fach löschen
-app.delete('/api/school/admin/subjects/:id', isAuthenticated, isAdmin, async (req, res) => {
+// Admin: Kriterium erstellen
+app.post('/api/human/admin/criteria', isAuthenticated, isAdmin, async (req, res) => {
+    const { label, type, categoryId } = req.body;
+    const id = label.toLowerCase().replace(/[^a-z0-9]/g, '').substring(0,10) + "_" + Math.floor(Math.random()*1000);
     try {
-        await subjectsCollection.deleteOne({ id: req.params.id });
-        res.json({ message: "Fach gelöscht." });
-    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+        await criteriaCollection.insertOne({ id, label, type, categoryId });
+        res.json({ message: "Kriterium erstellt." });
+    } catch(e) { res.status(500).json({ error: "Fehler." }); }
 });
 
-// 4. Lehrer abrufen
-app.get('/api/school/teachers', async (req, res) => {
-    const teachers = await teachersCollection.find({}).sort({ name: 1 }).toArray();
-    res.json({ teachers });
+// Menschen laden
+app.get('/api/human/list', async (req, res) => {
+    const humans = await humansCollection.find({}).sort({ name: 1 }).toArray();
+    res.json({ humans });
 });
 
-// 5. Admin: Lehrer erstellen (Mit zugeordneten Fächern)
-app.post('/api/school/admin/teachers', isAuthenticated, isAdmin, async (req, res) => {
-    const { name, subjectIds } = req.body; // subjectIds = ['mat', 'inf', 'bio']
-    if (!name) return res.status(400).json({ error: "Name fehlt" });
+// Admin: Mensch erstellen
+app.post('/api/human/admin/humans', isAuthenticated, isAdmin, async (req, res) => {
+    const { name, categoryId, criteriaIds } = req.body;
+    if (!name || !categoryId) return res.status(400).json({ error: "Daten fehlen" });
 
-    const newTeacher = {
+    const newHuman = {
         name,
-        subjectIds: subjectIds || [], // Nur diese Fächer darf man bewerten
+        categoryId, // Z.B. 'politiker'
+        criteriaIds: criteriaIds || [],
         averages: {},
         totalAverage: 0,
         ratingCount: 0,
         createdAt: new Date()
     };
-    await teachersCollection.insertOne(newTeacher);
-    res.json({ message: "Lehrer angelegt." });
+    await humansCollection.insertOne(newHuman);
+    res.json({ message: "Mensch angelegt." });
 });
 
-// 6. Bewerten
-app.post('/api/school/rate', isAuthenticated, async (req, res) => {
-    const { teacherId, grades } = req.body;
+// Admin: Mensch bearbeiten
+app.put('/api/human/admin/humans/:id', isAuthenticated, isAdmin, async (req, res) => {
+    const { name, categoryId, criteriaIds } = req.body;
+    try {
+        await humansCollection.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { name, categoryId, criteriaIds } });
+        res.json({ message: "Update erfolgreich." });
+    } catch(e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// Admin: Mensch löschen
+app.delete('/api/human/admin/humans/:id', isAuthenticated, isAdmin, async (req, res) => {
+    const hId = new ObjectId(req.params.id);
+    await humansCollection.deleteOne({ _id: hId });
+    await ratingsCollection.deleteMany({ humanId: hId });
+    res.json({ message: "Gelöscht." });
+});
+
+// Bewerten
+app.post('/api/human/rate', isAuthenticated, async (req, res) => {
+    const { humanId, grades } = req.body;
     const userId = new ObjectId(req.session.userId);
 
-    // Validierung
-    const teacher = await teachersCollection.findOne({ _id: new ObjectId(teacherId) });
-    if (!teacher) return res.status(404).json({ error: "Lehrer nicht gefunden" });
+    const human = await humansCollection.findOne({ _id: new ObjectId(humanId) });
+    if (!human) return res.status(404).json({ error: "Person nicht gefunden" });
 
     const cleanGrades = {};
-    // Nur Noten speichern für Fächer, die der Lehrer auch hat
-    teacher.subjectIds.forEach(sId => {
-        if (grades[sId]) {
-            const val = parseInt(grades[sId]);
-            if (val >= 1 && val <= 6) cleanGrades[sId] = val;
+    // Nur erlaubte Kriterien speichern
+    human.criteriaIds.forEach(cId => {
+        if (grades[cId]) {
+            const val = parseInt(grades[cId]);
+            if (val >= 1 && val <= 6) cleanGrades[cId] = val;
         }
     });
 
-    if (Object.keys(cleanGrades).length === 0) return res.status(400).json({ error: "Keine gültigen Noten eingegeben." });
+    if (Object.keys(cleanGrades).length === 0) return res.status(400).json({ error: "Keine gültige Bewertung." });
 
     await ratingsCollection.updateOne(
-        { teacherId: teacher._id, userId: userId },
+        { humanId: human._id, userId: userId },
         { $set: { grades: cleanGrades, timestamp: new Date(), username: req.session.username } },
         { upsert: true }
     );
 
-    updateTeacherAverage(teacherId);
+    updateHumanAverage(humanId);
     res.json({ message: "Bewertung gespeichert." });
-});
-
-// 5b. Admin: Lehrer löschen
-app.delete('/api/school/admin/teachers/:id', isAuthenticated, isAdmin, async (req, res) => {
-    try {
-        const tId = new ObjectId(req.params.id);
-        // Lehrer löschen
-        const result = await teachersCollection.deleteOne({ _id: tId });
-        // Alle Bewertungen zu diesem Lehrer auch löschen (Aufräumen)
-        await ratingsCollection.deleteMany({ teacherId: tId });
-        
-        if (result.deletedCount === 0) return res.status(404).json({ error: "Lehrer nicht gefunden." });
-        res.json({ message: "Lehrer und zugehörige Bewertungen gelöscht." });
-    } catch (e) { res.status(500).json({ error: "Fehler beim Löschen." }); }
-});
-
-// 5c. Admin: Lehrer bearbeiten (Name & Fächer)
-app.put('/api/school/admin/teachers/:id', isAuthenticated, isAdmin, async (req, res) => {
-    const { name, subjectIds } = req.body;
-    try {
-        const tId = new ObjectId(req.params.id);
-        
-        await teachersCollection.updateOne(
-            { _id: tId },
-            { $set: { name: name, subjectIds: subjectIds || [] } }
-        );
-        res.json({ message: "Lehrer aktualisiert." });
-    } catch (e) { res.status(500).json({ error: "Fehler beim Aktualisieren." }); }
-});
-
-// Notfall-Button: Fächer zurücksetzen/erzwingen
-app.post('/api/school/admin/force-seed-subjects', isAuthenticated, isAdmin, async (req, res) => {
-    try {
-        // Lösche alle existierenden Fächer
-        await subjectsCollection.deleteMany({});
-        
-        // Liste der Fächer
-        const defaults = [
-            { id: 'rel', label: 'Religionslehre', type: 'pflicht' },
-            { id: 'deu', label: 'Deutsch', type: 'pflicht' },
-            { id: 'mat', label: 'Mathematik', type: 'pflicht' },
-            { id: 'eng', label: 'Englisch', type: 'pflicht' },
-            { id: 'bio', label: 'Biologie', type: 'pflicht' },
-            { id: 'spo', label: 'Sport', type: 'pflicht' },
-            { id: 'inf', label: 'Informatik', type: 'wahl' },
-            { id: 'tec', label: 'Technik', type: 'wahl' },
-            { id: 'fra', label: 'Französisch', type: 'wahl' },
-            { id: 'ndl', label: 'Niederländisch', type: 'wahl' },
-            { id: 'phy', label: 'Physik', type: 'pflicht' },
-            { id: 'che', label: 'Chemie', type: 'pflicht' },
-            { id: 'art', label: 'Kunst', type: 'pflicht' },
-            { id: 'mus', label: 'Musik', type: 'pflicht' },
-            { id: 'pol', label: 'Politik', type: 'pflicht' },
-            { id: 'geo', label: 'Erdkunde', type: 'pflicht' },
-            { id: 'his', label: 'Geschichte', type: 'pflicht' }
-        ];
-        
-        await subjectsCollection.insertMany(defaults);
-        res.json({ message: "Alle Fächer wurden erfolgreich neu angelegt." });
-    } catch (e) {
-        console.error(e);
-        res.status(500).json({ error: "Fehler beim Reset." });
-    }
 });
 
 app.use((req, res) => {
