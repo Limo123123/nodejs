@@ -3773,32 +3773,57 @@ async function generateAiNews(force = false) {
     const contextData = await gatherNewsContext();
     console.log(`${LOG_PREFIX_SERVER} [LNN] Generiere News (Force: ${force})...`);
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+    // HIER DEIN GEWÜNSCHTES MODELL:
+    const modelName = "gemini-2.5-flash"; 
+
+    // URL Aufbau für v1beta
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
+    
     const prompt = `${contextData}
     Aufgabe: Schreibe einen kurzen, witzigen News-Artikel (max. 40 Wörter) als "Breaking News" für das "Limo News Network". 
     Stil: Boulevard-Zeitung, etwas übertrieben, satirisch.
     Format: JSON mit den Feldern "headline" und "content". (Antworte NUR mit dem JSON).
     Sprache: Deutsch.`;
 
-    const response = await axios.post(url, { contents: [{ parts: [{ text: prompt }] }] });
-    let textResponse = response.data.candidates[0].content.parts[0].text;
-    
-    // JSON Cleaning
-    textResponse = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
-    const article = JSON.parse(textResponse);
+    try {
+        const response = await axios.post(url, { 
+            contents: [{ parts: [{ text: prompt }] }] 
+        });
 
-    // Speichern
-    const newEntry = {
-        headline: article.headline,
-        content: article.content,
-        author: "LNN AI Bot",
-        category: "Community",
-        createdAt: new Date(),
-        likes: 0
-    };
-    await newsCollection.insertOne(newEntry);
-    console.log(`${LOG_PREFIX_SERVER} [LNN] News veröffentlicht: "${article.headline}"`);
-    return newEntry;
+        if (!response.data || !response.data.candidates || !response.data.candidates[0]) {
+            throw new Error("Keine Antwort von Gemini erhalten.");
+        }
+
+        let textResponse = response.data.candidates[0].content.parts[0].text;
+        
+        // JSON Cleaning
+        textResponse = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
+        
+        let article;
+        try {
+            article = JSON.parse(textResponse);
+        } catch (jsonErr) {
+            console.warn(`${LOG_PREFIX_SERVER} [LNN] KI hat kein valides JSON geliefert. Versuche Fallback.`);
+            article = { headline: "Limo News Update", content: textResponse };
+        }
+
+        // Speichern
+        const newEntry = {
+            headline: article.headline,
+            content: article.content,
+            author: "LNN AI Bot",
+            category: "Community",
+            createdAt: new Date(),
+            likes: 0
+        };
+        await newsCollection.insertOne(newEntry);
+        console.log(`${LOG_PREFIX_SERVER} [LNN] News veröffentlicht: "${article.headline}"`);
+        return newEntry;
+
+    } catch (apiErr) {
+        console.error(`${LOG_PREFIX_SERVER} [LNN] Gemini API Fehler:`, apiErr.response ? apiErr.response.data : apiErr.message);
+        throw new Error("Fehler bei der KI-Generierung (Modell: " + modelName + ")");
+    }
 }
 
 // Job starten
