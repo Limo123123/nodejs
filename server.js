@@ -3877,6 +3877,103 @@ app.delete('/api/admin/news/:id', isAuthenticated, isAdmin, async (req, res) => 
     }
 });
 
+// =========================================================
+// === MASTER ADMIN PANEL API ===
+// =========================================================
+
+// --- USER MANAGEMENT ---
+
+// Alle User laden
+app.get('/api/admin/users', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const users = await usersCollection.find({}, { projection: { password: 0 } }).toArray();
+        res.json({ users });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// User bearbeiten (Geld, Tokens, Admin-Status)
+app.put('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
+    const { balance, tokens, isAdmin: makeAdmin } = req.body;
+    try {
+        await usersCollection.updateOne(
+            { _id: new ObjectId(req.params.id) },
+            { $set: { 
+                balance: parseFloat(balance), 
+                tokens: parseInt(tokens),
+                isAdmin: makeAdmin 
+            }}
+        );
+        res.json({ message: "User geupdated." });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// User Passwort Reset
+app.post('/api/admin/users/:id/reset-pw', isAuthenticated, isAdmin, async (req, res) => {
+    const { newPassword } = req.body;
+    if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: "Passwort zu kurz." });
+    
+    try {
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+        await usersCollection.updateOne(
+            { _id: new ObjectId(req.params.id) },
+            { $set: { password: hashedPassword } }
+        );
+        res.json({ message: "Passwort geändert." });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// User löschen
+app.delete('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        await usersCollection.deleteOne({ _id: new ObjectId(req.params.id) });
+        // Optional: Auch Bankdaten/Inventar des Users löschen
+        res.json({ message: "User gelöscht." });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// --- PRODUCT MANAGEMENT ---
+
+// Produkte laden
+app.get('/api/admin/products', isAuthenticated, isAdmin, async (req, res) => {
+    const products = await productsCollection.find({}).toArray();
+    res.json({ products });
+});
+
+// Produkt bearbeiten/erstellen
+app.post('/api/admin/products', isAuthenticated, isAdmin, async (req, res) => {
+    const { id, name, price, description, stock, image, _id } = req.body;
+    const prodData = {
+        id, name, description, image,
+        price: parseFloat(price),
+        stock: parseInt(stock) || 999
+    };
+
+    try {
+        if (_id) {
+            // Update
+            await productsCollection.updateOne({ _id: new ObjectId(_id) }, { $set: prodData });
+        } else {
+            // Create
+            await productsCollection.insertOne(prodData);
+        }
+        res.json({ message: "Produkt gespeichert." });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// Produkt löschen
+app.delete('/api/admin/products/:id', isAuthenticated, isAdmin, async (req, res) => {
+    await productsCollection.deleteOne({ _id: new ObjectId(req.params.id) });
+    res.json({ message: "Produkt gelöscht." });
+});
+
+// --- SYSTEM TOOLS ---
+
+// Anti-Cheat manuell auslösen
+app.post('/api/admin/system/normalize', isAuthenticated, isAdmin, async (req, res) => {
+    const report = await normalizeExtremeBalances();
+    res.json(report);
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
