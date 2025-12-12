@@ -124,6 +124,7 @@ let portfoliosCollection, transactionsCollection;
 let dontBlameMeCollection;
 let humansCollection, ratingsCollection, criteriaCollection, categoriesCollection;
 let bankTransactionsCollection;
+let newsCollection;
 
 // ==============================================================================
 // === NEU: AUTOMATISIERTE SICHERHEITS- & REPARATURFUNKTIONEN ====================
@@ -596,6 +597,7 @@ MongoClient.connect(mongoUri)
         portfoliosCollection = db.collection('portfolios');
         transactionsCollection = db.collection('transactions');
         ideasCollection = db.collection('ideas');
+		newsCollection = db.collection('news');
         
         // NEU: Human Grades Collections
         humansCollection = db.collection('humans');      // Früher teachers
@@ -3716,6 +3718,144 @@ app.get('/api/bank/users/search', isAuthenticated, async (req, res) => {
         console.error(e);
         res.status(500).json({ error: "Suchfehler." });
     }
+});
+
+// =========================================================
+// === LIMO NEWS NETWORK (LNN) MIT GEMINI AI ===
+// =========================================================
+
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const NEWS_INTERVAL_MS = 30 * 60 * 1000; // Alle 30 Minuten prüfen
+
+// Hilfsfunktion: Prüfen, ob im System was los war (letzte 30 Min)
+async function checkSystemActivity() {
+    const threshold = new Date(Date.now() - NEWS_INTERVAL_MS);
+    
+    // Prüfe die wichtigsten Collections auf neue Einträge
+    const [newRatings, newOrders, newMessages, newPosts] = await Promise.all([
+        ratingsCollection.countDocuments({ timestamp: { $gt: threshold } }),
+        ordersCollection.countDocuments({ date: { $gt: threshold } }),
+        limMessagesCollection.countDocuments({ timestamp: { $gt: threshold } }),
+        dontBlameMeCollection.countDocuments({ createdAt: { $gt: threshold } })
+    ]);
+
+    return {
+        active: (newRatings + newOrders + newMessages + newPosts) > 0,
+        stats: { newRatings, newOrders, newMessages, newPosts }
+    };
+}
+
+// Hilfsfunktion: Kontext für die AI sammeln
+async function gatherNewsContext() {
+    // Hole die allerneuesten Ereignisse für den Prompt
+    const lastRating = await ratingsCollection.find().sort({ timestamp: -1 }).limit(1).toArray();
+    const lastOrder = await ordersCollection.find().sort({ date: -1 }).limit(1).toArray();
+    const lastPost = await dontBlameMeCollection.find().sort({ createdAt: -1 }).limit(1).toArray();
+    
+    let context = "Hier sind die aktuellen Ereignisse im Limo-Universum (eine Online-Community mit Shop, Bank und Schule):";
+    
+    if (lastRating.length > 0) {
+        // Human Name holen (Join wäre besser, aber wir machen es simpel)
+        const human = await humansCollection.findOne({ _id: lastRating[0].humanId });
+        if(human) context += `\n- Im Human Grades System wurde "${human.name}" bewertet.`;
+    }
+    if (lastOrder.length > 0) {
+        context += `\n- User "${lastOrder[0].username}" hat im Shop eingekauft (Wert: $${lastOrder[0].total.toFixed(2)}).`;
+    }
+    if (lastPost.length > 0) {
+        context += `\n- Im 'Don't Blame Me' Bereich gab es ein Geständnis: "${lastPost[0].reason}".`;
+    }
+    
+    return context;
+}
+
+// AI News Generator Job
+if (GEMINI_API_KEY) {
+    setInterval(async () => {
+        try {
+            console.log(`${LOG_PREFIX_SERVER} [LNN] Prüfe Aktivität für News...`);
+            const activity = await checkSystemActivity();
+
+            if (!activity.active) {
+                console.log(`${LOG_PREFIX_SERVER} [LNN] Keine Aktivität. Keine News generiert.`);
+                return;
+            }
+
+            console.log(`${LOG_PREFIX_SERVER} [LNN] Aktivität erkannt! Generiere News...`);
+            const contextData = await gatherNewsContext();
+
+            // Prompt an Gemini
+            const prompt = `
+                ${contextData}
+                
+                Aufgabe: Schreibe einen kurzen, witzigen News-Artikel (max. 40 Wörter) als "Breaking News" für das "Limo News Network". 
+                Stil: Boulevard-Zeitung, etwas übertrieben oder satirisch.
+                Format: JSON mit den Feldern "headline" und "content".
+                Sprache: Deutsch.
+            `;
+
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+            const response = await axios.post(url, {
+                contents: [{ parts: [{ text: prompt }] }]
+            });
+
+            const textResponse = response.data.candidates[0].content.parts[0].text;
+            
+            // Versuchen, JSON aus dem Text zu extrahieren (falls Gemini Markdown ```json drumrum macht)
+            let jsonString = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
+            const article = JSON.parse(jsonString);
+
+            // In DB speichern
+            await newsCollection.insertOne({
+                headline: article.headline,
+                content: article.content,
+                author: "LNN AI Bot",
+                category: "Community",
+                createdAt: new Date(),
+                likes: 0
+            });
+
+            console.log(`${LOG_PREFIX_SERVER} [LNN] News veröffentlicht: "${article.headline}"`);
+
+        } catch (err) {
+            console.error(`${LOG_PREFIX_SERVER} [LNN] Fehler bei News-Generierung:`, err.message);
+        }
+    }, NEWS_INTERVAL_MS);
+} else {
+    console.warn(`${LOG_PREFIX_SERVER} [LNN] Kein GEMINI_API_KEY gefunden. Auto-News deaktiviert.`);
+}
+
+// --- API ENDPOINTS ---
+
+// News abrufen
+app.get('/api/news', async (req, res) => {
+    try {
+        const news = await newsCollection.find({}).sort({ createdAt: -1 }).limit(20).toArray();
+        res.json({ news });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// News Liken (Trinkgeld-Feature könnte man hier anbauen)
+app.post('/api/news/:id/like', isAuthenticated, async (req, res) => {
+    try {
+        await newsCollection.updateOne({ _id: new ObjectId(req.params.id) }, { $inc: { likes: 1 } });
+        res.json({ message: "Geliked!" });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// Admin: News manuell schreiben
+app.post('/api/admin/news', isAuthenticated, isAdmin, async (req, res) => {
+    const { headline, content } = req.body;
+    if(!headline || !content) return res.status(400).json({error: "Fehlende Daten"});
+    
+    await newsCollection.insertOne({
+        headline, content,
+        author: req.session.username, // Echter Admin Name
+        category: "Offiziell",
+        createdAt: new Date(),
+        likes: 0
+    });
+    res.json({ message: "Artikel veröffentlicht." });
 });
 
 app.use((req, res) => {
