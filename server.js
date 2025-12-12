@@ -3865,6 +3865,18 @@ app.post('/api/admin/news/trigger-ai', isAuthenticated, isAdmin, async (req, res
     }
 });
 
+// Admin: News löschen
+app.delete('/api/admin/news/:id', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const result = await newsCollection.deleteOne({ _id: new ObjectId(req.params.id) });
+        if (result.deletedCount === 0) return res.status(404).json({ error: "Artikel nicht gefunden." });
+        res.json({ message: "Artikel erfolgreich gelöscht." });
+    } catch (e) { 
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Löschen." }); 
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
