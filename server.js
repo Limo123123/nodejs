@@ -123,8 +123,8 @@ let ideasCollection;
 let auctionsCollection;
 let portfoliosCollection, transactionsCollection;
 let dontBlameMeCollection;
-// NEUE NAMEN:
 let humansCollection, ratingsCollection, criteriaCollection, categoriesCollection;
+let bankTransactionsCollection;
 
 // ==============================================================================
 // === NEU: AUTOMATISIERTE SICHERHEITS- & REPARATURFUNKTIONEN ====================
@@ -580,7 +580,8 @@ MongoClient.connect(mongoUri)
         ratingsCollection = db.collection('ratings');
         criteriaCollection = db.collection('criteria');  // Früher subjects
         categoriesCollection = db.collection('categories');
-
+	
+		bankTransactionsCollection = db.collection('bankTransactions');
         console.log(`${LOG_PREFIX_SERVER} ✅ MongoDB verbunden & alle Collections initialisiert.`);
 
         // --- 2. Indizes & Reparaturen ---
@@ -3594,6 +3595,83 @@ app.delete('/api/human/admin/ratings/:id', isAuthenticated, isAdmin, async (req,
     } catch(e) { 
         console.error(e);
         res.status(500).json({ error: "Fehler beim Löschen." }); 
+    }
+});
+
+// =========================================================
+// === LIMO BANKING API ===
+// =========================================================
+
+// 1. Transaktionshistorie abrufen
+app.get('/api/bank/transactions', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        // Suche Transaktionen, wo der User Sender ODER Empfänger war
+        const history = await bankTransactionsCollection.find({
+            $or: [ { fromId: userId }, { toId: userId } ]
+        }).sort({ timestamp: -1 }).limit(50).toArray();
+        
+        res.json({ transactions: history });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Laden der Umsätze." });
+    }
+});
+
+// 2. Überweisung tätigen (Geld oder Tokens)
+app.post('/api/bank/transfer', isAuthenticated, async (req, res) => {
+    const { recipientName, amount, type, reason } = req.body; // type: 'money' oder 'token'
+    const senderId = new ObjectId(req.session.userId);
+    const senderName = req.session.username;
+
+    if (!recipientName || !amount || amount <= 0) return res.status(400).json({ error: "Ungültige Daten." });
+    if (recipientName.toLowerCase() === senderName.toLowerCase()) return res.status(400).json({ error: "Keine Überweisung an sich selbst." });
+
+    const client = db.client;
+    const session = client.startSession();
+
+    try {
+        await session.withTransaction(async () => {
+            // 1. Sender prüfen
+            const sender = await usersCollection.findOne({ _id: senderId }, { session });
+            const recipient = await usersCollection.findOne({ username: recipientName.toLowerCase() }, { session });
+
+            if (!recipient) throw new Error("Empfänger nicht gefunden.");
+
+            // 2. Guthaben prüfen & abziehen
+            if (type === 'token') {
+                if ((sender.tokens || 0) < amount) throw new Error("Nicht genügend Tokens.");
+                await usersCollection.updateOne({ _id: senderId }, { $inc: { tokens: -amount } }, { session });
+                await usersCollection.updateOne({ _id: recipient._id }, { $inc: { tokens: amount } }, { session });
+            } else {
+                // Geld (USD)
+                if (sender.balance < amount && !sender.infinityMoney && !sender.isAdmin) throw new Error("Nicht genügend Guthaben.");
+                
+                // Bei Infinity Money wird nichts abgezogen, aber beim Empfänger draufgerechnet
+                if (!sender.infinityMoney && !sender.isAdmin) {
+                    await usersCollection.updateOne({ _id: senderId }, { $inc: { balance: -amount } }, { session });
+                }
+                await usersCollection.updateOne({ _id: recipient._id }, { $inc: { balance: amount } }, { session });
+            }
+
+            // 3. Loggen
+            await bankTransactionsCollection.insertOne({
+                fromId: senderId,
+                fromName: senderName,
+                toId: recipient._id,
+                toName: recipient.username,
+                amount: parseFloat(amount),
+                type: type, // 'money' | 'token'
+                reason: reason || "Überweisung",
+                timestamp: new Date()
+            }, { session });
+        });
+
+        res.json({ message: "Überweisung erfolgreich!" });
+    } catch (e) {
+        res.status(400).json({ error: e.message || "Transaktion fehlgeschlagen." });
+    } finally {
+        await session.endSession();
     }
 });
 
