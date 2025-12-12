@@ -78,7 +78,6 @@ const allowedOrigins = [
     frontendDevUrlHttp, 
     frontendDevUrlHttps,
     'https://tcg.limazon.v6.rocks',
-	'https://app.limazon.v6.rocks'
 ];
 if (frontendProdUrl) { allowedOrigins.push(frontendProdUrl); }
 console.log(`${LOG_PREFIX_SERVER} Erlaubte CORS Origins:`, allowedOrigins);
@@ -3672,6 +3671,27 @@ app.post('/api/bank/transfer', isAuthenticated, async (req, res) => {
         res.status(400).json({ error: e.message || "Transaktion fehlgeschlagen." });
     } finally {
         await session.endSession();
+    }
+});
+
+// 3. User suchen (für Überweisungen)
+app.get('/api/bank/users/search', isAuthenticated, async (req, res) => {
+    const { term } = req.query;
+    if (!term || typeof term !== 'string' || term.length < 2) {
+        return res.json({ users: [] });
+    }
+
+    try {
+        // Suche User, die mit 'term' anfangen oder ihn enthalten (Case insensitive)
+        const foundUsers = await usersCollection.find(
+            { username: { $regex: term, $options: 'i' } },
+            { projection: { username: 1, _id: 0 } } // Nur Username, keine IDs/Daten leaken
+        ).limit(5).toArray();
+
+        res.json({ users: foundUsers });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Suchfehler." });
     }
 });
 
