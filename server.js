@@ -206,41 +206,64 @@ async function convertProductsToStocks() {
 }
 
 /**
- * Findet Benutzer mit extrem hohen oder fehlerhaften Kontoständen und setzt sie
- * auf einen sicheren Maximalwert zurück, um Datenkorruption und Exploits zu verhindern.
+ * Findet Benutzer mit extrem hohen oder fehlerhaften Kontoständen (Geld & Tokens)
+ * und setzt sie auf einen sicheren Maximalwert zurück (100 Billionen).
+ * Verhindert "e+" Notation und Layout-Fehler.
  */
 async function normalizeExtremeBalances() {
     try {
-        console.log(`${LOG_PREFIX_SECURITY} Suche nach extremen oder fehlerhaften Kontoständen...`);
-        const rozsahy_limit = 9999999999999999;
-        const infinity_reset_value = 999999999999999;
-        const default_reset_value = 5000;
+        // Das harte Limit, das du wolltest (100 Billionen)
+        const SAFE_MAX = 100000000000000; 
 
+        console.log(`${LOG_PREFIX_SECURITY} Prüfe auf Werte über ${SAFE_MAX} (oder 'Infinity')...`);
+
+        // Finde User, die entweder zu viel Geld ODER zu viele Tokens haben
+        // Oder deren Werte "Infinity" sind (MongoDB speichert Infinity manchmal als speziellen Wert)
         const usersToFix = await usersCollection.find({
-            $or: [{ balance: { $type: "string" } }, { balance: { $gt: rozsahy_limit } }]
+            $or: [
+                { balance: { $gt: SAFE_MAX } },
+                { balance: Infinity },
+                { tokens: { $gt: SAFE_MAX } },
+                { tokens: Infinity }
+            ]
         }).toArray();
 
         if (usersToFix.length === 0) {
-            console.log(`${LOG_PREFIX_SECURITY} ✅ Keine extremen Kontostände gefunden. Alles in Ordnung.`);
-            return { message: "Keine Kontostände zum Normalisieren gefunden.", modifiedCount: 0 };
+            // console.log(`${LOG_PREFIX_SECURITY} ✅ Keine extremen Werte gefunden.`);
+            return { message: "Werte normal.", modifiedCount: 0 };
         }
 
-        console.warn(`${LOG_PREFIX_SECURITY} ❗ ${usersToFix.length} Benutzer mit extremen/fehlerhaften Kontoständen gefunden. Starte Normalisierung...`);
+        console.warn(`${LOG_PREFIX_SECURITY} ❗ ${usersToFix.length} Benutzer mit unrealistischen Werten gefunden. Normalisiere...`);
+
         const bulkOps = usersToFix.map(user => {
-            const newBalance = (user.unlockedInfinityMoney || user.isAdmin) ? infinity_reset_value : default_reset_value;
+            const updates = {};
+            
+            // Prüfe Geld
+            if (user.balance > SAFE_MAX || user.balance === Infinity) {
+                updates.balance = SAFE_MAX;
+            }
+            
+            // Prüfe Tokens
+            if (user.tokens > SAFE_MAX || user.tokens === Infinity) {
+                updates.tokens = SAFE_MAX;
+            }
+
             return {
                 updateOne: {
                     filter: { _id: user._id },
-                    update: { $set: { balance: newBalance } }
+                    update: { $set: updates }
                 }
             };
         });
+
         const result = await usersCollection.bulkWrite(bulkOps);
-        console.log(`${LOG_PREFIX_SECURITY} ✅ Normalisierung abgeschlossen. ${result.modifiedCount} Kontostände zurückgesetzt.`);
-        return { message: `${result.modifiedCount} Kontostände wurden auf einen sicheren Wert zurückgesetzt.`, modifiedCount: result.modifiedCount };
+        console.log(`${LOG_PREFIX_SECURITY} ✅ Normalisierung abgeschlossen. ${result.modifiedCount} User korrigiert.`);
+        
+        return { message: `${result.modifiedCount} Kontostände/Tokens wurden auf das Limit gesetzt.`, modifiedCount: result.modifiedCount };
+
     } catch (err) {
-        console.error(`${LOG_PREFIX_SECURITY} ❌ FEHLER bei der Kontostand-Normalisierung:`, err);
-        return { error: "Serverfehler bei der Kontostand-Normalisierung." };
+        console.error(`${LOG_PREFIX_SECURITY} ❌ FEHLER bei der Normalisierung:`, err);
+        return { error: "Serverfehler bei der Normalisierung." };
     }
 }
 
