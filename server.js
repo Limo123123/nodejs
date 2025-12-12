@@ -3923,12 +3923,44 @@ app.post('/api/admin/users/:id/reset-pw', isAuthenticated, isAdmin, async (req, 
 });
 
 // User löschen
+// --- USER MANAGEMENT: LÖSCHEN MIT CLEANUP ---
 app.delete('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
     try {
-        await usersCollection.deleteOne({ _id: new ObjectId(req.params.id) });
-        // Optional: Auch Bankdaten/Inventar des Users löschen
-        res.json({ message: "User gelöscht." });
-    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+        const uId = new ObjectId(req.params.id);
+        
+        // 1. User selbst löschen
+        const userResult = await usersCollection.deleteOne({ _id: uId });
+        
+        if (userResult.deletedCount === 0) return res.status(404).json({ error: "User nicht gefunden" });
+
+        // 2. Alles aufräumen, was dem User gehörte
+        console.log(`${LOG_PREFIX_SERVER} 🧹 Starte Cleanup für User ${uId}...`);
+
+        await Promise.all([
+            // Inventar & Portfolio löschen
+            inventoriesCollection.deleteMany({ userId: uId }),
+            portfoliosCollection.deleteMany({ userId: uId }),
+            
+            // Erstellte Inhalte löschen
+            wheelsCollection.deleteMany({ creatorId: uId }), // Glücksräder
+            auctionsCollection.deleteMany({ sellerId: uId }), // Auktionen
+            ideasCollection.deleteMany({ submitterId: uId }), // Ideenbox
+            
+            // Soziale Interaktionen löschen
+            ratingsCollection.deleteMany({ userId: uId }), // Human Grades Bewertungen
+            dontBlameMeCollection.deleteMany({ authorId: uId }), // Beichten (optional, wenn du sie behalten willst, Zeile löschen)
+            
+            // Chat-Einstellungen
+            limUserChatSettingsCollection.deleteMany({ userId: uId })
+        ]);
+
+        console.log(`${LOG_PREFIX_SERVER} ✅ User ${uId} und alle verknüpften Daten gelöscht.`);
+        res.json({ message: "User und alle verknüpften Daten wurden restlos gelöscht." });
+
+    } catch (e) { 
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Löschen." }); 
+    }
 });
 
 // --- PRODUCT MANAGEMENT ---
@@ -3960,10 +3992,45 @@ app.post('/api/admin/products', isAuthenticated, isAdmin, async (req, res) => {
     } catch (e) { res.status(500).json({ error: "Fehler." }); }
 });
 
-// Produkt löschen
+// --- PRODUCT MANAGEMENT: LÖSCHEN MIT CLEANUP ---
 app.delete('/api/admin/products/:id', isAuthenticated, isAdmin, async (req, res) => {
-    await productsCollection.deleteOne({ _id: new ObjectId(req.params.id) });
-    res.json({ message: "Produkt gelöscht." });
+    try {
+        const pId = new ObjectId(req.params.id);
+        
+        // Zuerst das Produkt holen, um die String-ID (z.B. "411310" oder "apple") zu bekommen
+        const product = await productsCollection.findOne({ _id: pId });
+        
+        if (!product) return res.status(404).json({ error: "Produkt nicht gefunden." });
+
+        const stringId = product.id; // Das ist die ID, die in Portfolios/Inventar genutzt wird
+
+        // 1. Produkt löschen
+        await productsCollection.deleteOne({ _id: pId });
+
+        // 2. Überall entfernen, wo dieses Produkt referenziert wird
+        console.log(`${LOG_PREFIX_SERVER} 🧹 Starte Cleanup für Produkt ${stringId} (${product.name})...`);
+
+        await Promise.all([
+            // Aus Inventaren aller User entfernen
+            inventoriesCollection.deleteMany({ productId: stringId }),
+            
+            // Aus Portfolios (Aktien) aller User entfernen
+            portfoliosCollection.deleteMany({ productId: stringId }),
+            
+            // Laufende Auktionen mit diesem Produkt löschen
+            auctionsCollection.deleteMany({ productId: stringId }),
+            
+            // Transaktionshistorie bereinigen (optional, aber sauberer)
+            transactionsCollection.deleteMany({ productId: stringId })
+        ]);
+
+        console.log(`${LOG_PREFIX_SERVER} ✅ Produkt ${stringId} und Referenzen gelöscht.`);
+        res.json({ message: "Produkt und alle Bestände/Aktien wurden gelöscht." });
+
+    } catch (e) { 
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Löschen." }); 
+    }
 });
 
 // --- SYSTEM TOOLS ---
