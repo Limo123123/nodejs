@@ -3963,6 +3963,28 @@ app.delete('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) =>
     }
 });
 
+// Admin: User bestrafen (Geld abziehen, erlaubt Minus!)
+app.post('/api/admin/users/:id/fine', isAuthenticated, isAdmin, async (req, res) => {
+    const { amount, reason } = req.body;
+    const fine = parseFloat(amount);
+
+    if (!fine || fine <= 0) return res.status(400).json({ error: "Betrag muss positiv sein." });
+
+    try {
+        // 1. Geld abziehen (ohne Prüfung auf 0 -> Dispo erzwingen!)
+        await usersCollection.updateOne(
+            { _id: new ObjectId(req.params.id) },
+            { $inc: { balance: -fine } }
+        );
+
+        // 2. Optional: Nachricht an User (könnte man ins Nachrichtensystem bauen)
+        // Hier loggen wir es nur
+        console.log(`${LOG_PREFIX_SERVER} 👮 User ${req.params.id} wurde um $${fine} bestraft. Grund: ${reason}`);
+
+        res.json({ message: "Strafe verhängt. User ist jetzt ärmer." });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
 // --- PRODUCT MANAGEMENT ---
 
 // Produkte laden
