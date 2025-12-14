@@ -4327,7 +4327,9 @@ app.get('/api/system/stats', async (req, res) => {
             usersCollection.countDocuments({}),
             productsCollection.countDocuments({}),
             wheelsCollection.countDocuments({}),
-            (typeof teachersCollection !== 'undefined' ? teachersCollection.countDocuments({}) : 0),
+            
+            humansCollection.countDocuments({}),
+            
             auctionsCollection.countDocuments({})
         ]);
 
