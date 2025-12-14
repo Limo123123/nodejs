@@ -4055,8 +4055,8 @@ const ACHIEVEMENT_DEFINITIONS = [
       check: (u) => (new Date() - u._id.getTimestamp()) / (1000 * 60 * 60 * 24) >= 7 },
 
     // --- 💰 REICHTUM (MONEY) ---
-    { id: 'piggy', icon: '🐷', title: 'Sparschwein', desc: 'Habe $5.000 auf dem Konto.', 
-      check: (u) => u.balance >= 5000 },
+    { id: 'piggy', icon: '🐷', title: 'Sparschwein', desc: 'Habe $7.500 auf dem Konto.', 
+      check: (u) => u.balance >= 7500 }, // Erhöht, damit Startkapital nicht reicht
     { id: 'middle_class', icon: '🏠', title: 'Mittelstand', desc: 'Besitze $50.000.', 
       check: (u) => u.balance >= 50000 },
     { id: 'rich', icon: '💸', title: 'Bonze', desc: 'Der erste Schritt: $100.000.', 
@@ -4177,22 +4177,37 @@ async function updateUserAchievements(user) {
     return [];
 }
 
-// API: Profil laden
+// API: Profil laden (Mit Inventar & Privacy Check)
 app.get('/api/profile/:username', async (req, res) => {
     try {
         const targetUsername = req.params.username;
-        // Case Insensitive Suche
         let user = await usersCollection.findOne({ username: { $regex: new RegExp(`^${targetUsername}$`, 'i') } });
 
         if (!user) return res.status(404).json({ error: "User nicht gefunden" });
 
-        // Update triggern (checkt automatisch auf neue Achievements beim Besuchen)
+        // Update triggern
         await updateUserAchievements(user);
-        
-        // Neu laden für aktuelle Daten
-        user = await usersCollection.findOne({ _id: user._id });
+        user = await usersCollection.findOne({ _id: user._id }); // Reload
 
-        // Frontend-Daten aufbereiten (Funktionen entfernen)
+        // --- Inventar Logik ---
+        let inventory = [];
+        const requestingUserId = req.session.userId;
+        const isOwner = requestingUserId && (req.session.userId === user._id.toString());
+        
+        // Inventar zeigen, wenn: Es mein eigenes ist ODER der User es auf "public" gestellt hat
+        if (isOwner || user.isInventoryPublic) {
+            inventory = await inventoriesCollection.aggregate([
+                { $match: { userId: user._id, quantityOwned: { $gt: 0 } } },
+                { $lookup: { from: productsCollectionName, localField: "productId", foreignField: "id", as: "details" } },
+                { $unwind: "$details" },
+                { $project: { 
+                    name: "$details.name", 
+                    quantity: "$quantityOwned", 
+                    image: "$details.image" 
+                }}
+            ]).toArray();
+        }
+
         const frontendAchievements = ACHIEVEMENT_DEFINITIONS.map(({check, ...keep}) => keep);
 
         const publicProfile = {
@@ -4201,10 +4216,14 @@ app.get('/api/profile/:username', async (req, res) => {
             joinDate: user._id.getTimestamp(),
             achievements: user.achievements || [],
             isAdmin: user.isAdmin,
-            badgesCount: (user.achievements || []).length
+            badgesCount: (user.achievements || []).length,
+            // Neue Felder:
+            isInventoryPublic: !!user.isInventoryPublic,
+            inventory: inventory,
+            hideInventory: (!isOwner && !user.isInventoryPublic) // Flag für Frontend: "Ist versteckt"
         };
 
-        res.json({ profile: publicProfile, allAchievements: frontendAchievements });
+        res.json({ profile: publicProfile, allAchievements: frontendAchievements, isOwner });
 
     } catch (e) {
         console.error(e);
@@ -4212,17 +4231,22 @@ app.get('/api/profile/:username', async (req, res) => {
     }
 });
 
-// API: Profil Bio bearbeiten
+// API: Profil bearbeiten (Bio & Privacy)
 app.post('/api/profile/edit', isAuthenticated, async (req, res) => {
-    const { bio } = req.body;
-    if (bio && bio.length > 200) return res.status(400).json({ error: "Bio zu lang (max 200 Zeichen)." });
+    const { bio, isInventoryPublic } = req.body;
+    
+    if (bio && bio.length > 200) return res.status(400).json({ error: "Bio zu lang." });
 
     try {
+        const updateData = {};
+        if (bio !== undefined) updateData.bio = bio;
+        if (isInventoryPublic !== undefined) updateData.isInventoryPublic = isInventoryPublic;
+
         await usersCollection.updateOne(
             { _id: new ObjectId(req.session.userId) },
-            { $set: { bio: bio || "" } }
+            { $set: updateData }
         );
-        res.json({ message: "Profil gespeichert." });
+        res.json({ message: "Gespeichert." });
     } catch (e) { res.status(500).json({ error: "Fehler." }); }
 });
 
