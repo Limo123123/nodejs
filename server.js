@@ -4311,6 +4311,73 @@ app.post('/api/profile/edit', isAuthenticated, async (req, res) => {
     } catch (e) { res.status(500).json({ error: "Fehler." }); }
 });
 
+// =========================================================
+// === SYSTEM STATS API (FINAL) ===
+// =========================================================
+
+app.get('/api/system/stats', async (req, res) => {
+    
+    // 👇 HIER DEINE DATEN:
+    const GITHUB_USER = "limo123123"; 
+    const FRONTEND_REPO = "limazon"; 
+
+    try {
+        // 1. DATENBANK STATS
+        const [users, products, wheels, humans, auctions] = await Promise.all([
+            usersCollection.countDocuments({}),
+            productsCollection.countDocuments({}),
+            wheelsCollection.countDocuments({}),
+            (typeof teachersCollection !== 'undefined' ? teachersCollection.countDocuments({}) : 0),
+            auctionsCollection.countDocuments({})
+        ]);
+
+        // 2. SERVER LOC (Liest sich selbst -> 100% genau)
+        const fs = require('fs');
+        let serverLoc = 0;
+        try {
+            const serverCode = fs.readFileSync(__filename, 'utf8');
+            serverLoc = serverCode.split('\n').length;
+        } catch(e) { serverLoc = 0; }
+
+        // 3. FRONTEND LOC (Via GitHub API)
+        let frontendLoc = 0;
+        try {
+            const ghRes = await fetch(`https://api.github.com/repos/${GITHUB_USER}/${FRONTEND_REPO}/languages`);
+            if (ghRes.ok) {
+                const langs = await ghRes.json();
+                
+                // Wir summieren alle Bytes deiner Frontend-Sprachen
+                const totalBytes = (langs.HTML || 0) + 
+                                   (langs.JavaScript || 0) + 
+                                   (langs.CSS || 0) + 
+                                   (langs.Python || 0); // Python nehmen wir auch mit
+                
+                // Umrechnungsfaktor (35 Bytes ca. 1 Zeile Code)
+                frontendLoc = Math.floor(totalBytes / 35);
+            }
+        } catch(e) { 
+            console.error("GitHub Stats Error:", e);
+        }
+
+        res.json({
+            users,
+            products,
+            wheels,
+            humans,
+            auctions,
+            loc: {
+                server: serverLoc,      
+                frontend: frontendLoc,  
+                total: serverLoc + frontendLoc
+            }
+        });
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Laden der Stats." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
