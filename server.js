@@ -4041,6 +4041,191 @@ app.post('/api/admin/system/normalize', isAuthenticated, isAdmin, async (req, re
     res.json(report);
 });
 
+// =========================================================
+// === PROFIL & ACHIEVEMENTS SYSTEM (SMART V2) ===
+// =========================================================
+
+const ACHIEVEMENT_DEFINITIONS = [
+    // --- 🐣 BASIC / ANFANG ---
+    { id: 'newbie', icon: '🐣', title: 'Frischfleisch', desc: 'Willkommen im Limo Verse.', 
+      check: () => true },
+    { id: 'identity', icon: '🪪', title: 'Identität', desc: 'Setze eine Bio in deinem Profil.', 
+      check: (u) => u.bio && u.bio.length > 5 },
+    { id: 'og', icon: '🦕', title: 'Urgestein', desc: 'Dein Account ist älter als 7 Tage.', 
+      check: (u) => (new Date() - u._id.getTimestamp()) / (1000 * 60 * 60 * 24) >= 7 },
+
+    // --- 💰 REICHTUM (MONEY) ---
+    { id: 'piggy', icon: '🐷', title: 'Sparschwein', desc: 'Habe $5.000 auf dem Konto.', 
+      check: (u) => u.balance >= 5000 },
+    { id: 'middle_class', icon: '🏠', title: 'Mittelstand', desc: 'Besitze $50.000.', 
+      check: (u) => u.balance >= 50000 },
+    { id: 'rich', icon: '💸', title: 'Bonze', desc: 'Der erste Schritt: $100.000.', 
+      check: (u) => u.balance >= 100000 },
+    { id: 'half_mil', icon: '💼', title: 'Halbe Million', desc: 'Besitze $500.000.', 
+      check: (u) => u.balance >= 500000 },
+    { id: 'millionaire', icon: '💎', title: 'Millionär', desc: 'Willkommen im Club ($1M).', 
+      check: (u) => u.balance >= 1000000 },
+    { id: 'multi_million', icon: '🏰', title: 'Tycoon', desc: 'Besitze über $10 Millionen.', 
+      check: (u) => u.balance >= 10000000 },
+    { id: 'limo_bezos', icon: '🚀', title: 'Limo Bezos', desc: 'Besitze unfassbare $1 Milliarde.', 
+      check: (u) => u.balance >= 1000000000 },
+    
+    // --- 📉 ARMUT / MEMES ---
+    { id: 'broke', icon: '📉', title: 'Pleitegeier', desc: 'Weniger als $1 Guthaben.', 
+      check: (u) => u.balance < 1 && u.balance > -500 },
+    { id: 'debt_collector', icon: '🆘', title: 'In den Miesen', desc: 'Habe Schulden (Negatives Guthaben).', 
+      check: (u) => u.balance < 0 },
+    { id: 'exact_zero', icon: '0️⃣', title: 'Perfekte Null', desc: 'Exakt $0.00 auf dem Konto.', 
+      check: (u) => u.balance === 0 },
+
+    // --- 🪙 TOKENS ---
+    { id: 'token_start', icon: '🥉', title: 'Token Anfänger', desc: 'Besitze 1 Token.', 
+      check: (u) => (u.tokens||0) >= 1 },
+    { id: 'token_fan', icon: '🥈', title: 'Token Sammler', desc: 'Besitze 50 Tokens.', 
+      check: (u) => (u.tokens||0) >= 50 },
+    { id: 'token_lord', icon: '🥇', title: 'Token Lord', desc: 'Besitze 100 Tokens.', 
+      check: (u) => (u.tokens||0) >= 100 },
+    { id: 'token_god', icon: '👑', title: 'Token Gott', desc: 'Besitze 1.000 Tokens.', 
+      check: (u) => (u.tokens||0) >= 1000 },
+
+    // --- 🛒 SHOP & BESITZ ---
+    { id: 'shopper', icon: '🛍️', title: 'Shopping Queen', desc: '5 Items im Inventar.', 
+      check: (u, s) => s.inventoryCount >= 5 },
+    { id: 'hoarder', icon: '📦', title: 'Lagerhalle', desc: '50 Items im Inventar.', 
+      check: (u, s) => s.inventoryCount >= 50 },
+    { id: 'museum', icon: '🏛️', title: 'Das Museum', desc: '100 Items im Inventar.', 
+      check: (u, s) => s.inventoryCount >= 100 },
+
+    // --- 📈 BÖRSE (LIMO STONKS) ---
+    { id: 'investor', icon: '📈', title: 'Aktionär', desc: 'Besitze deine erste Aktie.', 
+      check: (u, s) => s.stockCount >= 1 },
+    { id: 'wolf', icon: '🐺', title: 'Wolf of Limo Street', desc: 'Besitze 5 verschiedene Aktien.', 
+      check: (u, s) => s.stockCount >= 5 },
+    { id: 'hedge_fund', icon: '🏦', title: 'Hedgefonds', desc: 'Besitze 10 verschiedene Aktien.', 
+      check: (u, s) => s.stockCount >= 10 },
+
+    // --- 🎓 HUMAN GRADES (SOCIAL) ---
+    { id: 'critic', icon: '📝', title: 'Kritiker', desc: 'Gib deine erste Bewertung ab.', 
+      check: (u, s) => s.ratingCount >= 1 },
+    { id: 'judge', icon: '⚖️', title: 'Richter', desc: 'Gib 10 Bewertungen ab.', 
+      check: (u, s) => s.ratingCount >= 10 },
+    { id: 'jury', icon: '📜', title: 'Die Jury', desc: 'Gib 50 Bewertungen ab.', 
+      check: (u, s) => s.ratingCount >= 50 },
+
+    // --- 🔨 AUKTIONEN & ERSTELLER ---
+    { id: 'seller', icon: '🏷️', title: 'Verkäufer', desc: 'Erstelle eine Auktion.', 
+      check: (u, s) => s.auctionCount >= 1 },
+    { id: 'wheel_spin', icon: '🎡', title: 'Glücksrad-Bauer', desc: 'Erstelle ein eigenes Glücksrad.', 
+      check: (u, s) => s.wheelCount >= 1 },
+
+    // --- 🕵️ HIDDEN / EASTER EGGS ---
+    { id: 'leet', icon: '👾', title: '1337', desc: 'Habe exakt $1337 Guthaben.', 
+      check: (u) => Math.floor(u.balance) === 1337 },
+    { id: 'devil', icon: '😈', title: 'Teuflisch', desc: 'Habe exakt $666 Guthaben.', 
+      check: (u) => Math.floor(u.balance) === 666 },
+    { id: 'lucky', icon: '🍀', title: 'Lucky 7', desc: 'Habe exakt $777 Guthaben.', 
+      check: (u) => Math.floor(u.balance) === 777 },
+    { id: 'admin_power', icon: '🛡️', title: 'Admin Power', desc: 'Du hast Admin-Rechte.', 
+      check: (u) => u.isAdmin },
+];
+
+// Hilfsfunktion: Automatische Prüfung (Erweitert)
+async function updateUserAchievements(user) {
+    // 1. STATISTIKEN SAMMELN (Das ist neu!)
+    const userId = user._id;
+    
+    // Parallel alle Counts abfragen für Performance
+    const [invCount, portCount, ratingCount, newsLikes, auctionCount, wheelCount] = await Promise.all([
+        inventoriesCollection.countDocuments({ userId }),
+        portfoliosCollection.countDocuments({ userId }),
+        ratingsCollection.countDocuments({ userId }), // Human Grades abgegeben
+        newsCollection.countDocuments({ likesIds: userId }), // (Falls wir User-IDs bei Likes speichern würden, sonst überspringen)
+        auctionsCollection.countDocuments({ sellerId: userId }), // Erstellte Auktionen
+        wheelsCollection.countDocuments({ creatorId: userId }) // Erstellte Glücksräder
+    ]);
+    
+    const stats = {
+        inventoryCount: invCount,
+        stockCount: portCount,
+        ratingCount: ratingCount,
+        auctionCount: auctionCount,
+        wheelCount: wheelCount
+    };
+
+    const unlocked = user.achievements || [];
+    const newUnlocks = [];
+
+    // 2. Loop durch die Definitionen
+    for (const ach of ACHIEVEMENT_DEFINITIONS) {
+        if (!unlocked.includes(ach.id)) {
+            try {
+                if (ach.check(user, stats)) {
+                    newUnlocks.push(ach.id);
+                }
+            } catch(e) { console.error(`Check Error (${ach.id}):`, e); }
+        }
+    }
+
+    // 3. Speichern
+    if (newUnlocks.length > 0) {
+        await usersCollection.updateOne(
+            { _id: user._id }, 
+            { $addToSet: { achievements: { $each: newUnlocks } } }
+        );
+        return newUnlocks;
+    }
+    return [];
+}
+
+// API: Profil laden
+app.get('/api/profile/:username', async (req, res) => {
+    try {
+        const targetUsername = req.params.username;
+        // Case Insensitive Suche
+        let user = await usersCollection.findOne({ username: { $regex: new RegExp(`^${targetUsername}$`, 'i') } });
+
+        if (!user) return res.status(404).json({ error: "User nicht gefunden" });
+
+        // Update triggern (checkt automatisch auf neue Achievements beim Besuchen)
+        await updateUserAchievements(user);
+        
+        // Neu laden für aktuelle Daten
+        user = await usersCollection.findOne({ _id: user._id });
+
+        // Frontend-Daten aufbereiten (Funktionen entfernen)
+        const frontendAchievements = ACHIEVEMENT_DEFINITIONS.map(({check, ...keep}) => keep);
+
+        const publicProfile = {
+            username: user.username,
+            bio: user.bio || "Keine Beschreibung.",
+            joinDate: user._id.getTimestamp(),
+            achievements: user.achievements || [],
+            isAdmin: user.isAdmin,
+            badgesCount: (user.achievements || []).length
+        };
+
+        res.json({ profile: publicProfile, allAchievements: frontendAchievements });
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Laden." });
+    }
+});
+
+// API: Profil Bio bearbeiten
+app.post('/api/profile/edit', isAuthenticated, async (req, res) => {
+    const { bio } = req.body;
+    if (bio && bio.length > 200) return res.status(400).json({ error: "Bio zu lang (max 200 Zeichen)." });
+
+    try {
+        await usersCollection.updateOne(
+            { _id: new ObjectId(req.session.userId) },
+            { $set: { bio: bio || "" } }
+        );
+        res.json({ message: "Profil gespeichert." });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
