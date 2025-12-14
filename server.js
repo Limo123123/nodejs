@@ -3720,6 +3720,45 @@ app.get('/api/bank/users/search', isAuthenticated, async (req, res) => {
     }
 });
 
+// API: Tägliche Belohnung abholen
+app.post('/api/daily', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    const user = await usersCollection.findOne({ _id: userId });
+
+    const now = new Date();
+    const last = user.lastDaily ? new Date(user.lastDaily) : new Date(0);
+    
+    // Prüfen ob heute schon abgeholt (gleicher Tag, Monat, Jahr)
+    if (now.getDate() === last.getDate() && now.getMonth() === last.getMonth() && now.getFullYear() === last.getFullYear()) {
+        return res.status(400).json({ error: "Komm morgen wieder!" });
+    }
+
+    // Streak Logik (War das letzte mal gestern?)
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    
+    let streak = user.dailyStreak || 0;
+    // Wenn das letzte mal NICHT gestern war (und nicht heute), ist der Streak gebrochen
+    if (last.toDateString() !== yesterday.toDateString()) {
+        streak = 0;
+    }
+    streak++;
+
+    // Belohnung berechnen
+    let reward = 100 + (streak * 10); // Start $100, pro Tag +$10
+    if (reward > 500) reward = 500; // Cap bei $500
+
+    await usersCollection.updateOne(
+        { _id: userId },
+        { 
+            $inc: { balance: reward },
+            $set: { lastDaily: now, dailyStreak: streak }
+        }
+    );
+
+    res.json({ message: `Daily abgeholt! +$${reward} (Streak: ${streak} Tage)` });
+});
+
 // =========================================================
 // === LIMO NEWS NETWORK (LNN) MIT GEMINI AI ===
 // =========================================================
