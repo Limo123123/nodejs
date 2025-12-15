@@ -3367,86 +3367,42 @@ app.post('/api/stonks/sell', isAuthenticated, async (req, res) => {
 });
 
 // Portfolio des eingeloggten Benutzers abrufen (verbesserte Version)
-app.post('/api/stonks/sell', isAuthenticated, async (req, res) => {
-    const { productId, quantity } = req.body;
-    const userIdStr = req.session.userId;
-    const qty = parseInt(quantity);
-
-    // 1. Validierung
-    if (!qty || qty < 1) return res.status(400).json({ error: "Ungültige Menge." });
-    if (!productId) return res.status(400).json({ error: "Produkt ID fehlt." });
-
+app.get('/api/stonks/portfolio', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
     try {
-        const userIdObj = new ObjectId(userIdStr);
+        const portfolioItems = await portfoliosCollection.find({ userId, quantityShares: { $gt: 0 } }).toArray();
 
-        // ID-Typ Erkennung (Zahl oder String), damit wir das richtige in der DB finden
-        // Wenn productId "123" ist, machen wir 123 (Number) daraus, sonst lassen wir es String.
-        const queryProductId = isNaN(parseInt(productId)) ? productId : parseInt(productId);
-
-        // 2. Wir laden PARALLEL: Das Portfolio-Item aus der portfoliosCollection UND den aktuellen Preis
-        const [portfolioItem, product] = await Promise.all([
-            portfoliosCollection.findOne({ userId: userIdObj, productId: queryProductId }),
-            productsCollection.findOne({ id: queryProductId })
-        ]);
-
-        // 3. Existenz-Check
-        if (!portfolioItem) {
-            console.log(`[SELL ERROR] Item nicht in portfoliosCollection gefunden. User: ${userIdStr}, ProductId: ${queryProductId}`);
-            return res.status(400).json({ error: "Du besitzt diese Aktie nicht." });
+        if (portfolioItems.length === 0) {
+            return res.json({ portfolio: [] });
         }
 
-        if (portfolioItem.quantityShares < qty) {
-            return res.status(400).json({ 
-                error: `Nicht genügend Aktien. Du hast ${portfolioItem.quantityShares}, willst aber ${qty} verkaufen.` 
-            });
-        }
+        // IDs aller Produkte im Portfolio sammeln
+        const productIdsInPortfolio = portfolioItems.map(item => item.productId);
 
-        // 4. Preis ermitteln
-        // Fallback: Falls Produkt gelöscht wurde, versuchen wir currentPrice aus dem Portfolio-Item oder 0
-        const currentPrice = product ? (product.currentPrice || product.price || 0) : 0;
-        
-        if (currentPrice <= 0) {
-            return res.status(400).json({ error: "Aktueller Preis konnte nicht ermittelt werden." });
-        }
+        // Aktuelle Daten (Name, Preis, Bild) für diese Produkte aus der 'products' Collection holen
+        const productDetails = await productsCollection.find(
+            { id: { $in: productIdsInPortfolio } },
+            { projection: { id: 1, name: 1, currentPrice: 1, image_url: 1, _id: 0 } }
+        ).toArray();
 
-        const totalPayout = currentPrice * qty;
+        // Eine Map für schnellen Zugriff erstellen: productId -> productDetail
+        const productDetailsMap = new Map(productDetails.map(p => [p.id, p]));
 
-        // 5. TRANSAKTION DURCHFÜHREN
-
-        // A) Portfolio aktualisieren (in portfoliosCollection!)
-        if (portfolioItem.quantityShares === qty) {
-            // Alles verkaufen -> Eintrag löschen
-            await portfoliosCollection.deleteOne({ _id: portfolioItem._id });
-        } else {
-            // Teil verkaufen -> Menge reduzieren
-            await portfoliosCollection.updateOne(
-                { _id: portfolioItem._id },
-                { $inc: { quantityShares: -qty } }
-            );
-        }
-
-        // B) Geld dem User gutschreiben (in usersCollection!)
-        await usersCollection.updateOne(
-            { _id: userIdObj },
-            { 
-                $inc: { balance: totalPayout },
-                $set: { lastTradeTime: Date.now() }
-            }
-        );
-
-        // Neuen Kontostand holen für die Anzeige im Frontend
-        const updatedUser = await usersCollection.findOne({ _id: userIdObj }, { projection: { balance: 1 } });
-
-        console.log(`${LOG_PREFIX_SERVER} VERKAUF: User ${req.session.username} verkauft ${qty}x ${queryProductId} für ${totalPayout}€`);
-
-        res.json({ 
-            message: `Verkauf erfolgreich! +$${totalPayout.toFixed(2)}`,
-            newBalance: updatedUser.balance 
+        // Das Portfolio mit den aktuellen Produktdetails anreichern
+        const enrichedPortfolio = portfolioItems.map(item => {
+            const details = productDetailsMap.get(item.productId);
+            return {
+                ...item, // Enthält userId, productId, quantityShares, averageBuyPrice
+                name: details ? details.name : "Unbekanntes Produkt",
+                imageUrl: details ? details.image_url : "",
+                currentPrice: details ? details.currentPrice : 0
+            };
         });
 
-    } catch (e) {
-        console.error(`${LOG_PREFIX_SERVER} Fehler beim Verkaufen:`, e);
-        res.status(500).json({ error: "Serverfehler beim Handel." });
+        res.json({ portfolio: enrichedPortfolio });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Abrufen des Portfolios für User ${req.session.username}:`, err);
+        res.status(500).json({ error: 'Serverfehler beim Laden des Portfolios.' });
     }
 });
 
