@@ -3242,87 +3242,122 @@ app.post('/api/stonks/buy', isAuthenticated, async (req, res) => {
 });
 
 // ==========================================
-// 2. AKTIEN VERKAUFEN (FIX: portfoliosCollection)
+// 2. AKTIEN VERKAUFEN (SELL) - DEBUG VERSION
 // ==========================================
 app.post('/api/stonks/sell', isAuthenticated, async (req, res) => {
+    console.log(`\n--- SELL REQUEST START ---`);
     const { productId, quantity } = req.body;
-    const userIdStr = req.session.userId;
+    const userId = req.session.userId;
     const qty = parseInt(quantity);
 
-    // 1. Validierung
+    console.log(`User: ${req.session.username}, Will verkaufen: ID ${productId}, Menge: ${qty}`);
+
     if (!qty || qty < 1) return res.status(400).json({ error: "Ungültige Menge." });
     if (!productId) return res.status(400).json({ error: "Produkt ID fehlt." });
 
     try {
-        // WICHTIG: UserId muss als ObjectId genutzt werden, damit MongoDB es findet!
-        const userIdObj = new ObjectId(userIdStr);
+        // 1. User und Produkt laden
+        const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
+        
+        // Kurzer Check ob Produkt existiert (ID als Zahl oder String suchen)
+        // Wir parsen productId zu Int, falls es ein String ist, für die DB Abfrage
+        let productQueryId = productId;
+        if (!isNaN(parseInt(productId))) {
+            productQueryId = parseInt(productId);
+        }
+        const product = await productsCollection.findOne({ id: productQueryId });
 
-        // ID-Typ Erkennung: Wir wandeln es in eine Zahl um, da deine IDs im Log Nummern sind (208032)
-        const queryProductId = isNaN(parseInt(productId)) ? productId : parseInt(productId);
+        if (!user) return res.status(404).json({ error: "User nicht gefunden." });
+        if (!product) return res.status(404).json({ error: "Aktie existiert nicht mehr." });
 
-        // 2. Wir laden PARALLEL: 
-        // A) Das Portfolio-Item aus der portfoliosCollection (NICHT usersCollection!)
-        // B) Den aktuellen Preis aus der productsCollection
-        const [portfolioItem, product] = await Promise.all([
-            portfoliosCollection.findOne({ userId: userIdObj, productId: queryProductId }),
-            productsCollection.findOne({ id: queryProductId })
-        ]);
+        // 2. Cooldown
+        try {
+            if (typeof checkTradeCooldown === 'function') {
+                await checkTradeCooldown(user);
+            }
+        } catch (e) {
+            return res.status(429).json({ error: e.message });
+        }
 
-        // 3. Existenz-Check
+        // 3. PORTFOLIO CHECK (Hier knallt es meistens)
+        const portfolio = user.portfolio || [];
+        
+        // Wir nutzen "==" statt "===", damit "123" (String) auch 123 (Number) findet.
+        // Wir prüfen AUCH auf p.id, falls es in der DB anders heißt.
+        const portfolioItem = portfolio.find(p => (p.productId == productId) || (p.id == productId));
+
+        // 🛑 DEBUGGING LOGS WENN NICHT GEFUNDEN 🛑
         if (!portfolioItem) {
-            console.log(`[SELL ERROR] Item nicht in portfoliosCollection gefunden.`);
-            console.log(`Suche nach -> User: ${userIdStr}, ProductId: ${queryProductId}`);
-            return res.status(400).json({ error: "Du besitzt diese Aktie nicht." });
+            console.error("❌ FEHLER: Aktie nicht im Portfolio gefunden.");
+            console.error("Gesuchte ID (Input):", productId, "Typ:", typeof productId);
+            console.error("Portfolio Inhalt (Auszug):");
+            portfolio.forEach(p => console.error(` - Vorhanden: ID ${p.productId || p.id} (Menge: ${p.quantityShares || p.quantity})`));
+            
+            return res.status(400).json({ error: `Du besitzt die Aktie mit ID ${productId} nicht.` });
         }
 
         // Menge prüfen
-        if (portfolioItem.quantityShares < qty) {
+        // Wir prüfen p.quantityShares ODER p.quantity (falls Feldname variiert)
+        const ownedShares = portfolioItem.quantityShares || portfolioItem.quantity || 0;
+
+        if (ownedShares < qty) {
+            console.error(`❌ Zu wenig Aktien. Hat: ${ownedShares}, Will: ${qty}`);
             return res.status(400).json({ 
-                error: `Nicht genügend Aktien. Du hast ${portfolioItem.quantityShares}, willst aber ${qty} verkaufen.` 
+                error: `Nicht genügend Aktien. Du hast ${ownedShares}, willst aber ${qty} verkaufen.` 
             });
         }
 
-        // 4. Preis ermitteln
-        // Fallback: Falls Produkt gelöscht wurde, versuchen wir currentPrice aus dem Portfolio-Item oder 0
-        const currentPrice = product ? (product.currentPrice || product.price || 0) : 0;
-        
-        if (currentPrice <= 0) {
-            return res.status(400).json({ error: "Aktueller Preis konnte nicht ermittelt werden." });
-        }
-
+        // 4. Preis & Payout
+        const currentPrice = parseFloat(product.currentPrice || 0);
         const totalPayout = currentPrice * qty;
 
-        // 5. TRANSAKTION DURCHFÜHREN
+        // 5. DB UPDATE
+        // Wir nutzen die ID so, wie sie tatsächlich im Objekt gefunden wurde
+        const dbProductId = portfolioItem.productId || portfolioItem.id;
+        // Wir wissen nicht, ob das Feld in der DB "productId" oder "id" heißt, 
+        // daher müssen wir beim $pull/$inc aufpassen. 
+        // Wir gehen davon aus, dass die Struktur im Array konsistent ist:
+        const filterKey = portfolioItem.productId ? "portfolio.productId" : "portfolio.id";
 
-        // A) Portfolio aktualisieren (in portfoliosCollection!)
-        if (portfolioItem.quantityShares === qty) {
-            // Alles verkaufen -> Eintrag aus der DB löschen
-            await portfoliosCollection.deleteOne({ _id: portfolioItem._id });
+        if (ownedShares === qty) {
+            // A) Alles verkaufen -> Eintrag löschen
+            // Wir bauen das Pull-Objekt dynamisch
+            let pullQuery = {};
+            if (portfolioItem.productId) pullQuery = { portfolio: { productId: dbProductId } };
+            else pullQuery = { portfolio: { id: dbProductId } };
+
+            await usersCollection.updateOne(
+                { _id: user._id },
+                {
+                    $inc: { balance: totalPayout },
+                    $set: { lastTradeTime: Date.now() },
+                    $pull: pullQuery
+                }
+            );
         } else {
-            // Teil verkaufen -> Menge reduzieren
-            await portfoliosCollection.updateOne(
-                { _id: portfolioItem._id },
-                { $inc: { quantityShares: -qty } }
+            // B) Teil verkaufen -> Menge reduzieren
+            // Wir müssen den dynamischen Key für das Update nutzen
+            let incQuery = { balance: totalPayout };
+            incQuery[`portfolio.$.${portfolioItem.quantityShares ? 'quantityShares' : 'quantity'}`] = -qty;
+
+            // Filter bauen
+            let findQuery = { _id: user._id };
+            findQuery[filterKey] = dbProductId;
+
+            await usersCollection.updateOne(
+                findQuery,
+                { 
+                    $inc: incQuery,
+                    $set: { lastTradeTime: Date.now() }
+                }
             );
         }
 
-        // B) Geld dem User gutschreiben (in usersCollection!)
-        await usersCollection.updateOne(
-            { _id: userIdObj },
-            { 
-                $inc: { balance: totalPayout },
-                $set: { lastTradeTime: Date.now() }
-            }
-        );
-
-        // Neuen Kontostand holen für die Anzeige im Frontend
-        const updatedUser = await usersCollection.findOne({ _id: userIdObj }, { projection: { balance: 1 } });
-
-        console.log(`${LOG_PREFIX_SERVER} VERKAUF: User ${req.session.username} verkauft ${qty}x ${queryProductId} für ${totalPayout}€`);
+        console.log(`✅ SUCCESS: ${user.username} verkaufte ${qty}x ${dbProductId} für ${totalPayout}€`);
 
         res.json({ 
             message: `Verkauf erfolgreich! +$${totalPayout.toFixed(2)}`,
-            newBalance: updatedUser.balance 
+            newBalance: user.balance + totalPayout
         });
 
     } catch (e) {
