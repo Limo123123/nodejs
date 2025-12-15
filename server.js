@@ -3241,82 +3241,90 @@ app.post('/api/stonks/buy', isAuthenticated, async (req, res) => {
     }
 });
 
+// ==========================================
+// 2. AKTIEN VERKAUFEN (SELL) - KOMPLETT
+// ==========================================
 app.post('/api/stonks/sell', isAuthenticated, async (req, res) => {
     const { productId, quantity } = req.body;
+    const userId = req.session.userId;
     const qty = parseInt(quantity);
-    const userId = req.session.userId; // Session ID holen
 
+    // Basic Validierung
     if (!qty || qty < 1) return res.status(400).json({ error: "Ungültige Menge." });
+    if (!productId) return res.status(400).json({ error: "Produkt ID fehlt." });
 
     try {
-        // 1. User & Aktuellen Preis PARALLEL holen (Spart Zeit!)
-        // Wir suchen den User direkt per _id (schneller als userId String)
+        // 1. User und Produkt gleichzeitig laden (schneller)
         const [user, product] = await Promise.all([
             usersCollection.findOne({ _id: new ObjectId(userId) }),
-            productsCollection.findOne({ id: productId })
+            productsCollection.findOne({ id: isNaN(productId) ? productId : parseInt(productId) }) // Versucht ID auch als Zahl zu finden
         ]);
 
         if (!user) return res.status(404).json({ error: "User nicht gefunden." });
-        if (!product) return res.status(404).json({ error: "Aktie nicht mehr handelbar." });
+        if (!product) return res.status(404).json({ error: "Aktie existiert nicht mehr." });
 
-        // 2. Cooldown Check
+        // 2. Cooldown prüfen
         try {
-            await checkTradeCooldown(user);
+            if (typeof checkTradeCooldown === 'function') {
+                await checkTradeCooldown(user);
+            }
         } catch (e) {
             return res.status(429).json({ error: e.message });
         }
 
-        // 3. Portfolio Check
-        // Wir schauen direkt in das Array im RAM, kein extra DB Call nötig
-        const portfolioItem = user.portfolio ? user.portfolio.find(p => p.productId === productId) : null;
-        
-        if (!portfolioItem || portfolioItem.quantityShares < qty) {
-            return res.status(400).json({ error: "Nicht genügend Aktien im Besitz." });
+        // 3. Portfolio Check (DER FIX: String vs Number Vergleich)
+        // Wir suchen das Item, egal ob ID als "123" oder 123 gespeichert ist
+        const portfolioItem = user.portfolio 
+            ? user.portfolio.find(p => String(p.productId) === String(productId)) 
+            : null;
+
+        if (!portfolioItem) {
+            // Debugging-Log im Server, damit du siehst, was wirklich da ist
+            console.log(`[SELL ERROR] User: ${user.username}, Gesuchte ID: ${productId}`);
+            console.log(`[SELL ERROR] Portfolio:`, JSON.stringify(user.portfolio || []));
+            return res.status(400).json({ error: "Du besitzt diese Aktie nicht." });
+        }
+
+        if (portfolioItem.quantityShares < qty) {
+            return res.status(400).json({ 
+                error: `Nicht genügend Aktien. Besitz: ${portfolioItem.quantityShares}, Verkauf: ${qty}` 
+            });
         }
 
         // 4. Preisberechnung
-        const currentPrice = product.currentPrice || 0;
+        const currentPrice = parseFloat(product.currentPrice || 0);
         const totalPayout = currentPrice * qty;
 
-        // 5. TRANSAKTION (Das hier ist der kritische Teil)
-        // Wir müssen unterscheiden: Alles verkaufen oder nur einen Teil?
+        // 5. Transaktion in der Datenbank
         
-        let updateQuery = {};
+        // Wir nutzen die ID genau so, wie sie im gefundenen Portfolio-Item gespeichert ist (Number oder String)
+        const dbProductId = portfolioItem.productId; 
 
         if (portfolioItem.quantityShares === qty) {
-            // A) Alles verkaufen -> Eintrag aus Array entfernen ($pull)
-            updateQuery = {
-                $inc: { balance: totalPayout },
-                $set: { lastTradeTime: Date.now() },
-                $pull: { portfolio: { productId: productId } } // Entfernt das Item komplett
-            };
-        } else {
-            // B) Teil verkaufen -> Menge reduzieren ($inc mit negativer Zahl)
-            // Wir müssen hier den spezifischen Array-Eintrag finden.
-            // Der Filter oben muss angepasst werden, um das Element zu matchen.
+            // A) Alles verkaufen -> Eintrag komplett entfernen ($pull)
             await usersCollection.updateOne(
-                { _id: new ObjectId(userId), "portfolio.productId": productId },
+                { _id: user._id },
+                {
+                    $inc: { balance: totalPayout },
+                    $set: { lastTradeTime: Date.now() },
+                    $pull: { portfolio: { productId: dbProductId } }
+                }
+            );
+        } else {
+            // B) Teil verkaufen -> Menge reduzieren
+            await usersCollection.updateOne(
+                { _id: user._id, "portfolio.productId": dbProductId },
                 { 
                     $inc: { 
                         balance: totalPayout,
-                        "portfolio.$.quantityShares": -qty // Zieht Menge ab
+                        "portfolio.$.quantityShares": -qty 
                     },
                     $set: { lastTradeTime: Date.now() }
                 }
             );
-            
-            // Return hier, weil wir Option B schon ausgeführt haben
-            return res.json({ 
-                message: `Teilverkauf! +$${totalPayout.toFixed(2)}`, 
-                newBalance: user.balance + totalPayout 
-            });
         }
 
-        // Ausführung für Option A (Alles verkaufen)
-        await usersCollection.updateOne(
-            { _id: new ObjectId(userId) },
-            updateQuery
-        );
+        console.log(`${LOG_PREFIX_SERVER} User ${user.username} verkaufte ${qty}x ${productId} für ${totalPayout.toFixed(2)}€`);
 
         res.json({ 
             message: `Verkauf erfolgreich! +$${totalPayout.toFixed(2)}`,
@@ -3325,7 +3333,7 @@ app.post('/api/stonks/sell', isAuthenticated, async (req, res) => {
 
     } catch (e) {
         console.error(`${LOG_PREFIX_SERVER} Fehler beim Verkaufen:`, e);
-        res.status(500).json({ error: "Handelsfehler (DB)." });
+        res.status(500).json({ error: "Serverfehler beim Handel." });
     }
 });
 
