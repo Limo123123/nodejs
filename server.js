@@ -809,6 +809,14 @@ MongoClient.connect(mongoUri)
 
 // AUTH
 app.post('/api/auth/register', async (req, res) => {
+	// IP ermitteln (wichtig hinter Proxies/Nginx)
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
+
+    // Prüfen ob IP gebannt ist
+    const isBanned = await db.collection('banned_ips').findOne({ ip: clientIp });
+    if (isBanned) {
+        return res.status(403).json({ error: "Du wurdest von diesem Server gebannt." });
+    }
     const { username, password } = req.body;
     console.log(`${LOG_PREFIX_SERVER} Registrierungsversuch für User: ${username ? username.substring(0, 3) + "***" : "LEER"}`);
     if (!username || !password || typeof username !== 'string' || typeof password !== 'string' || username.length < 3 || username.length > 30 || password.length < 6) {
@@ -836,27 +844,83 @@ app.post('/api/auth/register', async (req, res) => {
 
 app.post('/api/auth/login', async (req, res) => {
     const { username, password, rememberMe } = req.body;
-    console.log(`${LOG_PREFIX_SERVER} Login-Versuch für User: ${username ? username.substring(0, 3) + "***" : "LEER"}`);
+    
+    // IP Adresse ermitteln (hinter Proxies oder direkt)
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
+
+    console.log(`${LOG_PREFIX_SERVER} Login-Versuch für User: ${username ? username.substring(0, 3) + "***" : "LEER"} von IP: ${clientIp}`);
+
     if (!username || !password) return res.status(400).json({ error: 'Benutzername und Passwort erforderlich.' });
+
     try {
         const user = await usersCollection.findOne({ username: username.toLowerCase() });
+
         if (!user) {
             console.warn(`${LOG_PREFIX_SERVER} Login fehlgeschlagen: User ${username.toLowerCase()} nicht gefunden.`);
             return res.status(401).json({ error: 'Ungültige Anmeldedaten.' });
         }
+
         const match = await bcrypt.compare(password, user.password);
+
         if (match) {
+            // =========================================================
+            // 🛑 NEU: BAN-CHECK & IP-UPDATE
+            // =========================================================
+            
+            // 1. Prüfen, ob die IP auf der schwarzen Liste steht
+            // (Du musst Zugriff auf deine DB-Instanz haben, z.B. 'db' oder eine 'bannedIpsCollection')
+            const isBanned = await db.collection('banned_ips').findOne({ ip: clientIp });
+
+            if (isBanned) {
+                // Wenn gebannt, prüfen wir: Ist es ein Admin?
+                if (user.isAdmin) {
+                    console.log(`${LOG_PREFIX_SERVER} ⚠️ ADMIN BYPASS: Gebannte IP ${clientIp} loggt sich als Admin ${user.username} ein.`);
+                } else {
+                    console.warn(`${LOG_PREFIX_SERVER} ⛔ ZUGRIFF VERWEIGERT: Gebannte IP ${clientIp} versuchte Login als ${user.username}.`);
+                    return res.status(403).json({ error: 'Dieser Account oder diese IP ist gesperrt.' });
+                }
+            }
+
+            // 2. IP im User speichern (damit wir sie später bannen können)
+            await usersCollection.updateOne(
+                { _id: user._id }, 
+                { $set: { lastIp: clientIp, lastLogin: new Date() } }
+            );
+            // =========================================================
+
+
             req.session.userId = user._id.toString();
             req.session.username = user.username;
             req.session.isAdmin = user.isAdmin || false;
+
             if (rememberMe === true) req.session.cookie.maxAge = 14 * 24 * 60 * 60 * 1000;
             else { req.session.cookie.expires = false; req.session.cookie.maxAge = null; }
+
             req.session.save(err => {
-                if (err) { console.error(`${LOG_PREFIX_SERVER} Fehler Speichern Session Login ${user.username}:`, err); return res.status(500).json({ error: 'Fehler Session.' }); }
+                if (err) { 
+                    console.error(`${LOG_PREFIX_SERVER} Fehler Speichern Session Login ${user.username}:`, err); 
+                    return res.status(500).json({ error: 'Fehler Session.' }); 
+                }
+                
                 console.log(`${LOG_PREFIX_SERVER} User ${user.username} eingeloggt. Session ID: ${req.session.id}, Admin: ${req.session.isAdmin}`);
+                
                 const effectiveInfinityMoney = user.isAdmin ? true : (user.infinityMoney || false);
-                res.json({ message: 'Login erfolgreich!', user: { userId: user._id.toString(), username: user.username, balance: user.balance, tokens: user.tokens || 0, isAdmin: user.isAdmin || false, infinityMoney: effectiveInfinityMoney, unlockedInfinityMoney: user.unlockedInfinityMoney || false, productSellCooldowns: user.productSellCooldowns || {} } });
+                
+                res.json({ 
+                    message: 'Login erfolgreich!', 
+                    user: { 
+                        userId: user._id.toString(), 
+                        username: user.username, 
+                        balance: user.balance, 
+                        tokens: user.tokens || 0, 
+                        isAdmin: user.isAdmin || false, 
+                        infinityMoney: effectiveInfinityMoney, 
+                        unlockedInfinityMoney: user.unlockedInfinityMoney || false, 
+                        productSellCooldowns: user.productSellCooldowns || {} 
+                    } 
+                });
             });
+
         } else {
             console.warn(`${LOG_PREFIX_SERVER} Login fehlgeschlagen: Falsches PW für ${username.toLowerCase()}.`);
             res.status(401).json({ error: 'Ungültige Anmeldedaten.' });
@@ -4153,6 +4217,52 @@ app.delete('/api/admin/products/:id', isAuthenticated, isAdmin, async (req, res)
 app.post('/api/admin/system/normalize', isAuthenticated, isAdmin, async (req, res) => {
     const report = await normalizeExtremeBalances();
     res.json(report);
+});
+
+// POST /api/admin/banUser
+// Body: { targetUserId: "ID_DES_USERS" }
+app.post('/api/admin/banUser', async (req, res) => {
+    // 1. Sicherheitscheck: Ist der Ausführende ein Admin?
+    if (!req.session.userId || !req.session.isAdmin) {
+        return res.status(403).json({ error: "Keine Rechte." });
+    }
+
+    const { targetUserId } = req.body;
+    if (!targetUserId) return res.status(400).json({ error: "User ID fehlt." });
+
+    try {
+        const targetUser = await usersCollection.findOne({ _id: new ObjectId(targetUserId) });
+        if (!targetUser) return res.status(404).json({ error: "User nicht gefunden." });
+
+        // Verhindern, dass man sich selbst oder andere Admins bannt (optional, aber empfohlen)
+        if (targetUser.isAdmin) return res.status(403).json({ error: "Admins können nicht gebannt werden." });
+
+        // A. IP in die Blacklist eintragen
+        if (targetUser.lastIp) {
+            await db.collection('banned_ips').updateOne(
+                { ip: targetUser.lastIp },
+                { 
+                    $set: { 
+                        ip: targetUser.lastIp, 
+                        bannedAt: new Date(), 
+                        bannedBy: req.session.username,
+                        reason: "Account Deleted & Banned by Admin" 
+                    } 
+                },
+                { upsert: true } // Erstellt den Eintrag, falls er noch nicht existiert
+            );
+        }
+
+        // B. User endgültig löschen
+        await usersCollection.deleteOne({ _id: new ObjectId(targetUserId) });
+
+        console.log(`${LOG_PREFIX_SERVER} ADMIN ACTION: User ${targetUser.username} gelöscht und IP ${targetUser.lastIp} gebannt.`);
+        res.json({ success: true, message: "User vernichtet und IP gebannt." });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Bannen:`, err);
+        res.status(500).json({ error: "Serverfehler." });
+    }
 });
 
 // =========================================================
