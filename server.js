@@ -3241,56 +3241,91 @@ app.post('/api/stonks/buy', isAuthenticated, async (req, res) => {
     }
 });
 
-// 2. AKTIEN VERKAUFEN (SELL)
 app.post('/api/stonks/sell', isAuthenticated, async (req, res) => {
     const { productId, quantity } = req.body;
     const qty = parseInt(quantity);
+    const userId = req.session.userId; // Session ID holen
 
     if (!qty || qty < 1) return res.status(400).json({ error: "Ungültige Menge." });
 
     try {
-        const user = await usersCollection.findOne({ userId: req.session.userId });
-        
-        // A) COOLDOWN CHECK AUCH BEIM VERKAUF
+        // 1. User & Aktuellen Preis PARALLEL holen (Spart Zeit!)
+        // Wir suchen den User direkt per _id (schneller als userId String)
+        const [user, product] = await Promise.all([
+            usersCollection.findOne({ _id: new ObjectId(userId) }),
+            productsCollection.findOne({ id: productId })
+        ]);
+
+        if (!user) return res.status(404).json({ error: "User nicht gefunden." });
+        if (!product) return res.status(404).json({ error: "Aktie nicht mehr handelbar." });
+
+        // 2. Cooldown Check
         try {
             await checkTradeCooldown(user);
         } catch (e) {
             return res.status(429).json({ error: e.message });
         }
 
-        // Portfolio prüfen
+        // 3. Portfolio Check
+        // Wir schauen direkt in das Array im RAM, kein extra DB Call nötig
         const portfolioItem = user.portfolio ? user.portfolio.find(p => p.productId === productId) : null;
+        
         if (!portfolioItem || portfolioItem.quantityShares < qty) {
-            return res.status(400).json({ error: "So viele Aktien besitzt du nicht." });
+            return res.status(400).json({ error: "Nicht genügend Aktien im Besitz." });
         }
 
-        // Aktuellen Preis holen
-        const product = await productsCollection.findOne({ id: productId });
+        // 4. Preisberechnung
         const currentPrice = product.currentPrice || 0;
+        const totalPayout = currentPrice * qty;
+
+        // 5. TRANSAKTION (Das hier ist der kritische Teil)
+        // Wir müssen unterscheiden: Alles verkaufen oder nur einen Teil?
         
-        const totalPayout = currentPrice * qty; // Keine Gebühr beim Verkauf (oder optional auch hier)
+        let updateQuery = {};
 
-        // B) TRANSAKTION
-        // Aktien entfernen
-        await removeFromPortfolio(user.userId, productId, qty); // (Deine existierende Logik)
-
-        // Geld geben & Timer setzen
-        await usersCollection.updateOne(
-            { userId: req.session.userId },
-            { 
+        if (portfolioItem.quantityShares === qty) {
+            // A) Alles verkaufen -> Eintrag aus Array entfernen ($pull)
+            updateQuery = {
                 $inc: { balance: totalPayout },
-                $set: { lastTradeTime: Date.now() } 
-            }
+                $set: { lastTradeTime: Date.now() },
+                $pull: { portfolio: { productId: productId } } // Entfernt das Item komplett
+            };
+        } else {
+            // B) Teil verkaufen -> Menge reduzieren ($inc mit negativer Zahl)
+            // Wir müssen hier den spezifischen Array-Eintrag finden.
+            // Der Filter oben muss angepasst werden, um das Element zu matchen.
+            await usersCollection.updateOne(
+                { _id: new ObjectId(userId), "portfolio.productId": productId },
+                { 
+                    $inc: { 
+                        balance: totalPayout,
+                        "portfolio.$.quantityShares": -qty // Zieht Menge ab
+                    },
+                    $set: { lastTradeTime: Date.now() }
+                }
+            );
+            
+            // Return hier, weil wir Option B schon ausgeführt haben
+            return res.json({ 
+                message: `Teilverkauf! +$${totalPayout.toFixed(2)}`, 
+                newBalance: user.balance + totalPayout 
+            });
+        }
+
+        // Ausführung für Option A (Alles verkaufen)
+        await usersCollection.updateOne(
+            { _id: new ObjectId(userId) },
+            updateQuery
         );
 
         res.json({ 
-            message: `Verkauft! +$${totalPayout.toFixed(2)}`,
+            message: `Verkauf erfolgreich! +$${totalPayout.toFixed(2)}`,
             newBalance: user.balance + totalPayout
         });
 
     } catch (e) {
-        console.error(e);
-        res.status(500).json({ error: "Handelsfehler." });
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Verkaufen:`, e);
+        res.status(500).json({ error: "Handelsfehler (DB)." });
     }
 });
 
