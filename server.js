@@ -3242,28 +3242,35 @@ app.post('/api/stonks/buy', isAuthenticated, async (req, res) => {
 });
 
 // ==========================================
-// 2. AKTIEN VERKAUFEN (SELL) - KOMPLETT
+// 2. AKTIEN VERKAUFEN (SELL) - DEBUG VERSION
 // ==========================================
 app.post('/api/stonks/sell', isAuthenticated, async (req, res) => {
+    console.log(`\n--- SELL REQUEST START ---`);
     const { productId, quantity } = req.body;
     const userId = req.session.userId;
     const qty = parseInt(quantity);
 
-    // Basic Validierung
+    console.log(`User: ${req.session.username}, Will verkaufen: ID ${productId}, Menge: ${qty}`);
+
     if (!qty || qty < 1) return res.status(400).json({ error: "Ungültige Menge." });
     if (!productId) return res.status(400).json({ error: "Produkt ID fehlt." });
 
     try {
-        // 1. User und Produkt gleichzeitig laden (schneller)
-        const [user, product] = await Promise.all([
-            usersCollection.findOne({ _id: new ObjectId(userId) }),
-            productsCollection.findOne({ id: isNaN(productId) ? productId : parseInt(productId) }) // Versucht ID auch als Zahl zu finden
-        ]);
+        // 1. User und Produkt laden
+        const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
+        
+        // Kurzer Check ob Produkt existiert (ID als Zahl oder String suchen)
+        // Wir parsen productId zu Int, falls es ein String ist, für die DB Abfrage
+        let productQueryId = productId;
+        if (!isNaN(parseInt(productId))) {
+            productQueryId = parseInt(productId);
+        }
+        const product = await productsCollection.findOne({ id: productQueryId });
 
         if (!user) return res.status(404).json({ error: "User nicht gefunden." });
         if (!product) return res.status(404).json({ error: "Aktie existiert nicht mehr." });
 
-        // 2. Cooldown prüfen
+        // 2. Cooldown
         try {
             if (typeof checkTradeCooldown === 'function') {
                 await checkTradeCooldown(user);
@@ -3272,59 +3279,81 @@ app.post('/api/stonks/sell', isAuthenticated, async (req, res) => {
             return res.status(429).json({ error: e.message });
         }
 
-        // 3. Portfolio Check (DER FIX: String vs Number Vergleich)
-        // Wir suchen das Item, egal ob ID als "123" oder 123 gespeichert ist
-        const portfolioItem = user.portfolio 
-            ? user.portfolio.find(p => String(p.productId) === String(productId)) 
-            : null;
+        // 3. PORTFOLIO CHECK (Hier knallt es meistens)
+        const portfolio = user.portfolio || [];
+        
+        // Wir nutzen "==" statt "===", damit "123" (String) auch 123 (Number) findet.
+        // Wir prüfen AUCH auf p.id, falls es in der DB anders heißt.
+        const portfolioItem = portfolio.find(p => (p.productId == productId) || (p.id == productId));
 
+        // 🛑 DEBUGGING LOGS WENN NICHT GEFUNDEN 🛑
         if (!portfolioItem) {
-            // Debugging-Log im Server, damit du siehst, was wirklich da ist
-            console.log(`[SELL ERROR] User: ${user.username}, Gesuchte ID: ${productId}`);
-            console.log(`[SELL ERROR] Portfolio:`, JSON.stringify(user.portfolio || []));
-            return res.status(400).json({ error: "Du besitzt diese Aktie nicht." });
+            console.error("❌ FEHLER: Aktie nicht im Portfolio gefunden.");
+            console.error("Gesuchte ID (Input):", productId, "Typ:", typeof productId);
+            console.error("Portfolio Inhalt (Auszug):");
+            portfolio.forEach(p => console.error(` - Vorhanden: ID ${p.productId || p.id} (Menge: ${p.quantityShares || p.quantity})`));
+            
+            return res.status(400).json({ error: `Du besitzt die Aktie mit ID ${productId} nicht.` });
         }
 
-        if (portfolioItem.quantityShares < qty) {
+        // Menge prüfen
+        // Wir prüfen p.quantityShares ODER p.quantity (falls Feldname variiert)
+        const ownedShares = portfolioItem.quantityShares || portfolioItem.quantity || 0;
+
+        if (ownedShares < qty) {
+            console.error(`❌ Zu wenig Aktien. Hat: ${ownedShares}, Will: ${qty}`);
             return res.status(400).json({ 
-                error: `Nicht genügend Aktien. Besitz: ${portfolioItem.quantityShares}, Verkauf: ${qty}` 
+                error: `Nicht genügend Aktien. Du hast ${ownedShares}, willst aber ${qty} verkaufen.` 
             });
         }
 
-        // 4. Preisberechnung
+        // 4. Preis & Payout
         const currentPrice = parseFloat(product.currentPrice || 0);
         const totalPayout = currentPrice * qty;
 
-        // 5. Transaktion in der Datenbank
-        
-        // Wir nutzen die ID genau so, wie sie im gefundenen Portfolio-Item gespeichert ist (Number oder String)
-        const dbProductId = portfolioItem.productId; 
+        // 5. DB UPDATE
+        // Wir nutzen die ID so, wie sie tatsächlich im Objekt gefunden wurde
+        const dbProductId = portfolioItem.productId || portfolioItem.id;
+        // Wir wissen nicht, ob das Feld in der DB "productId" oder "id" heißt, 
+        // daher müssen wir beim $pull/$inc aufpassen. 
+        // Wir gehen davon aus, dass die Struktur im Array konsistent ist:
+        const filterKey = portfolioItem.productId ? "portfolio.productId" : "portfolio.id";
 
-        if (portfolioItem.quantityShares === qty) {
-            // A) Alles verkaufen -> Eintrag komplett entfernen ($pull)
+        if (ownedShares === qty) {
+            // A) Alles verkaufen -> Eintrag löschen
+            // Wir bauen das Pull-Objekt dynamisch
+            let pullQuery = {};
+            if (portfolioItem.productId) pullQuery = { portfolio: { productId: dbProductId } };
+            else pullQuery = { portfolio: { id: dbProductId } };
+
             await usersCollection.updateOne(
                 { _id: user._id },
                 {
                     $inc: { balance: totalPayout },
                     $set: { lastTradeTime: Date.now() },
-                    $pull: { portfolio: { productId: dbProductId } }
+                    $pull: pullQuery
                 }
             );
         } else {
             // B) Teil verkaufen -> Menge reduzieren
+            // Wir müssen den dynamischen Key für das Update nutzen
+            let incQuery = { balance: totalPayout };
+            incQuery[`portfolio.$.${portfolioItem.quantityShares ? 'quantityShares' : 'quantity'}`] = -qty;
+
+            // Filter bauen
+            let findQuery = { _id: user._id };
+            findQuery[filterKey] = dbProductId;
+
             await usersCollection.updateOne(
-                { _id: user._id, "portfolio.productId": dbProductId },
+                findQuery,
                 { 
-                    $inc: { 
-                        balance: totalPayout,
-                        "portfolio.$.quantityShares": -qty 
-                    },
+                    $inc: incQuery,
                     $set: { lastTradeTime: Date.now() }
                 }
             );
         }
 
-        console.log(`${LOG_PREFIX_SERVER} User ${user.username} verkaufte ${qty}x ${productId} für ${totalPayout.toFixed(2)}€`);
+        console.log(`✅ SUCCESS: ${user.username} verkaufte ${qty}x ${dbProductId} für ${totalPayout}€`);
 
         res.json({ 
             message: `Verkauf erfolgreich! +$${totalPayout.toFixed(2)}`,
