@@ -718,7 +718,7 @@ MongoClient.connect(mongoUri)
             } catch (err) { console.error(`${LOG_PREFIX_SERVER} [AuctionJob] Fehler:`, err); }
         }, 60000);
 
-// =========================================================
+		// =========================================================
         // === BÖRSEN-JOB (Hybrid: User + Chaos + Gravity + LIMITS) ===
         // =========================================================
         const PRICE_UPDATE_INTERVAL_MS = 60000; // 60 Sekunden
