@@ -78,6 +78,7 @@ const allowedOrigins = [
     frontendDevUrlHttp, 
     frontendDevUrlHttps,
     'https://tcg.limazon.v6.rocks',
+	'https://api.limazon.v6.rocks',
 ];
 if (frontendProdUrl) { allowedOrigins.push(frontendProdUrl); }
 console.log(`${LOG_PREFIX_SERVER} Erlaubte CORS Origins:`, allowedOrigins);
@@ -4706,3 +4707,4 @@ app.use((req, res) => {
     res.status(404).send('Endpoint nicht gefunden');
 
 });
+
