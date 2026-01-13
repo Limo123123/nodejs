@@ -4629,77 +4629,55 @@ app.get('/api/system/stats', async (req, res) => {
     }
 });
 
-// --- LIMO ID OAUTH SYSTEM ---
+// =========================================================
+// === LIMO ID (SSO) FÜR LIMTUBE ===
+// =========================================================
 
-// 1. Authorize Endpunkt (Hierhin leitet Limtube den User)
+// 1. Authorize Seite
 app.get('/api/oauth/authorize', isAuthenticated, (req, res) => {
     const { client_id, redirect_uri, state } = req.query;
-    
-    // Einfache Prüfung (in Zukunft kannst du hier echte Client-IDs prüfen)
     if (client_id !== 'limtube') return res.status(400).send("Unbekannte App.");
 
-    // Hier senden wir eine HTML Seite zurück, die fragt: "Willst du Zugriff gewähren?"
-    // Da du im Backend bist, senden wir einfaches HTML direkt.
     const html = `
-        <div style="font-family: sans-serif; text-align: center; padding: 50px;">
-            <h1>Limo ID Anmeldung</h1>
-            <p>Die App <strong>${client_id}</strong> möchte auf deine Limo-ID (Username: ${req.session.username}) zugreifen.</p>
-            <form action="/api/oauth/decision" method="POST">
-                <input type="hidden" name="client_id" value="${client_id}">
-                <input type="hidden" name="redirect_uri" value="${redirect_uri}">
-                <input type="hidden" name="state" value="${state || ''}">
-                <button type="submit" name="decision" value="allow" style="background: green; color: white; padding: 10px 20px; border: none; font-size: 16px; cursor: pointer;">Erlauben</button>
-                <button type="submit" name="decision" value="deny" style="background: red; color: white; padding: 10px 20px; border: none; font-size: 16px; cursor: pointer;">Verweigern</button>
-            </form>
-        </div>
+        <html><body style="font-family: sans-serif; background: #222; color: #fff; text-align: center; padding: 50px;">
+            <div style="background: #333; max-width: 400px; margin: 0 auto; padding: 20px; border-radius: 10px;">
+                <h2>🔐 Limo ID</h2>
+                <p><strong>Limtube</strong> möchte Zugriff auf deinen Account:</p>
+                <h3 style="color: #4CAF50;">${req.session.username}</h3>
+                <form action="/api/oauth/decision" method="POST">
+                    <input type="hidden" name="client_id" value="${client_id}">
+                    <input type="hidden" name="redirect_uri" value="${redirect_uri}">
+                    <input type="hidden" name="state" value="${state || ''}">
+                    <br>
+                    <button type="submit" name="decision" value="deny" style="background: #e74c3c; color: white; border: none; padding: 10px 20px; margin-right: 10px; border-radius: 5px; cursor: pointer;">Abbrechen</button>
+                    <button type="submit" name="decision" value="allow" style="background: #2ecc71; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer;">Erlauben</button>
+                </form>
+            </div>
+        </body></html>
     `;
     res.send(html);
 });
 
-// 2. Entscheidung verarbeiten
+// 2. Entscheidung
 app.post('/api/oauth/decision', isAuthenticated, async (req, res) => {
     const { decision, client_id, redirect_uri, state } = req.body;
+    if (decision !== 'allow') return res.redirect(`${redirect_uri}?error=access_denied`);
 
-    if (decision !== 'allow') {
-        return res.redirect(`${redirect_uri}?error=access_denied`);
-    }
-
-    // Einmaligen Code generieren
     const code = uuidv4();
-    
-    // Code in DB speichern
-    await authCodesCollection.insertOne({
-        code: code,
-        userId: new ObjectId(req.session.userId),
-        clientId: client_id,
-        createdAt: new Date()
-    });
-
-    // Zurück zu Limtube leiten mit dem Code
+    await authCodesCollection.insertOne({ code, userId: new ObjectId(req.session.userId), clientId: client_id, createdAt: new Date() });
     res.redirect(`${redirect_uri}?code=${code}&state=${state}`);
 });
 
-// 3. Token Exchange (Limtube tauscht Code gegen User-Daten)
+// 3. Token Exchange
 app.post('/api/oauth/token', async (req, res) => {
     const { code, client_id } = req.body;
+    const authEntry = await authCodesCollection.findOne({ code, clientId: client_id });
+    if (!authEntry) return res.status(400).json({ error: "Ungültig." });
 
-    const authEntry = await authCodesCollection.findOne({ code: code, clientId: client_id });
-    if (!authEntry) return res.status(400).json({ error: "Ungültiger oder abgelaufener Code." });
-
-    // Code sofort löschen (One-Time-Use)
     await authCodesCollection.deleteOne({ _id: authEntry._id });
-
-    // User Daten holen
     const user = await usersCollection.findOne({ _id: authEntry.userId });
     
-    res.json({
-        access_token: uuidv4(), // Simuliert, hier reicht uns die User Info direkt
-        user: {
-            id: user._id,
-            username: user.username,
-            isAdmin: user.isAdmin
-        }
-    });
+    res.json({ user: { id: user._id, username: user.username, isAdmin: user.isAdmin } });
 });
 
 app.use((req, res) => {
@@ -4707,4 +4685,5 @@ app.use((req, res) => {
     res.status(404).send('Endpoint nicht gefunden');
 
 });
+
 
