@@ -125,6 +125,8 @@ let dontBlameMeCollection;
 let humansCollection, ratingsCollection, criteriaCollection, categoriesCollection;
 let bankTransactionsCollection;
 let newsCollection;
+const authCodesCollectionName = 'authCodes';
+let authCodesCollection;
 
 // ==============================================================================
 // === NEU: AUTOMATISIERTE SICHERHEITS- & REPARATURFUNKTIONEN ====================
@@ -604,6 +606,8 @@ MongoClient.connect(mongoUri)
         ratingsCollection = db.collection('ratings');
         criteriaCollection = db.collection('criteria');  // Früher subjects
         categoriesCollection = db.collection('categories');
+
+		authCodesCollection = db.collection(authCodesCollectionName);
 	
 		bankTransactionsCollection = db.collection('bankTransactions');
         console.log(`${LOG_PREFIX_SERVER} ✅ MongoDB verbunden & alle Collections initialisiert.`);
@@ -665,6 +669,7 @@ MongoClient.connect(mongoUri)
                 { "createdAt": 1 },
                 { expireAfterSeconds: 72 * 60 * 60 }
             );
+			await authCodesCollection.createIndex({ "createdAt": 1 }, { expireAfterSeconds: 300 });
 
             console.log(`${LOG_PREFIX_SERVER} ✅ Alle Indizes erfolgreich geprüft/erstellt.`);
         } catch (indexErr) { 
@@ -4623,7 +4628,81 @@ app.get('/api/system/stats', async (req, res) => {
     }
 });
 
+// --- LIMO ID OAUTH SYSTEM ---
+
+// 1. Authorize Endpunkt (Hierhin leitet Limtube den User)
+app.get('/api/oauth/authorize', isAuthenticated, (req, res) => {
+    const { client_id, redirect_uri, state } = req.query;
+    
+    // Einfache Prüfung (in Zukunft kannst du hier echte Client-IDs prüfen)
+    if (client_id !== 'limtube') return res.status(400).send("Unbekannte App.");
+
+    // Hier senden wir eine HTML Seite zurück, die fragt: "Willst du Zugriff gewähren?"
+    // Da du im Backend bist, senden wir einfaches HTML direkt.
+    const html = `
+        <div style="font-family: sans-serif; text-align: center; padding: 50px;">
+            <h1>Limo ID Anmeldung</h1>
+            <p>Die App <strong>${client_id}</strong> möchte auf deine Limo-ID (Username: ${req.session.username}) zugreifen.</p>
+            <form action="/api/oauth/decision" method="POST">
+                <input type="hidden" name="client_id" value="${client_id}">
+                <input type="hidden" name="redirect_uri" value="${redirect_uri}">
+                <input type="hidden" name="state" value="${state || ''}">
+                <button type="submit" name="decision" value="allow" style="background: green; color: white; padding: 10px 20px; border: none; font-size: 16px; cursor: pointer;">Erlauben</button>
+                <button type="submit" name="decision" value="deny" style="background: red; color: white; padding: 10px 20px; border: none; font-size: 16px; cursor: pointer;">Verweigern</button>
+            </form>
+        </div>
+    `;
+    res.send(html);
+});
+
+// 2. Entscheidung verarbeiten
+app.post('/api/oauth/decision', isAuthenticated, async (req, res) => {
+    const { decision, client_id, redirect_uri, state } = req.body;
+
+    if (decision !== 'allow') {
+        return res.redirect(`${redirect_uri}?error=access_denied`);
+    }
+
+    // Einmaligen Code generieren
+    const code = uuidv4();
+    
+    // Code in DB speichern
+    await authCodesCollection.insertOne({
+        code: code,
+        userId: new ObjectId(req.session.userId),
+        clientId: client_id,
+        createdAt: new Date()
+    });
+
+    // Zurück zu Limtube leiten mit dem Code
+    res.redirect(`${redirect_uri}?code=${code}&state=${state}`);
+});
+
+// 3. Token Exchange (Limtube tauscht Code gegen User-Daten)
+app.post('/api/oauth/token', async (req, res) => {
+    const { code, client_id } = req.body;
+
+    const authEntry = await authCodesCollection.findOne({ code: code, clientId: client_id });
+    if (!authEntry) return res.status(400).json({ error: "Ungültiger oder abgelaufener Code." });
+
+    // Code sofort löschen (One-Time-Use)
+    await authCodesCollection.deleteOne({ _id: authEntry._id });
+
+    // User Daten holen
+    const user = await usersCollection.findOne({ _id: authEntry.userId });
+    
+    res.json({
+        access_token: uuidv4(), // Simuliert, hier reicht uns die User Info direkt
+        user: {
+            id: user._id,
+            username: user.username,
+            isAdmin: user.isAdmin
+        }
+    });
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
+
 });
