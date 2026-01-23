@@ -556,6 +556,11 @@ async function seedTokenCardProducts() {
     else console.log(`${LOG_PREFIX_SERVER}    Keine neuen Token-Karten Produkte zu seeden (oder bereits vorhanden).`);
 }
 
+// Hilfsfunktion: Geld auf 2 Nachkommastellen runden (kaufmännisch)
+function roundMoney(amount) {
+    return Math.round((amount + Number.EPSILON) * 100) / 100;
+}
+
 // =========================================================
 // === CACHING SYSTEM (LOCAL JSON + RAM) ===
 // =========================================================
@@ -4049,55 +4054,65 @@ app.get('/api/bank/transactions', isAuthenticated, async (req, res) => {
 });
 
 // 2. Überweisung tätigen (Geld oder Tokens)
+// 2. Überweisung tätigen (Geld oder Tokens)
 app.post('/api/bank/transfer', isAuthenticated, async (req, res) => {
-    const { recipientName, amount, type, reason } = req.body; // type: 'money' oder 'token'
+    const { recipientName, amount, type, reason } = req.body; 
     const senderId = new ObjectId(req.session.userId);
     const senderName = req.session.username;
 
     if (!recipientName || !amount || amount <= 0) return res.status(400).json({ error: "Ungültige Daten." });
     if (recipientName.toLowerCase() === senderName.toLowerCase()) return res.status(400).json({ error: "Keine Überweisung an sich selbst." });
 
+    // SAUBER RUNDEN
+    const cleanAmount = type === 'token' ? Math.floor(amount) : roundMoney(parseFloat(amount));
+
     const client = db.client;
     const session = client.startSession();
 
     try {
         await session.withTransaction(async () => {
-            // 1. Sender prüfen
             const sender = await usersCollection.findOne({ _id: senderId }, { session });
             const recipient = await usersCollection.findOne({ username: recipientName.toLowerCase() }, { session });
 
             if (!recipient) throw new Error("Empfänger nicht gefunden.");
 
-            // 2. Guthaben prüfen & abziehen
             if (type === 'token') {
-                if ((sender.tokens || 0) < amount) throw new Error("Nicht genügend Tokens.");
-                await usersCollection.updateOne({ _id: senderId }, { $inc: { tokens: -amount } }, { session });
-                await usersCollection.updateOne({ _id: recipient._id }, { $inc: { tokens: amount } }, { session });
+                if ((sender.tokens || 0) < cleanAmount) throw new Error("Nicht genügend Tokens.");
+                await usersCollection.updateOne({ _id: senderId }, { $inc: { tokens: -cleanAmount } }, { session });
+                await usersCollection.updateOne({ _id: recipient._id }, { $inc: { tokens: cleanAmount } }, { session });
             } else {
-                // Geld (USD)
-                if (sender.balance < amount && !sender.infinityMoney && !sender.isAdmin) throw new Error("Nicht genügend Guthaben.");
+                // MONEY LOGIK MIT RUNDUNG
+                const currentBalance = roundMoney(sender.balance || 0); // Sender-Guthaben sauber lesen
                 
-                // Bei Infinity Money wird nichts abgezogen, aber beim Empfänger draufgerechnet
-                if (!sender.infinityMoney && !sender.isAdmin) {
-                    await usersCollection.updateOne({ _id: senderId }, { $inc: { balance: -amount } }, { session });
+                if (currentBalance < cleanAmount && !sender.infinityMoney && !sender.isAdmin) {
+                    throw new Error(`Nicht genügend Guthaben. (${currentBalance} < ${cleanAmount})`);
                 }
-                await usersCollection.updateOne({ _id: recipient._id }, { $inc: { balance: amount } }, { session });
+                
+                if (!sender.infinityMoney && !sender.isAdmin) {
+                    await usersCollection.updateOne({ _id: senderId }, { $inc: { balance: -cleanAmount } }, { session });
+                }
+                await usersCollection.updateOne({ _id: recipient._id }, { $inc: { balance: cleanAmount } }, { session });
             }
 
-            // 3. Loggen
+            // Loggen
             await bankTransactionsCollection.insertOne({
                 fromId: senderId,
                 fromName: senderName,
                 toId: recipient._id,
                 toName: recipient.username,
-                amount: parseFloat(amount),
-                type: type, // 'money' | 'token'
+                amount: cleanAmount,
+                type: type,
                 reason: reason || "Überweisung",
                 timestamp: new Date()
             }, { session });
         });
 
-        res.json({ message: "Überweisung erfolgreich!" });
+        // Wir updaten den User in der Session, damit das Frontend sofort den neuen Stand hat
+        const updatedUser = await usersCollection.findOne({ _id: senderId });
+        // Falls wir Smart Polling nutzen, Bank-Event triggern (optional, falls du das hast)
+        // if(typeof updateDataVersion === 'function') updateDataVersion('bank');
+
+        res.json({ message: "Überweisung erfolgreich!", newBalance: updatedUser.balance });
     } catch (e) {
         res.status(400).json({ error: e.message || "Transaktion fehlgeschlagen." });
     } finally {
@@ -4566,10 +4581,12 @@ const ACHIEVEMENT_DEFINITIONS = [
       check: (u) => u.bio && u.bio.length > 5 },
     { id: 'og', icon: '🦕', title: 'Urgestein', desc: 'Dein Account ist älter als 7 Tage.', 
       check: (u) => (new Date() - u._id.getTimestamp()) / (1000 * 60 * 60 * 24) >= 7 },
+    { id: 'veteran', icon: '🎖️', title: 'Veteran', desc: 'Dein Account ist älter als 30 Tage.',
+      check: (u) => (new Date() - u._id.getTimestamp()) / (1000 * 60 * 60 * 24) >= 30 },
 
     // --- 💰 REICHTUM (MONEY) ---
     { id: 'piggy', icon: '🐷', title: 'Sparschwein', desc: 'Habe $7.500 auf dem Konto.', 
-      check: (u) => u.balance >= 7500 }, // Erhöht, damit Startkapital nicht reicht
+      check: (u) => u.balance >= 7500 },
     { id: 'middle_class', icon: '🏠', title: 'Mittelstand', desc: 'Besitze $50.000.', 
       check: (u) => u.balance >= 50000 },
     { id: 'rich', icon: '💸', title: 'Bonze', desc: 'Der erste Schritt: $100.000.', 
@@ -4583,13 +4600,19 @@ const ACHIEVEMENT_DEFINITIONS = [
     { id: 'limo_bezos', icon: '🚀', title: 'Limo Bezos', desc: 'Besitze unfassbare $1 Milliarde.', 
       check: (u) => u.balance >= 1000000000 },
     
-    // --- 📉 ARMUT / MEMES ---
+    // --- 📉 ARMUT / MEMES (Jetzt mit Rundung!) ---
     { id: 'broke', icon: '📉', title: 'Pleitegeier', desc: 'Weniger als $1 Guthaben.', 
       check: (u) => u.balance < 1 && u.balance > -500 },
     { id: 'debt_collector', icon: '🆘', title: 'In den Miesen', desc: 'Habe Schulden (Negatives Guthaben).', 
       check: (u) => u.balance < 0 },
     { id: 'exact_zero', icon: '0️⃣', title: 'Perfekte Null', desc: 'Exakt $0.00 auf dem Konto.', 
-      check: (u) => u.balance === 0 },
+      // Wir prüfen ob der Betrag extrem nah an 0 ist (wegen Floating Point)
+      check: (u) => Math.abs(u.balance) < 0.01 },
+    { id: 'meme_420', icon: '🌿', title: 'Blaze It', desc: 'Habe ca. $420 Guthaben.', 
+      // Math.round sorgt dafür, dass 419.60 bis 420.49 als 420 gelten
+      check: (u) => Math.round(u.balance) === 420 },
+    { id: 'meme_69', icon: '♋', title: 'Nice', desc: 'Habe ca. $69 Guthaben.', 
+      check: (u) => Math.round(u.balance) === 69 },
 
     // --- 🪙 TOKENS ---
     { id: 'token_start', icon: '🥉', title: 'Token Anfänger', desc: 'Besitze 1 Token.', 
@@ -4617,58 +4640,107 @@ const ACHIEVEMENT_DEFINITIONS = [
     { id: 'hedge_fund', icon: '🏦', title: 'Hedgefonds', desc: 'Besitze 10 verschiedene Aktien.', 
       check: (u, s) => s.stockCount >= 10 },
 
-    // --- 🎓 HUMAN GRADES (SOCIAL) ---
+    // --- 🎓 HUMAN GRADES & IDEAS (SOCIAL) ---
     { id: 'critic', icon: '📝', title: 'Kritiker', desc: 'Gib deine erste Bewertung ab.', 
       check: (u, s) => s.ratingCount >= 1 },
     { id: 'judge', icon: '⚖️', title: 'Richter', desc: 'Gib 10 Bewertungen ab.', 
       check: (u, s) => s.ratingCount >= 10 },
     { id: 'jury', icon: '📜', title: 'Die Jury', desc: 'Gib 50 Bewertungen ab.', 
       check: (u, s) => s.ratingCount >= 50 },
+    { id: 'inventor', icon: '💡', title: 'Erfinder', desc: 'Reiche eine Idee in der Ideenbox ein.',
+      check: (u, s) => s.ideaCount >= 1 },
+    { id: 'visionary', icon: '🔮', title: 'Visionär', desc: 'Reiche 5 Ideen in der Ideenbox ein.',
+      check: (u, s) => s.ideaCount >= 5 },
+
+    // --- 💬 CHAT ---
+    { id: 'talkative', icon: '🗣️', title: 'Gesprächig', desc: 'Sende 10 Nachrichten im Chat.',
+      check: (u, s) => s.messageCount >= 10 },
+    { id: 'influencer', icon: '📢', title: 'Influencer', desc: 'Sende 100 Nachrichten im Chat.',
+      check: (u, s) => s.messageCount >= 100 },
+    { id: 'legend_spam', icon: '🔥', title: 'Tastatur-Glüher', desc: 'Sende 1.000 Nachrichten im Chat.',
+      check: (u, s) => s.messageCount >= 1000 },
+
+    // --- 🏦 BANKING ---
+    { id: 'philanthropist', icon: '🤝', title: 'Gönner', desc: 'Tätige deine erste Überweisung.',
+      check: (u, s) => s.transferCount >= 1 },
+    { id: 'banker', icon: '💼', title: 'Bankier', desc: 'Tätige 10 Überweisungen.',
+      check: (u, s) => s.transferCount >= 10 },
+
+    // --- 📅 DAILY & LOYALITÄT ---
+    { id: 'streak_week', icon: '📅', title: 'Eine Woche Treue', desc: '7 Tage Daily Streak.',
+      check: (u, s) => s.dailyStreak >= 7 },
+    { id: 'streak_month', icon: '🗓️', title: 'Monats-Abo', desc: '30 Tage Daily Streak.',
+      check: (u, s) => s.dailyStreak >= 30 },
 
     // --- 🔨 AUKTIONEN & ERSTELLER ---
     { id: 'seller', icon: '🏷️', title: 'Verkäufer', desc: 'Erstelle eine Auktion.', 
       check: (u, s) => s.auctionCount >= 1 },
+    { id: 'power_seller', icon: '📦', title: 'Power Seller', desc: 'Erstelle 10 Auktionen.',
+      check: (u, s) => s.auctionCount >= 10 },
+    { id: 'sniper', icon: '🎯', title: 'Sniper', desc: 'Gewinne eine Auktion.',
+      check: (u, s) => s.auctionWonCount >= 1 },
+    { id: 'auction_king', icon: '👑', title: 'Auktionskönig', desc: 'Gewinne 5 Auktionen.',
+      check: (u, s) => s.auctionWonCount >= 5 },
     { id: 'wheel_spin', icon: '🎡', title: 'Glücksrad-Bauer', desc: 'Erstelle ein eigenes Glücksrad.', 
       check: (u, s) => s.wheelCount >= 1 },
 
     // --- 🕵️ HIDDEN / EASTER EGGS ---
-    { id: 'leet', icon: '👾', title: '1337', desc: 'Habe exakt $1337 Guthaben.', 
-      check: (u) => Math.floor(u.balance) === 1337 },
-    { id: 'devil', icon: '😈', title: 'Teuflisch', desc: 'Habe exakt $666 Guthaben.', 
-      check: (u) => Math.floor(u.balance) === 666 },
-    { id: 'lucky', icon: '🍀', title: 'Lucky 7', desc: 'Habe exakt $777 Guthaben.', 
-      check: (u) => Math.floor(u.balance) === 777 },
+    { id: 'leet', icon: '👾', title: '1337', desc: 'Habe ca. $1337 Guthaben.', 
+      check: (u) => Math.round(u.balance) === 1337 },
+    { id: 'devil', icon: '😈', title: 'Teuflisch', desc: 'Habe ca. $666 Guthaben.', 
+      check: (u) => Math.round(u.balance) === 666 },
+    { id: 'lucky', icon: '🍀', title: 'Lucky 7', desc: 'Habe ca. $777 Guthaben.', 
+      check: (u) => Math.round(u.balance) === 777 },
     { id: 'admin_power', icon: '🛡️', title: 'Admin Power', desc: 'Du hast Admin-Rechte.', 
       check: (u) => u.isAdmin },
 ];
 
-// Hilfsfunktion: Automatische Prüfung (Erweitert)
+// Hilfsfunktion: Automatische Prüfung (Erweitert V2)
 async function updateUserAchievements(user) {
-    // 1. STATISTIKEN SAMMELN (Das ist neu!)
     const userId = user._id;
     
+    // Wir holen uns Referenzen auf die Collections, falls sie oben nicht im Scope waren
+    
     // Parallel alle Counts abfragen für Performance
-    const [invCount, portCount, ratingCount, newsLikes, auctionCount, wheelCount] = await Promise.all([
+    const [
+        invCount, 
+        portCount, 
+        ratingCount, 
+        auctionCreatedCount, 
+        auctionWonCount, // NEU: Gewonnene Auktionen
+        wheelCount,
+        messageCount,    // NEU: Chat Nachrichten
+        ideaCount,       // NEU: Eingereichte Ideen
+        transferCount    // NEU: Getätigte Überweisungen
+    ] = await Promise.all([
         inventoriesCollection.countDocuments({ userId }),
         portfoliosCollection.countDocuments({ userId }),
-        ratingsCollection.countDocuments({ userId }), // Human Grades abgegeben
-        newsCollection.countDocuments({ likesIds: userId }), // (Falls wir User-IDs bei Likes speichern würden, sonst überspringen)
-        auctionsCollection.countDocuments({ sellerId: userId }), // Erstellte Auktionen
-        wheelsCollection.countDocuments({ creatorId: userId }) // Erstellte Glücksräder
+        ratingsCollection.countDocuments({ userId }),
+        auctionsCollection.countDocuments({ sellerId: userId }),
+        auctionsCollection.countDocuments({ highestBidderId: userId, status: 'ended_sold' }),
+        wheelsCollection.countDocuments({ creatorId: userId }),
+        limMessagesCollection.countDocuments({ senderId: userId }),
+        ideasCollection.countDocuments({ submitterId: userId }),
+        bankTransactionsCollection.countDocuments({ fromId: userId })
     ]);
     
     const stats = {
         inventoryCount: invCount,
         stockCount: portCount,
         ratingCount: ratingCount,
-        auctionCount: auctionCount,
-        wheelCount: wheelCount
+        auctionCount: auctionCreatedCount,
+        auctionWonCount: auctionWonCount,
+        wheelCount: wheelCount,
+        messageCount: messageCount,
+        ideaCount: ideaCount,
+        transferCount: transferCount,
+        dailyStreak: user.dailyStreak || 0
     };
 
     const unlocked = user.achievements || [];
     const newUnlocks = [];
 
-    // 2. Loop durch die Definitionen
+    // Loop durch die Definitionen
     for (const ach of ACHIEVEMENT_DEFINITIONS) {
         if (!unlocked.includes(ach.id)) {
             try {
@@ -4679,12 +4751,14 @@ async function updateUserAchievements(user) {
         }
     }
 
-    // 3. Speichern
+    // Speichern
     if (newUnlocks.length > 0) {
         await usersCollection.updateOne(
             { _id: user._id }, 
             { $addToSet: { achievements: { $each: newUnlocks } } }
         );
+        // Optional: Loggen
+        // console.log(`User ${user.username} hat ${newUnlocks.length} Achievements freigeschaltet.`);
         return newUnlocks;
     }
     return [];
@@ -4748,7 +4822,10 @@ app.get('/api/profile/:username', async (req, res) => {
 app.post('/api/profile/edit', isAuthenticated, async (req, res) => {
     const { bio, isInventoryPublic } = req.body;
     
-    if (bio && bio.length > 200) return res.status(400).json({ error: "Bio zu lang." });
+    // NEU: Limit auf 255 erhöht
+    if (bio && bio.length > 255) {
+        return res.status(400).json({ error: "Bio zu lang (max. 255 Zeichen)." });
+    }
 
     try {
         const updateData = {};
@@ -4762,7 +4839,6 @@ app.post('/api/profile/edit', isAuthenticated, async (req, res) => {
         res.json({ message: "Gespeichert." });
     } catch (e) { res.status(500).json({ error: "Fehler." }); }
 });
-
 // =========================================================
 // === SYSTEM STATS API (FINAL) ===
 // =========================================================
@@ -4962,11 +5038,52 @@ app.post('/api/admin/system/fix-images', isAuthenticated, isAdmin, async (req, r
     }
 });
 
+app.post('/api/admin/system/fix-decimals', isAuthenticated, isAdmin, async (req, res) => {
+    console.log(`${LOG_PREFIX_SERVER} 🔧 Starte Dezimal-Reparatur der Kontostände...`);
+    
+    try {
+        // Alle User holen
+        const users = await usersCollection.find({}).toArray();
+        let modifiedCount = 0;
+        
+        const bulkOps = [];
+
+        for (const user of users) {
+            const oldBalance = user.balance || 0;
+            // Runden auf 2 Stellen
+            const newBalance = Math.round((oldBalance + Number.EPSILON) * 100) / 100;
+
+            // Nur updaten, wenn sich was ändert (z.B. 100.00000004 -> 100.00)
+            if (oldBalance !== newBalance) {
+                bulkOps.push({
+                    updateOne: {
+                        filter: { _id: user._id },
+                        update: { $set: { balance: newBalance } }
+                    }
+                });
+                modifiedCount++;
+            }
+        }
+
+        if (bulkOps.length > 0) {
+            await usersCollection.bulkWrite(bulkOps);
+        }
+
+        console.log(`${LOG_PREFIX_SERVER} ✅ ${modifiedCount} Kontostände korrigiert.`);
+        res.json({ message: `Erfolg! ${modifiedCount} User-Konten wurden auf 2 Nachkommastellen gerundet.` });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler bei Dezimal-Reparatur:`, err);
+        res.status(500).json({ error: "Fehler: " + err.message });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 
 });
+
 
 
 
