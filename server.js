@@ -83,7 +83,7 @@ const allowedOrigins = [
     frontendDevUrlHttp, 
     frontendDevUrlHttps,
     'https://tcg.limazon.v6.rocks',
-	'https://api.limazon.v6.rocks',
+	'https://raspberrypi.tail75d81e.ts.net:8443/',
 ];
 if (frontendProdUrl) { allowedOrigins.push(frontendProdUrl); }
 console.log(`${LOG_PREFIX_SERVER} Erlaubte CORS Origins:`, allowedOrigins);
@@ -5122,4 +5122,5 @@ app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
+
 
