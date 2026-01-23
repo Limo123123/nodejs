@@ -4909,11 +4909,65 @@ app.get('/api/status/versions', (req, res) => {
     res.json(dataVersions);
 });
 
+// =========================================================
+// === SYSTEM REPARATUR: BILDER FIXEN ===
+// =========================================================
+app.post('/api/admin/system/fix-images', isAuthenticated, isAdmin, async (req, res) => {
+    console.log(`${LOG_PREFIX_SERVER} 🔧 Starte Bild-Reparatur (via.placeholder -> placehold.co)...`);
+    
+    try {
+        // 1. Hole alle Produkte, die die kaputte Domain enthalten
+        const productsToFix = await productsCollection.find({ 
+            image_url: { $regex: "via.placeholder.com" } 
+        }).toArray();
+
+        if (productsToFix.length === 0) {
+            return res.json({ message: "Keine kaputten Bilder gefunden. Alles sauber!" });
+        }
+
+        // 2. Erstelle Bulk-Operationen für das Update
+        const bulkOps = productsToFix.map(p => {
+            // Ersetze die Domain im String
+            const newUrl = p.image_url.replace("via.placeholder.com", "placehold.co");
+            
+            return {
+                updateOne: {
+                    filter: { _id: p._id },
+                    update: { $set: { image_url: newUrl } }
+                }
+            };
+        });
+
+        // 3. Führe Updates durch
+        const result = await productsCollection.bulkWrite(bulkOps);
+
+        // 4. WICHTIG: Cache aktualisieren, damit es im Shop sofort sichtbar ist
+        await refreshProductCache();
+        
+        // 5. Frontend informieren (Smart Polling)
+        if (typeof updateDataVersion === 'function') {
+            updateDataVersion('products');
+        }
+
+        console.log(`${LOG_PREFIX_SERVER} ✅ ${result.modifiedCount} Bild-URLs repariert.`);
+        
+        res.json({ 
+            message: `Erfolg! ${result.modifiedCount} Produkte wurden auf placehold.co umgestellt. Cache wurde erneuert.`,
+            modifiedCount: result.modifiedCount
+        });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler bei Bild-Reparatur:`, err);
+        res.status(500).json({ error: "Fehler bei der Reparatur: " + err.message });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 
 });
+
 
 
 
