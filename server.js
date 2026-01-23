@@ -63,6 +63,10 @@ const frontendDevUrlHttps = 'https://wl.limazon.v6.rocks';
 const PRICE_UPDATE_INTERVAL_MS = 5 * 60 * 1000; // 5 Minuten
 const PRICE_VOLATILITY_FACTOR = 0.005; // Wie stark Preise reagieren
 const MINIMUM_PRODUCT_PRICE = 1.00; // Minimaler Preis für ein Produkt
+const compression = require('compression'); 
+const CACHE_DIR = path.resolve(__dirname, 'cache');
+const PRODUCTS_CACHE_FILE = path.resolve(CACHE_DIR, 'products_cache.json');
+let globalProductCache = [];
 
 // --- Glücksrad & Token Konstanten ---
 const DEFAULT_STARTING_TOKENS = 10;
@@ -113,6 +117,8 @@ app.use(session({
         sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax'
     }
 }));
+
+app.use(compression());
 
 // --- Datenbank Variablen ---
 let db;
@@ -550,6 +556,71 @@ async function seedTokenCardProducts() {
     else console.log(`${LOG_PREFIX_SERVER}    Keine neuen Token-Karten Produkte zu seeden (oder bereits vorhanden).`);
 }
 
+// =========================================================
+// === CACHING SYSTEM (LOCAL JSON + RAM) ===
+// =========================================================
+
+async function initCacheSystem() {
+    console.log(`${LOG_PREFIX_SERVER} 🚀 Initialisiere Cache System...`);
+    
+    // 1. Cache Ordner erstellen, falls nicht vorhanden
+    if (!fs.existsSync(CACHE_DIR)) {
+        fs.mkdirSync(CACHE_DIR);
+        console.log(`${LOG_PREFIX_SERVER} 📁 Cache Ordner erstellt: ${CACHE_DIR}`);
+    }
+
+    // 2. Versuchen, Produkte aus der lokalen JSON zu laden (für sofortigen Start)
+    if (fs.existsSync(PRODUCTS_CACHE_FILE)) {
+        try {
+            const rawData = fs.readFileSync(PRODUCTS_CACHE_FILE, 'utf8');
+            globalProductCache = JSON.parse(rawData);
+            console.log(`${LOG_PREFIX_SERVER} ⚡ ${globalProductCache.length} Produkte aus lokalem JSON-Cache geladen.`);
+        } catch (err) {
+            console.error(`${LOG_PREFIX_SERVER} ⚠️ Fehler beim Lesen des lokalen Caches, lade neu aus DB.`);
+        }
+    }
+
+    // 3. Im Hintergrund: Frische Daten aus der DB holen und Cache aktualisieren
+    await refreshProductCache();
+}
+
+async function refreshProductCache() {
+    try {
+        // Hole ALLE Produkte aus der DB (optimierte Projektion)
+        const prods = await productsCollection.find({}, {
+            projection: {
+                priceHistory: 0 // History brauchen wir nicht im Shop-Frontend, spart MBs an Daten!
+            }
+        }).sort({ id: 1 }).toArray();
+
+        // Datenbereinigung (Sanitizing) wie im alten Endpoint
+        const sanitized = prods.map(p => {
+            const s = { ...p };
+            if (p.hasOwnProperty('currentPrice') && !p.isTokenCard) {
+                s.price = `$${parseFloat(p.currentPrice || 0).toFixed(2)}`;
+            }
+            s.stock = (typeof p.stock === 'number' && p.stock >= 0) ? p.stock : 0;
+            s.default_stock = (typeof p.default_stock === 'number' && p.default_stock >= 0) ? p.default_stock : (p.isTokenCard ? 99999 : 20);
+            delete s._id; // _id brauchen wir im Frontend meist nicht
+            return s;
+        });
+
+        // 1. Update RAM
+        globalProductCache = sanitized;
+
+        // 2. Update JSON Datei (Asynchron, um den Server nicht zu blockieren)
+        fs.writeFile(PRODUCTS_CACHE_FILE, JSON.stringify(sanitized), (err) => {
+            if (err) console.error("Fehler beim Schreiben des Cache-Files:", err);
+        });
+
+        // console.log(`${LOG_PREFIX_SERVER} 🔄 Produkt-Cache synchronisiert (${sanitized.length} Items).`);
+        return sanitized;
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} ❌ Fehler beim Refreshing des Product Caches:`, err);
+        return [];
+    }
+}
+
 // --- Middleware für Authentifizierung und Admin-Rechte ---
 function isAuthenticated(req, res, next) {
     if (req.session && req.session.userId) {
@@ -630,6 +701,7 @@ MongoClient.connect(mongoUri)
             await categoriesCollection.createIndex({ id: 1 }, { unique: true });
 
             // Bestehende Indizes
+			await initCacheSystem();
             await usersCollection.createIndex({ userShareCode: 1 }, { unique: true, sparse: true });
             await limChatsCollection.createIndex({ participants: 1 });
             await limChatsCollection.createIndex({ type: 1 });
@@ -724,12 +796,11 @@ MongoClient.connect(mongoUri)
             } catch (err) { console.error(`${LOG_PREFIX_SERVER} [AuctionJob] Fehler:`, err); }
         }, 60000);
 
-		// =========================================================
+// =========================================================
         // === BÖRSEN-JOB (Hybrid: User + Chaos + Gravity + LIMITS) ===
         // =========================================================
         const PRICE_UPDATE_INTERVAL_MS = 60000; // 60 Sekunden
         
-        // ⚠️ HIER DAS NEUE LIMIT:
         const MAX_STOCK_PRICE = 100000.00;      
 
         setInterval(async () => {
@@ -794,6 +865,10 @@ MongoClient.connect(mongoUri)
 
                 if (bulkOps.length > 0) {
                     await productsCollection.bulkWrite(bulkOps);
+                    
+                    // NEU: WICHTIG! Cache nach Börsen-Update aktualisieren,
+                    // damit User im Shop die neuen Preise sehen.
+                    await refreshProductCache();
                 }
 
             } catch (err) { 
@@ -1030,34 +1105,22 @@ app.post('/api/admin/generate-token-code', isAdmin, async (req, res) => {
     } catch (err) { console.error(`${LOG_PREFIX_SERVER} Admin Fehler Code-Generierung:`, err); res.status(500).json({ error: "Fehler bei der Code-Generierung." }); }
 });
 
-// PRODUCTS
 app.get('/api/products', async (req, res) => {
     try {
-        // === KORREKTUR 2: PERFORMANCE-OPTIMIERUNG DURCH PROJEKTION ===
-        const prods = await productsCollection.find({}, {
-            projection: {
-                priceHistory: 0
-            }
-        }).sort({ id: 1 }).toArray();
-
-        // Sanitize products for both classic shop and stonk market
-        const sanitized = prods.map(p => {
-            const s = { ...p };
-            if (p.hasOwnProperty('currentPrice') && !p.isTokenCard) {
-                s.price = `$${parseFloat(p.currentPrice || 0).toFixed(2)}`;
-            }
-            s.stock = (typeof p.stock === 'number' && p.stock >= 0) ? p.stock : 0;
-            s.default_stock = (typeof p.default_stock === 'number' && p.default_stock >= 0) ? p.default_stock : (p.isTokenCard ? 99999 : 20);
-            delete s._id;
-            return s;
-        });
-
-        res.json({ products: sanitized });
+        // Performance-Boost: Daten direkt aus dem RAM liefern (Global Variable)
+        if (!globalProductCache || globalProductCache.length === 0) {
+            // Notfall-Fallback, falls Cache leer ist
+            console.log(`${LOG_PREFIX_SERVER} Cache leer, lade direkt aus DB...`);
+            await refreshProductCache();
+        }
+        // Sendet die Daten aus dem Arbeitsspeicher -> Extrem schnell
+        res.json({ products: globalProductCache });
     } catch (err) {
         console.error(`${LOG_PREFIX_SERVER} Fehler Abruf Produkte:`, err);
         res.status(500).json({ error: 'Fehler Abruf Produktliste.' });
     }
 });
+
 app.post('/api/products', isAdmin, async (req, res) => {
     let { name, image_url, price, stock, isTokenCard, tokenValue } = req.body;
     console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} fügt Produkt hinzu:`, { name, price, stock, isTokenCard, tokenValue });
@@ -1108,23 +1171,53 @@ app.patch('/api/products/:id', isAdmin, async (req, res) => {
     } catch (err) { console.error(`${LOG_PREFIX_SERVER} Admin Fehler Stock-Update ${prodId}:`, err); res.status(500).json({ error: 'Fehler Stock-Update.' }); }
 });
 
-// PURCHASE
 app.post('/api/purchase', isAuthenticated, async (req, res) => {
-    console.log(`${LOG_PREFIX_SERVER} POST /api/purchase von User ${req.session.username} | Warenkorb:`, req.body.cart);
+    console.log(`${LOG_PREFIX_SERVER} POST /api/purchase von User ${req.session.username}`);
     const cart = req.body.cart;
+
+    // --- NEU: HARD LIMITS FÜR PERFORMANCE ---
+    const MAX_ITEMS_PER_TYPE = 50; 
+    const MAX_CART_SIZE = 200;     
+
     if (!Array.isArray(cart) || cart.length === 0) return res.status(400).json({ error: 'Warenkorb leer/ungültig.' });
-    const userId = new ObjectId(req.session.userId); let user; let totalOrderValue = 0; const errors = []; const productChecks = [];
-    const productDataForOrder = []; const inventoryOps = []; const tokenCodeGenerationTasks = []; let newUnlockOccurred = false;
+
+    // Limit Check VOR Datenbankzugriffen
+    let totalCartQuantity = 0;
+    for (const item of cart) {
+        if (item.quantity > MAX_ITEMS_PER_TYPE) {
+            return res.status(400).json({ error: `Limit überschritten: Maximal ${MAX_ITEMS_PER_TYPE} Stück pro Produkt erlaubt.` });
+        }
+        totalCartQuantity += item.quantity;
+    }
+    if (totalCartQuantity > MAX_CART_SIZE) {
+        return res.status(400).json({ error: `Bestellung zu groß! Maximal ${MAX_CART_SIZE} Items insgesamt erlaubt.` });
+    }
+
+    const userId = new ObjectId(req.session.userId); 
+    let user; 
+    let totalOrderValue = 0; 
+    const errors = []; 
+    const productChecks = [];
+    const productDataForOrder = []; 
+    const inventoryOps = []; 
+    const tokenCodeGenerationTasks = []; 
+    let newUnlockOccurred = false;
+
     try {
         user = await usersCollection.findOne({ _id: userId });
         if (!user) throw new Error("Benutzer nicht gefunden.");
         const isInfinityMoneyActiveForPurchase = user.isAdmin || user.infinityMoney;
+
         for (const item of cart) {
             if (!item || typeof item.id !== 'number' || typeof item.quantity !== 'number' || item.quantity <= 0) { errors.push(`Ungültiges Item.`); continue; }
+            
+            // Wir prüfen jedes Produkt gegen die Datenbank (für korrekten Stock/Preis)
             productChecks.push(productsCollection.findOne({ id: item.id }).then(async pDb => {
                 if (!pDb) { errors.push(`Produkt "${item.name || item.id}" nicht gefunden.`); return null; }
+                
                 const price = pDb.currentPrice || parseFloat((pDb.price || "$0").replace(/[^0-9.]/g, '')) || 0;
                 totalOrderValue += price * item.quantity;
+
                 if (pDb.isTokenCard && pDb.tokenValue > 0) {
                     for (let i = 0; i < item.quantity; i++) { tokenCodeGenerationTasks.push({ tokenAmount: pDb.tokenValue, limazonProductId: pDb.id, generatedForUserId: userId, originalPricePaid: price }); }
                     productDataForOrder.push({ productId: pDb.id, name: pDb.name, quantity: item.quantity, price: price, image_url: pDb.image_url, isTokenCardPurchase: true });
@@ -1132,46 +1225,103 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
                 } else {
                     const stockDb = (typeof pDb.stock === 'number' && pDb.stock >= 0) ? pDb.stock : 0;
                     if (item.quantity > stockDb) { errors.push(`"${pDb.name}": Nur ${stockDb} Stk. verfügbar.`); return null; }
+                    
                     productDataForOrder.push({ productId: pDb.id, name: pDb.name, quantity: item.quantity, price: price, image_url: pDb.image_url });
+                    
                     inventoryOps.push({ updateOne: { filter: { userId: userId, productId: pDb.id }, update: { $inc: { quantityOwned: item.quantity }, $set: { lastAcquiredPrice: price } }, upsert: true } });
+                    
                     return { id: item.id, quantityToDecrement: item.quantity, priceAtPurchase: price, name: pDb.name };
                 }
             }).catch(e => { errors.push(`DB-Fehler Produktprüfung: ${item.id}`); console.error(`${LOG_PREFIX_SERVER} Product check error:`, e); return null; }));
         }
+
         if (errors.length > 0 && productChecks.length === 0) throw new Error(errors.join('; '));
         const results = await Promise.all(productChecks);
+        
         const validationErrorsFromPromises = results.filter(r => r === null).map((r, idx) => errors[idx] || `Produktprüfung Item ${idx + 1} fehlgeschlagen.`);
         const allErrors = errors.filter(e => e && !validationErrorsFromPromises.includes(e)).concat(validationErrorsFromPromises);
+        
         if (allErrors.length > 0) { console.warn(`${LOG_PREFIX_SERVER} Validierungsfehler Kauf ${user.username}:`, allErrors); throw new Error(allErrors.join('; ')); }
+        
         const currentBalance = user.balance || 0;
         if (!isInfinityMoneyActiveForPurchase && currentBalance < totalOrderValue) throw new Error(`Guthaben zu gering. $${totalOrderValue.toFixed(2)} benötigt, du hast $${currentBalance.toFixed(2)}.`);
+        
         const validRegProdUpds = results.filter(r => r !== null && !r.isTokenCard && r.quantityToDecrement > 0);
+        
         if (validRegProdUpds.length > 0) {
             const bulkProdOps = validRegProdUpds.map(upd => ({ updateOne: { filter: { id: upd.id, stock: { $gte: upd.quantityToDecrement } }, update: { $inc: { stock: -upd.quantityToDecrement } } } }));
             const prodUpdRes = await productsCollection.bulkWrite(bulkProdOps);
             if (prodUpdRes.modifiedCount !== validRegProdUpds.length) { console.error(`${LOG_PREFIX_SERVER} Fehler Prod-Stock Bulk Write! Erw: ${validRegProdUpds.length}, Mod: ${prodUpdRes.modifiedCount}`); throw new Error('Konflikt Bestandsaktualisierung.'); }
+            
+            // NEU: Cache sofort aktualisieren, damit andere User den neuen Stock sehen!
+            refreshProductCache();
         }
+        
         if (inventoryOps.length > 0) await inventoriesCollection.bulkWrite(inventoryOps);
+        
         const genCodesUserMsg = [];
         if (tokenCodeGenerationTasks.length > 0) {
             const codesToIns = [];
-            for (const task of tokenCodeGenerationTasks) { const uniqueCode = await generateUniqueTokenRedeemCode(); codesToIns.push({ code: uniqueCode, tokenAmount: task.tokenAmount, isRedeemed: false, createdAt: new Date(), limazonProductId: task.limazonProductId, generatedForUserId: task.generatedForUserId, originalPricePaid: task.originalPricePaid }); genCodesUserMsg.push(uniqueCode); }
+            for (const task of tokenCodeGenerationTasks) { 
+                const uniqueCode = await generateUniqueTokenRedeemCode(); 
+                codesToIns.push({ code: uniqueCode, tokenAmount: task.tokenAmount, isRedeemed: false, createdAt: new Date(), limazonProductId: task.limazonProductId, generatedForUserId: task.generatedForUserId, originalPricePaid: task.originalPricePaid }); 
+                genCodesUserMsg.push(uniqueCode); 
+            }
             if (codesToIns.length > 0) { await tokenCodesCollection.insertMany(codesToIns); console.log(`${LOG_PREFIX_SERVER} ${codesToIns.length} Token Codes generiert für User ${userId}.`); }
         }
+        
         if (!isInfinityMoneyActiveForPurchase && totalOrderValue > 0) {
             const balUpdRes = await usersCollection.updateOne({ _id: userId, balance: { $gte: totalOrderValue } }, { $inc: { balance: -totalOrderValue } });
             if (balUpdRes.modifiedCount !== 1) { console.error(`${LOG_PREFIX_SERVER} Kritischer Fehler Guthabenabzug ${userId}! Soll ${totalOrderValue}.`); throw new Error('Kritischer Fehler Guthabenabzug.'); }
         }
-        if (!user.unlockedInfinityMoney && !user.isAdmin) { const regItemsForUnlock = productDataForOrder.filter(item => !item.isTokenCardPurchase); if (regItemsForUnlock.length > 0) { const allShopProds = await productsCollection.find({ id: { $gte: 100000 }, isTokenCard: { $ne: true } }, { projection: { price: 1, _id: 0 } }).sort({ price: -1 }).limit(1).toArray(); let maxPriceInShop = 0; if (allShopProds.length > 0) maxPriceInShop = parseFloat((allShopProds[0].price || "$0").replace(/[^0-9.]/g, '')) || 0; for (const boughtItemData of regItemsForUnlock) { if (boughtItemData.price >= maxPriceInShop && maxPriceInShop > 0.01) { await usersCollection.updateOne({ _id: userId }, { $set: { unlockedInfinityMoney: true } }); newUnlockOccurred = true; console.log(`${LOG_PREFIX_SERVER} Infinity Money User ${userId} freigeschaltet.`); break; } } } }
+        
+        if (!user.unlockedInfinityMoney && !user.isAdmin) { 
+            const regItemsForUnlock = productDataForOrder.filter(item => !item.isTokenCardPurchase); 
+            if (regItemsForUnlock.length > 0) { 
+                // Wir nutzen hier den globalProductCache für Speed beim Preisvergleich
+                let maxPriceInShop = 0;
+                if(globalProductCache.length > 0) {
+                     // Suche teuerstes normales Item im Cache
+                     const normalItems = globalProductCache.filter(p => !p.isTokenCard);
+                     if(normalItems.length > 0) {
+                         // Sortiere nach Preis absteigend
+                         normalItems.sort((a,b) => {
+                             const pA = parseFloat((a.price||"$0").replace(/[^0-9.]/g, '')) || 0;
+                             const pB = parseFloat((b.price||"$0").replace(/[^0-9.]/g, '')) || 0;
+                             return pB - pA;
+                         });
+                         maxPriceInShop = parseFloat((normalItems[0].price||"$0").replace(/[^0-9.]/g, '')) || 0;
+                     }
+                }
+
+                for (const boughtItemData of regItemsForUnlock) { 
+                    if (boughtItemData.price >= maxPriceInShop && maxPriceInShop > 0.01) { 
+                        await usersCollection.updateOne({ _id: userId }, { $set: { unlockedInfinityMoney: true } }); 
+                        newUnlockOccurred = true; 
+                        console.log(`${LOG_PREFIX_SERVER} Infinity Money User ${userId} freigeschaltet.`); 
+                        break; 
+                    } 
+                } 
+            } 
+        }
+        
         try { const order = { userId: userId, username: user.username, date: new Date(), items: productDataForOrder, total: totalOrderValue }; await ordersCollection.insertOne(order); } catch (orderError) { console.error(`${LOG_PREFIX_SERVER} Fehler Speicher Bestellung ${userId}:`, orderError); }
+        
         const finalUser = await usersCollection.findOne({ _id: userId }, { projection: { password: 0 } });
         const effInfMonFinal = finalUser.isAdmin ? true : (finalUser.infinityMoney || false);
+        
         let purMessage = `Kauf erfolgreich!`;
         if (genCodesUserMsg.length > 0) purMessage += ` ${genCodesUserMsg.length} Token Guthabencode(s) generiert. Siehe "Meine Token Codes".`;
         if (newUnlockOccurred) purMessage += ' Glückwunsch, Infinity Money freigeschaltet!';
+        
         console.log(`${LOG_PREFIX_SERVER} User ${user.username} Einkauf $${totalOrderValue.toFixed(2)}. ${genCodesUserMsg.length} Token Codes.`);
         res.json({ message: purMessage, user: { ...finalUser, tokens: finalUser.tokens || 0, infinityMoney: effInfMonFinal, productSellCooldowns: finalUser.productSellCooldowns || {} } });
-    } catch (err) { console.error(`${LOG_PREFIX_SERVER} POST /api/purchase Fehler User ${req.session.username}:`, err.message); if (err.message.startsWith("Guthaben zu gering") || err.message.startsWith("Konflikt Bestandsaktualisierung")) return res.status(400).json({ error: err.message }); res.status(500).json({ error: 'Unerwarteter Kauffehler.' }); }
+
+    } catch (err) { 
+        console.error(`${LOG_PREFIX_SERVER} POST /api/purchase Fehler User ${req.session.username}:`, err.message); 
+        if (err.message.startsWith("Guthaben zu gering") || err.message.startsWith("Konflikt Bestandsaktualisierung") || err.message.startsWith("Limit überschritten") || err.message.startsWith("Bestellung zu groß")) return res.status(400).json({ error: err.message }); 
+        res.status(500).json({ error: 'Unerwarteter Kauffehler.' }); 
+    }
 });
 
 // SELL Product
@@ -4685,5 +4835,6 @@ app.use((req, res) => {
     res.status(404).send('Endpoint nicht gefunden');
 
 });
+
 
 
