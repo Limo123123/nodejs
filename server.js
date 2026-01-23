@@ -586,14 +586,12 @@ async function initCacheSystem() {
 
 async function refreshProductCache() {
     try {
-        // Hole ALLE Produkte aus der DB (optimierte Projektion)
+        // Hole ALLE Produkte aus der DB (ohne History für Speed)
         const prods = await productsCollection.find({}, {
-            projection: {
-                priceHistory: 0 // History brauchen wir nicht im Shop-Frontend, spart MBs an Daten!
-            }
+            projection: { priceHistory: 0 }
         }).sort({ id: 1 }).toArray();
 
-        // Datenbereinigung (Sanitizing) wie im alten Endpoint
+        // Datenbereinigung
         const sanitized = prods.map(p => {
             const s = { ...p };
             if (p.hasOwnProperty('currentPrice') && !p.isTokenCard) {
@@ -601,26 +599,29 @@ async function refreshProductCache() {
             }
             s.stock = (typeof p.stock === 'number' && p.stock >= 0) ? p.stock : 0;
             s.default_stock = (typeof p.default_stock === 'number' && p.default_stock >= 0) ? p.default_stock : (p.isTokenCard ? 99999 : 20);
-            delete s._id; // _id brauchen wir im Frontend meist nicht
+            delete s._id; 
             return s;
         });
 
         // 1. Update RAM
         globalProductCache = sanitized;
 
-        // 2. Update JSON Datei (Asynchron, um den Server nicht zu blockieren)
+        // 2. Update JSON Datei (Asynchron)
         fs.writeFile(PRODUCTS_CACHE_FILE, JSON.stringify(sanitized), (err) => {
             if (err) console.error("Fehler beim Schreiben des Cache-Files:", err);
         });
 
-        // console.log(`${LOG_PREFIX_SERVER} 🔄 Produkt-Cache synchronisiert (${sanitized.length} Items).`);
+        // === NEU: TRIGGER FÜR SMART POLLING ===
+        // Sagt dem Frontend: "Lade die Produkte neu!"
+        updateDataVersion('products'); 
+        // ======================================
+
         return sanitized;
     } catch (err) {
         console.error(`${LOG_PREFIX_SERVER} ❌ Fehler beim Refreshing des Product Caches:`, err);
         return [];
     }
 }
-
 // --- Middleware für Authentifizierung und Admin-Rechte ---
 function isAuthenticated(req, res, next) {
     if (req.session && req.session.userId) {
@@ -923,7 +924,54 @@ app.post('/api/auth/register', async (req, res) => {
     }
 });
 
-app.post('/api/auth/login', async (req, res) => {
+// =========================================================
+// === SIMPLE LOGIN PROTECTION (RAM BASED) ===
+// =========================================================
+const loginAttempts = new Map(); // Speichert IP -> { count, expireTime }
+
+const LOGIN_BLOCK_DURATION = 15 * 60 * 1000; // 15 Minuten Sperre
+const MAX_LOGIN_ATTEMPTS = 10; // Max 10 Versuche pro 15 Min
+
+function rateLimitLogin(req, res, next) {
+    // IP ermitteln
+    const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
+    const now = Date.now();
+
+    if (loginAttempts.has(ip)) {
+        const data = loginAttempts.get(ip);
+        
+        // Wenn Zeit abgelaufen, Reset
+        if (now > data.expireTime) {
+            loginAttempts.set(ip, { count: 1, expireTime: now + LOGIN_BLOCK_DURATION });
+            return next();
+        }
+
+        // Wenn Limit erreicht
+        if (data.count >= MAX_LOGIN_ATTEMPTS) {
+            console.warn(`${LOG_PREFIX_SERVER} 🚫 Login Block für IP ${ip} (Zu viele Versuche)`);
+            return res.status(429).json({ 
+                error: "Zu viele falsche Login-Versuche. Bitte warte 15 Minuten." 
+            });
+        }
+
+        // Zähler erhöhen
+        data.count++;
+    } else {
+        // Neuer Eintrag
+        loginAttempts.set(ip, { count: 1, expireTime: now + LOGIN_BLOCK_DURATION });
+    }
+    
+    // Kleiner Cleanup (damit der RAM nicht vollläuft)
+    if (loginAttempts.size > 1000) {
+        for (const [key, val] of loginAttempts) {
+            if (now > val.expireTime) loginAttempts.delete(key);
+        }
+    }
+
+    next();
+}
+
+app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
     const { username, password, rememberMe } = req.body;
     
     // IP Adresse ermitteln (hinter Proxies oder direkt)
@@ -944,12 +992,16 @@ app.post('/api/auth/login', async (req, res) => {
         const match = await bcrypt.compare(password, user.password);
 
         if (match) {
+            // NEU: Bei Erfolg den Rate-Limit Zähler für diese IP löschen!
+            if (loginAttempts.has(clientIp)) {
+                loginAttempts.delete(clientIp);
+            }
+
             // =========================================================
             // 🛑 NEU: BAN-CHECK & IP-UPDATE
             // =========================================================
             
             // 1. Prüfen, ob die IP auf der schwarzen Liste steht
-            // (Du musst Zugriff auf deine DB-Instanz haben, z.B. 'db' oder eine 'bannedIpsCollection')
             const isBanned = await db.collection('banned_ips').findOne({ ip: clientIp });
 
             if (isBanned) {
@@ -968,7 +1020,6 @@ app.post('/api/auth/login', async (req, res) => {
                 { $set: { lastIp: clientIp, lastLogin: new Date() } }
             );
             // =========================================================
-
 
             req.session.userId = user._id.toString();
             req.session.username = user.username;
@@ -2282,10 +2333,11 @@ app.post('/api/chat/chats/:chatId/messages', isAuthenticated, isChatParticipant,
         const newMessageData = {
             chatId: chatId,
             senderId: senderId,
-            senderUsername: senderUsername, // Denormalisiert für einfache Anzeige
+            senderUsername: senderUsername, 
             content: content.trim(),
             timestamp: now
         };
+        
         const result = await limMessagesCollection.insertOne(newMessageData);
         const newMessage = { _id: result.insertedId, ...newMessageData };
 
@@ -2295,17 +2347,18 @@ app.post('/api/chat/chats/:chatId/messages', isAuthenticated, isChatParticipant,
             {
                 $set: {
                     updatedAt: now,
-                    lastMessagePreview: content.trim().substring(0, 50), // Kurze Vorschau
+                    lastMessagePreview: content.trim().substring(0, 50),
                     lastMessageSenderId: senderId,
                     lastMessageTimestamp: now
                 }
             }
         );
 
-        // Hier würde man normalerweise via WebSockets die Nachricht an andere Teilnehmer pushen.
-        // Da keine Benachrichtigungen gewünscht sind, entfällt das für den Server. Clients pollen.
+        // === NEU: TRIGGER FÜR SMART POLLING ===
+        // Sagt allen Clients: "Es gibt neue Nachrichten, bitte abrufen!"
+        updateDataVersion('chat');
+        // ======================================
 
-        console.log(`${LOG_PREFIX_CHAT} Nachricht von ${senderUsername} in Chat ${chatId} gespeichert (ID: ${newMessage._id}).`);
         res.status(201).json({ message: "Nachricht gesendet.", sentMessage: newMessage });
 
     } catch (err) {
@@ -4830,11 +4883,38 @@ app.post('/api/oauth/token', async (req, res) => {
     res.json({ user: { id: user._id, username: user.username, isAdmin: user.isAdmin } });
 });
 
+// =========================================================
+// === SMART POLLING SYSTEM (VERSION CHECK) ===
+// =========================================================
+
+// Globale Versionen (Startzeitpunkt: Jetzt)
+let dataVersions = {
+    products: Date.now(),
+    chat: Date.now(),
+    news: Date.now(),
+    stonks: Date.now()
+};
+
+// Hilfsfunktion zum Aktualisieren (wird in anderen Funktionen aufgerufen)
+function updateDataVersion(key) {
+    if (dataVersions[key]) {
+        dataVersions[key] = Date.now();
+        // console.log(`${LOG_PREFIX_SERVER} 🔄 Smart-Polling: Version für '${key}' aktualisiert.`);
+    }
+}
+
+// Der Endpoint, den das Frontend alle paar Sekunden fragt
+// Antwort ist winzig (< 1KB), spart massiv Bandbreite!
+app.get('/api/status/versions', (req, res) => {
+    res.json(dataVersions);
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 
 });
+
 
 
 
