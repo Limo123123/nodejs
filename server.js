@@ -884,9 +884,9 @@ MongoClient.connect(mongoUri)
         }, PRICE_UPDATE_INTERVAL_MS);
 
         // --- 5. HTTP Server Starten ---
-        http.createServer(app).listen(HTTP_PORT, () => {
-            console.log(`${LOG_PREFIX_SERVER} 🌐 HTTP-Server läuft auf Port ${HTTP_PORT}`);
-        });
+		http.createServer(app).listen(HTTP_PORT, '::', () => {
+    		console.log(`${LOG_PREFIX_SERVER} 🌐 Server läuft auf Port ${HTTP_PORT} (Dual Stack IPv6/IPv4)`);
+		});
     })
     .catch(err => { 
         console.error(`${LOG_PREFIX_SERVER} ❌ Kritischer Fehler: MongoDB-Verbindung fehlgeschlagen:`, err); 
@@ -5121,5 +5121,5 @@ app.get('/api/admin/health-check', isAuthenticated, isAdmin, async (req, res) =>
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
-
 });
+
