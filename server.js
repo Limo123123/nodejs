@@ -3,6 +3,7 @@
 const path = require('path');
 const fs = require('fs');
 const dotenv = require('dotenv');
+const os = require('os');
 
 // Lade Umgebungsvariablen aus secret.env (wenn vorhanden)
 const pathToSecretEnv = '/etc/secrets/secret.env'; // Für Render
@@ -5078,14 +5079,47 @@ app.post('/api/admin/system/fix-decimals', isAuthenticated, isAdmin, async (req,
     }
 });
 
+// =========================================================
+// === SYSTEM HEALTH ENDPOINT ===
+// =========================================================
+app.get('/api/admin/health-check', isAuthenticated, isAdmin, async (req, res) => {
+    // 1. Speicherverbrauch des Node.js Prozesses (WICHTIG für Docker/Limits)
+    const processMem = process.memoryUsage();
+    const heapUsedMB = (processMem.heapUsed / 1024 / 1024).toFixed(2);
+    
+    // 2. System Uptime berechnen
+    const uptimeSeconds = process.uptime();
+    const d = Math.floor(uptimeSeconds / (3600*24));
+    const h = Math.floor(uptimeSeconds % (3600*24) / 3600);
+    const m = Math.floor(uptimeSeconds % 3600 / 60);
+    const uptimeString = `${d}d ${h}h ${m}m`;
+
+    // 3. Datenbankverbindung prüfen
+    let dbStatus = "Unknown";
+    try {
+        // Ein einfacher Ping an die DB
+        await db.command({ ping: 1 });
+        dbStatus = "Connected ✅";
+    } catch (e) {
+        dbStatus = "Error ❌";
+    }
+
+    // 4. Cache Größe ermitteln
+    const cacheSize = globalProductCache ? globalProductCache.length : 0;
+
+    // JSON Antwort senden
+    res.json({
+        memory: `${heapUsedMB} MB (Heap)`, // Zeigt an, was dein Skript wirklich frisst
+        uptime: uptimeString,
+        dbStatus: dbStatus,
+        productCacheSize: cacheSize,
+        load: os.loadavg(), // Zeigt Systemauslastung (1, 5, 15 Min Durchschnitt)
+        platform: `${os.type()} ${os.release()} (${os.arch()})` // Zeigt an, worauf es läuft (Linux/Pi)
+    });
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 
 });
-
-
-
-
-
-
