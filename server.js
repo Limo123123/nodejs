@@ -5227,9 +5227,18 @@ app.get('/api/casino/stats', isAuthenticated, async (req, res) => {
     try {
         const user = await usersCollection.findOne({ _id: userId }, { projection: { casinoStats: 1 } });
         
-        const stats = user.casinoStats || { wins: 0, losses: 0, totalWagered: 0, netProfit: 0 };
+        // Hole das Objekt oder ein leeres Objekt
+        const dbStats = user.casinoStats || {};
+
+        // Baue ein sicheres Objekt mit Standardwerten (0)
+        const safeStats = {
+            wins: dbStats.wins || 0,
+            losses: dbStats.losses || 0,
+            totalWagered: dbStats.totalWagered || 0,
+            netProfit: dbStats.netProfit || 0
+        };
         
-        res.json({ stats });
+        res.json({ stats: safeStats });
     } catch (err) {
         console.error(`${LOG_PREFIX_SERVER} Fehler bei Casino-Stats:`, err);
         res.status(500).json({ error: "Fehler beim Laden der Casino-Daten." });
@@ -5317,6 +5326,303 @@ app.post('/api/casino/flip', isAuthenticated, async (req, res) => {
     } catch (err) {
         console.error(`${LOG_PREFIX_SERVER} Fehler beim Coinflip:`, err);
         res.status(500).json({ error: "Der Croupier ist gestolpert. (Serverfehler)" });
+    }
+});
+
+// =========================================================
+// === JOB CENTER SYSTEM (API) ===
+// =========================================================
+const LOG_PREFIX_JOBS = "[JobCenter API]";
+
+// Job-Definitionen (Konstanten)
+const JOB_LIST = [
+    { id: 'dishwasher', title: 'Tellerwäscher', salary: 50, cooldownSeconds: 60, reqLevel: 0, cost: 0 },
+    { id: 'delivery', title: 'Pizza-Bote', salary: 120, cooldownSeconds: 300, reqLevel: 2, cost: 500 }, // 5 Min
+    { id: 'coder', title: 'Junior Dev', salary: 400, cooldownSeconds: 900, reqLevel: 5, cost: 2000 }, // 15 Min
+    { id: 'manager', title: 'Filialleiter', salary: 1500, cooldownSeconds: 3600, reqLevel: 10, cost: 10000 }, // 1 Std
+    { id: 'ceo', title: 'CEO', salary: 5000, cooldownSeconds: 14400, reqLevel: 20, cost: 100000 } // 4 Std
+];
+
+// GET: Verfügbare Jobs & Mein Status
+app.get('/api/jobs', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const user = await usersCollection.findOne({ _id: userId }, { projection: { job: 1, jobLevel: 1, lastWorkedAt: 1 } });
+        
+        // Berechne verbleibenden Cooldown
+        let secondsLeft = 0;
+        let currentJobDef = null;
+        
+        if (user.job) {
+            currentJobDef = JOB_LIST.find(j => j.id === user.job);
+            if (currentJobDef && user.lastWorkedAt) {
+                const diff = Date.now() - new Date(user.lastWorkedAt).getTime();
+                const cdMs = currentJobDef.cooldownSeconds * 1000;
+                if (diff < cdMs) {
+                    secondsLeft = Math.ceil((cdMs - diff) / 1000);
+                }
+            }
+        }
+
+        res.json({
+            availableJobs: JOB_LIST,
+            currentJob: user.job || null,
+            currentJobLevel: user.jobLevel || 1,
+            cooldownLeft: secondsLeft,
+            canWork: secondsLeft === 0 && !!user.job
+        });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_JOBS} Fehler beim Laden:`, err);
+        res.status(500).json({ error: "Fehler im Jobcenter." });
+    }
+});
+
+// POST: Job annehmen / wechseln
+app.post('/api/jobs/select', isAuthenticated, async (req, res) => {
+    const { jobId } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    const targetJob = JOB_LIST.find(j => j.id === jobId);
+    if (!targetJob) return res.status(400).json({ error: "Job existiert nicht." });
+
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        
+        // Prüfen ob User den Job schon hat
+        if (user.job === jobId) return res.status(400).json({ error: "Du hast diesen Job bereits." });
+
+        // Kosten prüfen (Umschulung kostet Geld!)
+        if (user.balance < targetJob.cost) {
+            return res.status(400).json({ error: `Nicht genügend Geld für die Umschulung. Kosten: $${targetJob.cost}` });
+        }
+
+        // Job setzen (Level wird auf 1 resettet bei Jobwechsel)
+        await usersCollection.updateOne(
+            { _id: userId },
+            { 
+                $set: { job: jobId, jobLevel: 1, lastWorkedAt: 0 },
+                $inc: { balance: -targetJob.cost }
+            }
+        );
+
+        res.json({ message: `Herzlichen Glückwunsch! Du bist jetzt ${targetJob.title}.` });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_JOBS} Fehler Jobwechsel:`, err);
+        res.status(500).json({ error: "Serverfehler." });
+    }
+});
+
+// POST: Arbeiten gehen (Geld verdienen)
+app.post('/api/jobs/work', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        if (!user.job) return res.status(400).json({ error: "Du hast keinen Job. Wähle erst einen aus." });
+
+        const jobDef = JOB_LIST.find(j => j.id === user.job);
+        
+        // Cooldown Check
+        const now = Date.now();
+        const lastWork = user.lastWorkedAt ? new Date(user.lastWorkedAt).getTime() : 0;
+        const cooldownMs = jobDef.cooldownSeconds * 1000;
+
+        if (now - lastWork < cooldownMs) {
+            const waitSec = Math.ceil((cooldownMs - (now - lastWork)) / 1000);
+            return res.status(429).json({ error: `Du bist erschöpft. Warte noch ${waitSec}s.` });
+        }
+
+        // Gehaltsberechnung: Basis + (Level * 10%)
+        const level = user.jobLevel || 1;
+        const multiplier = 1 + ((level - 1) * 0.1); // Level 1 = 1.0x, Level 2 = 1.1x
+        const payout = Math.floor(jobDef.salary * multiplier);
+
+        // Zufälliges Event? (Optional: Beförderungschance 5%)
+        let message = `Du hast als ${jobDef.title} gearbeitet und $${payout} verdient.`;
+        let levelUp = false;
+
+        if (Math.random() < 0.05 && level < 10) { // Max Level 10
+            levelUp = true;
+            message += " Gute Arbeit! Du wurdest befördert (Level Up)!";
+        }
+
+        const updateOps = {
+            $inc: { balance: payout },
+            $set: { lastWorkedAt: new Date() }
+        };
+        
+        if (levelUp) updateOps.$inc.jobLevel = 1;
+
+        await usersCollection.updateOne({ _id: userId }, updateOps);
+
+        console.log(`${LOG_PREFIX_JOBS} User ${user.username} hat gearbeitet: +$${payout}`);
+        res.json({ message, newBalance: user.balance + payout, leveledUp: levelUp });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_JOBS} Fehler beim Arbeiten:`, err);
+        res.status(500).json({ error: "Arbeitsunfall (Serverfehler)." });
+    }
+});
+
+// =========================================================
+// === CRIME SYSTEM V2 (LOGS & SECURITY) ===
+// =========================================================
+const LOG_PREFIX_CRIME = "[Crime API]";
+const ROBBERY_COOLDOWN_MS = 60 * 60 * 1000; // 1 Stunde
+const ROBBERY_MIN_BALANCE = 500; 
+const ROBBERY_PROTECTION_LIMIT = 10000; 
+
+// Hilfsfunktion: Berechnet die Erfolgschance (0.0 bis 1.0)
+async function calculateRobberyChance(victimId, victimBalance) {
+    let chance = 0.40; // BASIS: 40% Erfolg (60% Fail)
+
+    // 1. Reichtum erschwert es (Bessere Security)
+    if (victimBalance > 10000000) chance -= 0.15; // > 10 Mio
+    else if (victimBalance > 1000000) chance -= 0.10; // > 1 Mio
+    else if (victimBalance > 100000) chance -= 0.05; // > 100k
+
+    // 2. Alarmanlage prüfen (Item ID: 'alarm_system')
+    // Wir prüfen, ob das Item im Inventar ist
+    const hasAlarm = await inventoriesCollection.findOne({ userId: victimId, productId: 'alarm_system', quantityOwned: { $gt: 0 } });
+    if (hasAlarm) {
+        chance -= 0.15; // -15% Chance durch Alarmanlage
+    }
+
+    // Min/Max Capping
+    if (chance < 0.05) chance = 0.05; // Immer 5% Restchance
+    if (chance > 0.90) chance = 0.90;
+
+    return chance;
+}
+
+// POST: Überfall durchführen
+app.post('/api/crime/rob', isAuthenticated, async (req, res) => {
+    const { targetUsername } = req.body;
+    const robberId = new ObjectId(req.session.userId);
+    const robberName = req.session.username;
+
+    if (!targetUsername) return res.status(400).json({ error: "Ziel fehlt." });
+    if (targetUsername.toLowerCase() === robberName.toLowerCase()) return res.status(400).json({ error: "Nicht dich selbst!" });
+
+    try {
+        const robber = await usersCollection.findOne({ _id: robberId });
+        const victim = await usersCollection.findOne({ username: { $regex: new RegExp(`^${targetUsername.trim()}$`, 'i') } });
+
+        if (!victim) return res.status(404).json({ error: "Ziel nicht gefunden." });
+
+        // Checks
+        if (robber.balance < ROBBERY_MIN_BALANCE) return res.status(400).json({ error: "Du brauchst $500 Startkapital für Equipment." });
+        
+        const now = Date.now();
+        const lastRob = robber.lastRobberyAt ? new Date(robber.lastRobberyAt).getTime() : 0;
+        if (now - lastRob < ROBBERY_COOLDOWN_MS) {
+            const waitMin = Math.ceil((ROBBERY_COOLDOWN_MS - (now - lastRob)) / 60000);
+            return res.status(429).json({ error: `Polizei ist wachsam! Warte ${waitMin} Min.` });
+        }
+
+        // Opfer Schutz-Checks
+        if (victim.isAdmin) return res.status(403).json({ error: "Admins sind unantastbar (Security Droid aktiv)." });
+        if (victim.balance < ROBBERY_PROTECTION_LIMIT) return res.status(400).json({ error: "Opfer ist zu arm (< $10k)." });
+
+        // --- BERECHNUNG ---
+        const successChance = await calculateRobberyChance(victim._id, victim.balance);
+        const roll = Math.random(); // 0.0 bis 1.0
+        const isSuccess = roll < successChance;
+
+        let stolen = 0;
+        let fine = 0;
+        let logMessage = "";
+
+        if (isSuccess) {
+            // Erfolg: 2% bis 5% klauen
+            const percent = (Math.random() * 0.03) + 0.02; 
+            stolen = Math.floor(victim.balance * percent);
+            if(stolen > 100000) stolen = 100000; // Cap bei 100k pro Raub
+
+            await usersCollection.updateOne({ _id: victim._id }, { $inc: { balance: -stolen } });
+            await usersCollection.updateOne({ _id: robberId }, { 
+                $inc: { balance: stolen, "crimeStats.successfulRobberies": 1, "crimeStats.totalStolen": stolen },
+                $set: { lastRobberyAt: new Date() }
+            });
+            logMessage = `Wurde von ${robberName} ausgeraubt.`;
+        } else {
+            // Fail: 5% bis 10% Strafe vom EIGENEN Geld
+            const percentFine = (Math.random() * 0.05) + 0.05;
+            fine = Math.floor(robber.balance * percentFine);
+            if(fine < 500) fine = 500;
+
+            await usersCollection.updateOne({ _id: robberId }, { 
+                $inc: { balance: -fine, "crimeStats.failedRobberies": 1, "crimeStats.totalFines": fine },
+                $set: { lastRobberyAt: new Date() }
+            });
+            logMessage = `Versuchter Überfall durch ${robberName} (abgewehrt).`;
+        }
+
+        // --- LOGBUCH EINTRAG ---
+        // Wir speichern das für das Opfer, damit es sehen kann, was passiert ist
+        if (robberyLogsCollection) {
+            await robberyLogsCollection.insertOne({
+                victimId: victim._id,
+                attackerName: robberName,
+                success: isSuccess,
+                amountLost: isSuccess ? stolen : 0,
+                timestamp: new Date()
+            });
+        }
+
+        // Antwort an Räuber
+        const updatedRobber = await usersCollection.findOne({ _id: robberId }, { projection: { balance: 1 } });
+        
+        res.json({
+            success: isSuccess,
+            amount: isSuccess ? stolen : -fine,
+            chanceWas: (successChance * 100).toFixed(1), // Zeige Chance im Nachhinein an
+            newBalance: updatedRobber.balance,
+            message: isSuccess ? `Erfolg! $${stolen} erbeutet.` : `Erwischt! $${fine} Strafe gezahlt.`
+        });
+
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Fehler im Untergrund." });
+    }
+});
+
+// GET: Mein Sicherheits-Status & Logs
+app.get('/api/crime/security', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        
+        // 1. Meine theoretische Chance, ausgeraubt zu werden
+        let myRisk = 0;
+        if (user.balance >= ROBBERY_PROTECTION_LIMIT && !user.isAdmin) {
+            const chance = await calculateRobberyChance(userId, user.balance);
+            myRisk = (chance * 100).toFixed(1); // z.B. "35.5"
+        }
+
+        // 2. Meine letzten 10 Vorfälle (Wo ich Opfer war)
+        let logs = [];
+        if (robberyLogsCollection) {
+            logs = await robberyLogsCollection
+                .find({ victimId: userId })
+                .sort({ timestamp: -1 })
+                .limit(10)
+                .toArray();
+        }
+
+        // 3. Prüfen ob Alarmanlage vorhanden
+        const hasAlarm = await inventoriesCollection.findOne({ userId: userId, productId: 'alarm_system', quantityOwned: { $gt: 0 } });
+
+        res.json({
+            riskPercent: myRisk,
+            isProtected: (user.balance < ROBBERY_PROTECTION_LIMIT || user.isAdmin),
+            hasAlarm: !!hasAlarm,
+            logs: logs
+        });
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Laden der Sicherheitsdaten." });
     }
 });
 
