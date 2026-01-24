@@ -5193,17 +5193,22 @@ setInterval(collectTaxes, TAX_INTERVAL_MS);
 app.get('/api/taxes/my-stats', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
     try {
-        const user = await usersCollection.findOne({ _id: userId }, { projection: { totalTaxesPaid: 1, balance: 1 } });
+        // WICHTIG: Wir laden jetzt auch isAdmin und infinityMoney
+        const user = await usersCollection.findOne(
+            { _id: userId }, 
+            { projection: { totalTaxesPaid: 1, balance: 1, isAdmin: 1, infinityMoney: 1 } }
+        );
         
-        // Berechnen, ob der User steuerpflichtig ist
-        const isLiable = (user.balance > TAX_THRESHOLD);
+        // Prüfung korrigiert: Nur steuerpflichtig, wenn KEIN Admin UND KEIN Infinity-User
+        const isLiable = (user.balance > TAX_THRESHOLD) && !user.isAdmin && !user.infinityMoney;
+        
         const nextTaxEstimation = isLiable ? (user.balance * TAX_RATE) : 0;
 
         res.json({
             totalPaid: user.totalTaxesPaid || 0,
             isLiable: isLiable,
             threshold: TAX_THRESHOLD,
-            ratePercent: TAX_RATE * 100, // Für Anzeige "0.5%"
+            ratePercent: TAX_RATE * 100,
             estimatedNextTax: nextTaxEstimation
         });
     } catch (err) {
@@ -5319,8 +5324,3 @@ app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
-
-
-
-
-
