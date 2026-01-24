@@ -5548,10 +5548,16 @@ app.post('/api/crime/rob', isAuthenticated, async (req, res) => {
             });
             logMessage = `Wurde von ${robberName} ausgeraubt.`;
         } else {
-            // Fail: 5% bis 10% Strafe vom EIGENEN Geld
-            const percentFine = (Math.random() * 0.05) + 0.05;
+            // FEHLSCHLAG: Strafe zahlen
+            const percentFine = (Math.random() * 0.05) + 0.05; // 5% bis 10%
             fine = Math.floor(robber.balance * percentFine);
-            if(fine < 500) fine = 500;
+            
+            // --- FIX START: LIMITS SETZEN ---
+            // Wenn die Strafe über 2.000.000 (2 Mio) geht, kappen wir sie.
+            if (fine > 2000000) fine = 2000000; 
+            // Minimum bleibt 500
+            if (fine < 500) fine = 500;
+            // --- FIX ENDE ---
 
             await usersCollection.updateOne({ _id: robberId }, { 
                 $inc: { balance: -fine, "crimeStats.failedRobberies": 1, "crimeStats.totalFines": fine },
@@ -5632,4 +5638,5 @@ app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
+
 
