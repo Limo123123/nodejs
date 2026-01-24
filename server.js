@@ -5735,7 +5735,123 @@ app.post('/api/admin/system/reset-rich-users', isAuthenticated, isAdmin, async (
     }
 });
 
+// =========================================================
+// === ADMIN ENGINE (UNIVERSAL ENDPOINT) ===
+// =========================================================
+
+// Diese Funktion wandelt String-IDs in echte ObjectIds um, falls nötig
+function parseQuery(obj) {
+    if (typeof obj !== 'object' || obj === null) return obj;
+    
+    // Wenn es ein Array ist, rekursiv durchlaufen
+    if (Array.isArray(obj)) return obj.map(parseQuery);
+
+    const newObj = {};
+    for (const key in obj) {
+        let value = obj[key];
+        
+        // Rekursion für verschachtelte Objekte (z.B. $or, $set)
+        if (typeof value === 'object') {
+            value = parseQuery(value);
+        }
+
+        // Wenn der Key "_id" ist und der Wert ein 24-Zeichen String, mache ObjectId daraus
+        if ((key === '_id' || key === 'userId' || key === 'creatorId') && typeof value === 'string' && /^[0-9a-fA-F]{24}$/.test(value)) {
+            try {
+                newObj[key] = new ObjectId(value);
+                continue; // Nächster Key
+            } catch (e) {}
+        }
+        
+        newObj[key] = value;
+    }
+    return newObj;
+}
+
+app.post('/api/admin/engine', isAuthenticated, isAdmin, async (req, res) => {
+    const { mode, collection, operation, filter, payload } = req.body;
+    // mode: 'db' (Raw DB) oder 'shortcut' (Schnellbefehle)
+    
+    console.log(`${LOG_PREFIX_SERVER} ⚙️ Engine Command von ${req.session.username}: [${mode}] ${collection}.${operation}`);
+
+    try {
+        let result = null;
+
+        // MODUS 1: RAW DATABASE ACCESS
+        if (mode === 'db') {
+            if (!collection || !operation) return res.status(400).json({ error: "Collection/Operation fehlt." });
+            
+            const targetCol = db.collection(collection);
+            
+            // Query Parsing (IDs umwandeln)
+            const cleanFilter = parseQuery(filter || {});
+            const cleanPayload = parseQuery(payload || {});
+
+            switch (operation) {
+                case 'find':
+                    // Bei Find ist payload das Limit (optional)
+                    const limit = (typeof payload === 'number') ? payload : 20;
+                    result = await targetCol.find(cleanFilter).limit(limit).toArray();
+                    break;
+                case 'findOne':
+                    result = await targetCol.findOne(cleanFilter);
+                    break;
+                case 'count':
+                    result = await targetCol.countDocuments(cleanFilter);
+                    break;
+                case 'insertOne':
+                    result = await targetCol.insertOne(cleanPayload);
+                    break;
+                case 'updateOne':
+                    result = await targetCol.updateOne(cleanFilter, cleanPayload);
+                    break;
+                case 'updateMany':
+                    result = await targetCol.updateMany(cleanFilter, cleanPayload);
+                    break;
+                case 'deleteOne':
+                    result = await targetCol.deleteOne(cleanFilter);
+                    break;
+                case 'deleteMany':
+                    result = await targetCol.deleteMany(cleanFilter);
+                    break;
+                default:
+                    return res.status(400).json({ error: "Operation nicht unterstützt." });
+            }
+        } 
+        
+        // MODUS 2: SHORTCUTS (Deine gewünschte "prd/add" Logik)
+        else if (mode === 'shortcut') {
+            // Beispiel: collection='product', operation='add'
+            if (collection === 'product') {
+                if (operation === 'add') {
+                    // Payload muss das Produkt sein
+                    // Auto-ID Generierung nutzen wir von deiner bestehenden Funktion oder Logik
+                    const newId = await generateUniqueId(productsCollection);
+                    const prod = { ...payload, id: newId };
+                    await productsCollection.insertOne(prod);
+                    result = { message: "Produkt erstellt", product: prod };
+                } 
+                else if (operation === 'remove') {
+                    // Filter ist hier z.B. { id: 123456 }
+                    const delRes = await productsCollection.deleteOne(parseQuery(filter));
+                    result = { message: "Gelöscht", deletedCount: delRes.deletedCount };
+                }
+            }
+            // Hier kannst du weitere Shortcuts definieren
+        } else {
+            return res.status(400).json({ error: "Unbekannter Modus." });
+        }
+
+        res.json({ success: true, result });
+
+    } catch (err) {
+        console.error("Engine Error:", err);
+        res.status(500).json({ error: err.message, stack: err.stack });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
+
