@@ -135,6 +135,7 @@ let bankTransactionsCollection;
 let newsCollection;
 const authCodesCollectionName = 'authCodes';
 let authCodesCollection;
+let robberyLogsCollection;
 
 // ==============================================================================
 // === NEU: AUTOMATISIERTE SICHERHEITS- & REPARATURFUNKTIONEN ====================
@@ -679,6 +680,7 @@ MongoClient.connect(mongoUri)
         transactionsCollection = db.collection('transactions');
         ideasCollection = db.collection('ideas');
 		newsCollection = db.collection('news');
+		robberyLogsCollection = db.collection('robberyLogs');
         
         // NEU: Human Grades Collections
         humansCollection = db.collection('humans');      // Früher teachers
@@ -5630,3 +5632,4 @@ app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
+
