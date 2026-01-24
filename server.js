@@ -4056,12 +4056,15 @@ app.get('/api/bank/transactions', isAuthenticated, async (req, res) => {
     }
 });
 
-// 2. Überweisung tätigen (Geld oder Tokens)
-// 2. Überweisung tätigen (Geld oder Tokens)
+// 2. Überweisung tätigen (Geld oder Tokens) - MIT SICHERHEITS-UPDATES
 app.post('/api/bank/transfer', isAuthenticated, async (req, res) => {
     const { recipientName, amount, type, reason } = req.body; 
     const senderId = new ObjectId(req.session.userId);
     const senderName = req.session.username;
+
+    // KONFIGURATION DER GRENZEN
+    const MAX_MONEY_TRANSFER = 1000000; // Max 1 Mio $ pro Überweisung
+    const MAX_TOKEN_TRANSFER = 1000;    // Max 1.000 Tokens pro Überweisung
 
     if (!recipientName || !amount || amount <= 0) return res.status(400).json({ error: "Ungültige Daten." });
     if (recipientName.toLowerCase() === senderName.toLowerCase()) return res.status(400).json({ error: "Keine Überweisung an sich selbst." });
@@ -4075,8 +4078,32 @@ app.post('/api/bank/transfer', isAuthenticated, async (req, res) => {
     try {
         await session.withTransaction(async () => {
             const sender = await usersCollection.findOne({ _id: senderId }, { session });
-            const recipient = await usersCollection.findOne({ username: recipientName.toLowerCase() }, { session });
+            
+            // --- NEU: SICHERHEITS-CHECKS ---
 
+            // 1. Infinity-Money Sperre (WICHTIG!)
+            // Wenn der Sender Infinity Money hat (und kein Admin ist, oder selbst als Admin), 
+            // darf er kein Geld aus dem Nichts erschaffen und verteilen.
+            if (sender.infinityMoney && !sender.isAdmin) { 
+                throw new Error("Sicherheitswarnung: Mit Infinity-Money sind keine Überweisungen erlaubt!");
+            }
+            // Optional: Auch Admins verbieten, um Missklick zu vermeiden? 
+            // Falls ja, nimm das "&& !sender.isAdmin" oben weg.
+
+            // 2. Limits prüfen
+            if (type === 'token') {
+                if (cleanAmount > MAX_TOKEN_TRANSFER) {
+                    throw new Error(`Limit überschritten! Maximal ${MAX_TOKEN_TRANSFER} Tokens pro Transaktion.`);
+                }
+            } else {
+                // Geld Transfer
+                if (cleanAmount > MAX_MONEY_TRANSFER) {
+                    throw new Error(`Limit überschritten! Maximal $${MAX_MONEY_TRANSFER.toLocaleString()} pro Transaktion.`);
+                }
+            }
+            // -------------------------------
+
+            const recipient = await usersCollection.findOne({ username: recipientName.toLowerCase() }, { session });
             if (!recipient) throw new Error("Empfänger nicht gefunden.");
 
             if (type === 'token') {
@@ -4084,16 +4111,20 @@ app.post('/api/bank/transfer', isAuthenticated, async (req, res) => {
                 await usersCollection.updateOne({ _id: senderId }, { $inc: { tokens: -cleanAmount } }, { session });
                 await usersCollection.updateOne({ _id: recipient._id }, { $inc: { tokens: cleanAmount } }, { session });
             } else {
-                // MONEY LOGIK MIT RUNDUNG
-                const currentBalance = roundMoney(sender.balance || 0); // Sender-Guthaben sauber lesen
+                // MONEY LOGIK
+                const currentBalance = roundMoney(sender.balance || 0);
                 
+                // Normale User Check
                 if (currentBalance < cleanAmount && !sender.infinityMoney && !sender.isAdmin) {
                     throw new Error(`Nicht genügend Guthaben. (${currentBalance} < ${cleanAmount})`);
                 }
                 
+                // Geld abziehen (außer bei Infinity/Admin)
                 if (!sender.infinityMoney && !sender.isAdmin) {
                     await usersCollection.updateOne({ _id: senderId }, { $inc: { balance: -cleanAmount } }, { session });
                 }
+                
+                // Geld gutschreiben
                 await usersCollection.updateOne({ _id: recipient._id }, { $inc: { balance: cleanAmount } }, { session });
             }
 
@@ -4110,12 +4141,9 @@ app.post('/api/bank/transfer', isAuthenticated, async (req, res) => {
             }, { session });
         });
 
-        // Wir updaten den User in der Session, damit das Frontend sofort den neuen Stand hat
         const updatedUser = await usersCollection.findOne({ _id: senderId });
-        // Falls wir Smart Polling nutzen, Bank-Event triggern (optional, falls du das hast)
-        // if(typeof updateDataVersion === 'function') updateDataVersion('bank');
-
         res.json({ message: "Überweisung erfolgreich!", newBalance: updatedUser.balance });
+
     } catch (e) {
         res.status(400).json({ error: e.message || "Transaktion fehlgeschlagen." });
     } finally {
@@ -4354,20 +4382,36 @@ app.get('/api/admin/users', isAuthenticated, isAdmin, async (req, res) => {
     } catch (e) { res.status(500).json({ error: "Fehler." }); }
 });
 
-// User bearbeiten (Geld, Tokens, Admin-Status)
+// User bearbeiten (Geld, Tokens, Admin-Status UND Infinity Money)
 app.put('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
-    const { balance, tokens, isAdmin: makeAdmin } = req.body;
+    // Wir holen uns jetzt auch 'infinityMoney' aus dem Body
+    const { balance, tokens, isAdmin: makeAdmin, infinityMoney } = req.body;
+    
     try {
+        const updateData = {
+            balance: parseFloat(balance),
+            tokens: parseInt(tokens),
+            isAdmin: makeAdmin
+        };
+
+        // Wenn infinityMoney im Request mitgesendet wurde (true oder false), updaten wir es
+        if (infinityMoney !== undefined) {
+            updateData.infinityMoney = infinityMoney;
+            // Wir setzen auch das "Unlocked" Flag, damit es konsistent bleibt
+            updateData.unlockedInfinityMoney = infinityMoney;
+        }
+
         await usersCollection.updateOne(
             { _id: new ObjectId(req.params.id) },
-            { $set: { 
-                balance: parseFloat(balance), 
-                tokens: parseInt(tokens),
-                isAdmin: makeAdmin 
-            }}
+            { $set: updateData }
         );
-        res.json({ message: "User geupdated." });
-    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+        
+        console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} hat User ${req.params.id} bearbeitet (InfMoney: ${infinityMoney}).`);
+        res.json({ message: "User erfolgreich aktualisiert." });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Aktualisieren des Users." });
+    }
 });
 
 // User Passwort Reset
@@ -5634,9 +5678,64 @@ app.get('/api/crime/security', isAuthenticated, async (req, res) => {
     }
 });
 
+// =========================================================
+// === ADMIN NOTFALL TOOLS (ECONOMY FIX) ===
+// =========================================================
+
+// 1. Infinity Money bei ALLEN Nicht-Admins entfernen
+app.post('/api/admin/system/revoke-infinity', isAuthenticated, isAdmin, async (req, res) => {
+    console.log(`${LOG_PREFIX_SERVER} 🛡️ Admin ${req.session.username} entzieht Infinity-Status...`);
+    try {
+        const result = await usersCollection.updateMany(
+            { isAdmin: { $ne: true } }, // Filter: Alle, die KEIN Admin sind
+            { 
+                $set: { 
+                    infinityMoney: false, 
+                    unlockedInfinityMoney: false 
+                } 
+            }
+        );
+        res.json({ message: `Infinity Money bei ${result.modifiedCount} normalen Usern entfernt.` });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Revoke." });
+    }
+});
+
+// 2. Reichtum kappen (Alle User über 100k werden auf 5k gesetzt)
+// VORSICHT: Setzt das Geld zurück!
+app.post('/api/admin/system/reset-rich-users', isAuthenticated, isAdmin, async (req, res) => {
+    const LIMIT = 100000000; // Wer mehr als 100m hat...
+    const RESET_TO = 5000000; // ...wird auf 5m gesetzt.
+    
+    console.log(`${LOG_PREFIX_SERVER} 📉 Admin ${req.session.username} setzt reiche User zurück...`);
+    
+    try {
+        const result = await usersCollection.updateMany(
+            { 
+                balance: { $gt: LIMIT }, 
+                isAdmin: { $ne: true } // Admins verschonen
+            },
+            { $set: { balance: RESET_TO } }
+        );
+        
+        // Auch Tokens resetten bei extremen Werten (> 1000)
+        const tokenResult = await usersCollection.updateMany(
+            { 
+                tokens: { $gt: 100000 }, 
+                isAdmin: { $ne: true } 
+            },
+            { $set: { tokens: 1000 } }
+        );
+
+        res.json({ 
+            message: `Wirtschaft bereinigt: ${result.modifiedCount} User-Guthaben und ${tokenResult.modifiedCount} Token-Konten zurückgesetzt.` 
+        });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Reset." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
-
-
