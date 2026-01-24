@@ -598,12 +598,35 @@ async function refreshProductCache() {
             projection: { priceHistory: 0 }
         }).sort({ id: 1 }).toArray();
 
-        // Datenbereinigung
+        // Datenbereinigung & Preis-Logik Trennung
         const sanitized = prods.map(p => {
             const s = { ...p };
-            if (p.hasOwnProperty('currentPrice') && !p.isTokenCard) {
-                s.price = `$${parseFloat(p.currentPrice || 0).toFixed(2)}`;
+
+            // 1. PREIS FÜR HAUPTSEITE (Shop)
+            // Priorität: basePrice > price > 0
+            // Wir formatieren das fest als String "$5.00"
+            let stablePriceVal = 0;
+            if (p.basePrice !== undefined && p.basePrice !== null) {
+                stablePriceVal = parseFloat(p.basePrice);
+            } else {
+                // Fallback: Nimm den String "$5.00" und mach eine Zahl draus
+                stablePriceVal = parseFloat((p.price || "0").toString().replace(/[^0-9.]/g, '')) || 0;
             }
+            // WICHTIG: s.price ist jetzt IMMER der stabile Preis!
+            s.price = `$${stablePriceVal.toFixed(2)}`;
+
+
+            // 2. PREIS FÜR LIMOSTONKS (Börse)
+            // Priorität: currentPrice > basePrice > price
+            let volatilePriceVal = stablePriceVal; // Standard: Gleich dem stabilen Preis
+            if (p.currentPrice !== undefined && p.currentPrice !== null) {
+                volatilePriceVal = parseFloat(p.currentPrice);
+            }
+            // WICHTIG: s.currentPrice ist der schwankende Preis (oder gleich dem stabilen, wenn keine Aktie)
+            s.currentPrice = volatilePriceVal;
+
+
+            // Restliche Bereinigung
             s.stock = (typeof p.stock === 'number' && p.stock >= 0) ? p.stock : 0;
             s.default_stock = (typeof p.default_stock === 'number' && p.default_stock >= 0) ? p.default_stock : (p.isTokenCard ? 99999 : 20);
             delete s._id; 
@@ -618,10 +641,8 @@ async function refreshProductCache() {
             if (err) console.error("Fehler beim Schreiben des Cache-Files:", err);
         });
 
-        // === NEU: TRIGGER FÜR SMART POLLING ===
-        // Sagt dem Frontend: "Lade die Produkte neu!"
+        // Trigger für Smart Polling
         updateDataVersion('products'); 
-        // ======================================
 
         return sanitized;
     } catch (err) {
@@ -629,6 +650,7 @@ async function refreshProductCache() {
         return [];
     }
 }
+
 // --- Middleware für Authentifizierung und Admin-Rechte ---
 function isAuthenticated(req, res, next) {
     if (req.session && req.session.userId) {
@@ -5854,4 +5876,5 @@ app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
+
 
