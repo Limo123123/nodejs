@@ -5118,10 +5118,208 @@ app.get('/api/admin/health-check', isAuthenticated, isAdmin, async (req, res) =>
     });
 });
 
+// =========================================================
+// === STEUER SYSTEM (THE TAXMAN) ===
+// =========================================================
+const TAX_THRESHOLD = 100000000; // 100 Millionen
+const TAX_RATE = 0.005; // 0,5%
+const TAX_INTERVAL_MS = 24 * 60 * 60 * 1000; // Alle 24 Stunden
+
+async function collectTaxes() {
+    console.log(`${LOG_PREFIX_SERVER} 📉 Der Steuer-Eintreiber macht seine Runde...`);
+    try {
+        // Finde alle User, die mehr als das Limit haben UND keine Admins/Infinity-User sind
+        const richUsers = await usersCollection.find({
+            balance: { $gt: TAX_THRESHOLD },
+            isAdmin: { $ne: true },
+            infinityMoney: { $ne: true }
+        }).toArray();
+
+        if (richUsers.length === 0) {
+            console.log(`${LOG_PREFIX_SERVER} 📉 Keine steuerpflichtigen User gefunden.`);
+            return;
+        }
+
+        let totalTaxCollected = 0;
+        const bulkOps = [];
+
+        for (const user of richUsers) {
+            // Steuer berechnen: 0.5% vom aktuellen Guthaben
+            const taxAmount = Math.floor(user.balance * TAX_RATE * 100) / 100; // Auf 2 Stellen runden
+
+            if (taxAmount > 0) {
+                bulkOps.push({
+                    updateOne: {
+                        filter: { _id: user._id },
+                        update: { 
+                            $inc: { 
+                                balance: -taxAmount,      // Geld abziehen
+                                totalTaxesPaid: taxAmount // Statistik erhöhen
+                            } 
+                        }
+                    }
+                });
+                totalTaxCollected += taxAmount;
+            }
+        }
+
+        if (bulkOps.length > 0) {
+            await usersCollection.bulkWrite(bulkOps);
+            // Optional: News generieren, wenn viel Steuer eingesammelt wurde
+            if (totalTaxCollected > 1000000) {
+                await newsCollection.insertOne({
+                    headline: "Rekord-Steuereinnahmen!",
+                    content: `Das Finanzamt hat heute insgesamt $${totalTaxCollected.toLocaleString()} von den Superreichen eingezogen.`,
+                    author: "Limo Tax Bot",
+                    category: "Wirtschaft",
+                    createdAt: new Date(),
+                    likes: 0
+                });
+            }
+        }
+
+        console.log(`${LOG_PREFIX_SERVER} 📉 Steuer-Lauf beendet. ${richUsers.length} User besteuert. Summe: $${totalTaxCollected.toFixed(2)}`);
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Steuereintreiben:`, err);
+    }
+}
+
+// Starte den Steuer-Intervall (läuft einmal am Tag)
+setInterval(collectTaxes, TAX_INTERVAL_MS);
+
+
+// --- API: Steuer-Daten für das Frontend ---
+app.get('/api/taxes/my-stats', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const user = await usersCollection.findOne({ _id: userId }, { projection: { totalTaxesPaid: 1, balance: 1 } });
+        
+        // Berechnen, ob der User steuerpflichtig ist
+        const isLiable = (user.balance > TAX_THRESHOLD);
+        const nextTaxEstimation = isLiable ? (user.balance * TAX_RATE) : 0;
+
+        res.json({
+            totalPaid: user.totalTaxesPaid || 0,
+            isLiable: isLiable,
+            threshold: TAX_THRESHOLD,
+            ratePercent: TAX_RATE * 100, // Für Anzeige "0.5%"
+            estimatedNextTax: nextTaxEstimation
+        });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler bei Tax-Stats:`, err);
+        res.status(500).json({ error: "Fehler beim Laden der Steuerdaten." });
+    }
+});
+
+// =========================================================
+// === CASINO API (COINFLIP) ===
+// =========================================================
+
+// 1. Statistiken abrufen (GET)
+app.get('/api/casino/stats', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const user = await usersCollection.findOne({ _id: userId }, { projection: { casinoStats: 1 } });
+        
+        const stats = user.casinoStats || { wins: 0, losses: 0, totalWagered: 0, netProfit: 0 };
+        
+        res.json({ stats });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler bei Casino-Stats:`, err);
+        res.status(500).json({ error: "Fehler beim Laden der Casino-Daten." });
+    }
+});
+
+// 2. Coinflip spielen (POST)
+app.post('/api/casino/flip', isAuthenticated, async (req, res) => {
+    const { betAmount, side } = req.body; // side sollte "heads" oder "tails" sein
+    const userId = new ObjectId(req.session.userId);
+
+    // Validierung
+    if (!betAmount || typeof betAmount !== 'number' || betAmount <= 0) {
+        return res.status(400).json({ error: "Ungültiger Einsatz." });
+    }
+    if (side !== 'heads' && side !== 'tails') {
+        return res.status(400).json({ error: "Wähle 'heads' (Kopf) oder 'tails' (Zahl)." });
+    }
+
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        if (!user) return res.status(404).json({ error: "User weg." });
+
+        if (user.balance < betAmount) {
+            return res.status(400).json({ error: `Nicht genügend Guthaben. Du hast nur $${user.balance.toFixed(2)}.` });
+        }
+
+        // --- DAS SPIEL ---
+        // Zufall: 0 bis 1. < 0.5 ist Heads, >= 0.5 ist Tails
+        const isHeads = Math.random() < 0.5;
+        const resultSide = isHeads ? 'heads' : 'tails';
+        const userWon = (side === resultSide);
+
+        let winAmount = 0;
+        let balanceChange = 0;
+        let message = "";
+
+        // Update-Objekt für DB vorbereiten
+        const updateFields = {
+            $inc: {
+                "casinoStats.totalWagered": betAmount,
+                // Wir zählen Wins/Losses gleich hoch
+            }
+        };
+
+        if (userWon) {
+            // GEWINN: Einsatz * 1.9 (Hausvorteil!)
+            // Beispiel: Einsatz 100 -> Gewinn 150. Netto-Profit +50.
+            winAmount = betAmount * 1.5;
+            balanceChange = winAmount - betAmount; // Der Netto-Gewinn
+            
+            updateFields.$inc.balance = balanceChange; 
+            updateFields.$inc["casinoStats.wins"] = 1;
+            updateFields.$inc["casinoStats.netProfit"] = balanceChange;
+            
+            message = `Gewonnen! Es war ${resultSide === 'heads' ? 'Kopf' : 'Zahl'}. Du erhältst $${winAmount.toFixed(2)}.`;
+        } else {
+            // VERLUST: Einsatz ist weg.
+            balanceChange = -betAmount;
+            
+            updateFields.$inc.balance = balanceChange;
+            updateFields.$inc["casinoStats.losses"] = 1;
+            updateFields.$inc["casinoStats.netProfit"] = balanceChange; // Wird negativ
+            
+            message = `Verloren! Es war ${resultSide === 'heads' ? 'Kopf' : 'Zahl'}. Dein Einsatz von $${betAmount.toFixed(2)} ist weg.`;
+        }
+
+        // DB Update durchführen
+        await usersCollection.updateOne({ _id: userId }, updateFields);
+
+        // Neuen Kontostand für Frontend holen
+        const updatedUser = await usersCollection.findOne({ _id: userId }, { projection: { balance: 1, casinoStats: 1 } });
+
+        console.log(`${LOG_PREFIX_SERVER} 🎰 User ${req.session.username} Coinflip: Setzt ${betAmount} auf ${side} -> ${userWon ? "WIN" : "LOSE"}`);
+
+        res.json({
+            won: userWon,
+            resultSide: resultSide,
+            payout: winAmount,
+            newBalance: updatedUser.balance,
+            message: message,
+            stats: updatedUser.casinoStats
+        });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Coinflip:`, err);
+        res.status(500).json({ error: "Der Croupier ist gestolpert. (Serverfehler)" });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
+
 
 
 
