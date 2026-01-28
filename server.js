@@ -6361,18 +6361,48 @@ app.post('/api/games/submit-score', isAuthenticated, async (req, res) => {
 // 4. Leaderboard (Optimiert)
 app.get('/api/games/leaderboard/:gameId', async (req, res) => {
     const { gameId } = req.params;
-    const limit = 50; // Top 50 reichen
+    const search = req.query.search || "";
+    
+    // Limits: Wir zeigen maximal die Top 100 an
+    const limit = 100; 
 
     try {
-        const scores = await highscoresCollection.find({ game: gameId })
-            .sort({ score: -1 })
-            .limit(limit)
-            .project({ username: 1, score: 1, timestamp: 1, _id: 0 })
-            .toArray();
+        const pipeline = [
+            // 1. Nur Scores für dieses Spiel holen
+            { $match: { game: gameId } }, 
+            
+            // 2. Sortieren, damit der höchste Score sicher oben ist
+            { $sort: { score: -1 } },     
+            
+            // 3. Gruppieren nach User (Entfernt Duplikate!)
+            { $group: {                   
+                _id: "$userId", 
+                username: { $first: "$username" }, // Nimm den Namen vom besten Eintrag
+                score: { $max: "$score" },         // Nimm den HÖCHSTEN Score
+                timestamp: { $first: "$timestamp" }
+            }},
+            
+            // 4. Die bereinigte Liste wieder sortieren (Platz 1, 2, 3...)
+            { $sort: { score: -1 } }
+        ];
+
+        // Optional: Suche einbauen (filtert die fertige Liste)
+        if (search) {
+            pipeline.push({ 
+                $match: { username: { $regex: search, $options: 'i' } } 
+            });
+        }
+
+        // 5. Limitieren und Felder auswählen
+        pipeline.push({ $limit: limit });
+        pipeline.push({ $project: { _id: 0, username: 1, score: 1, timestamp: 1 } });
+
+        const scores = await highscoresCollection.aggregate(pipeline).toArray();
 
         res.json({ scores });
     } catch (e) {
-        res.status(500).json({ error: "Fehler beim Laden." });
+        console.error("Leaderboard Aggregation Error:", e);
+        res.status(500).json({ error: "Fehler beim Laden der Bestenliste." });
     }
 });
 
@@ -6380,6 +6410,7 @@ app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
+
 
 
 
