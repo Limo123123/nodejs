@@ -6255,30 +6255,37 @@ app.post('/api/admin/engine', isAuthenticated, isAdmin, async (req, res) => {
 // === GAME CENTER API (AUTOMATISCH & DIREKT) ===
 // =========================================================
 
-// 1. Status abrufen: Zeigt Tokens und verbleibende Freispiele
+// HIER IST DER FIX: Wir erlauben jetzt 'snake'
+const ALLOWED_GAMES = ['flappy', 'snake']; 
+
+// 1. Status abrufen
 app.get('/api/games/status', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
     try {
         const user = await usersCollection.findOne({ _id: userId }, { projection: { tokens: 1, gamePlays: 1 } });
         res.json({ 
             tokens: user.tokens || 0,
-            remainingPlays: user.gamePlays?.flappy || 0 
+            // Wir geben das ganze Objekt zurück, damit das Frontend flappy UND snake sieht
+            gamePlays: user.gamePlays || {} 
         });
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Laden des Spielstatus." });
     }
 });
 
-// 2. Spiel starten (Automatische Abbuchung: 1 Token = 3 Spiele)
+// 2. Spiel starten (Automatische Abbuchung)
 app.post('/api/games/start', isAuthenticated, async (req, res) => {
     const { gameId } = req.body; 
     const userId = new ObjectId(req.session.userId);
     
     // Konfiguration
-    const COST_PER_BUNDLE = 1; // 1 Token
-    const PLAYS_PER_BUNDLE = 3; // gibt 3 Spiele
+    const COST_PER_BUNDLE = 1; 
+    const PLAYS_PER_BUNDLE = 3; 
 
-    if (gameId !== 'flappy') return res.status(400).json({ error: "Spiel nicht gefunden." });
+    // FIX: Wir prüfen gegen die Liste, statt stur auf 'flappy'
+    if (!ALLOWED_GAMES.includes(gameId)) {
+        return res.status(400).json({ error: `Spiel '${gameId}' nicht gefunden.` });
+    }
 
     const session = client.startSession();
 
@@ -6287,7 +6294,7 @@ app.post('/api/games/start', isAuthenticated, async (req, res) => {
             const user = await usersCollection.findOne({ _id: userId }, { session });
             const currentPlays = user.gamePlays?.[gameId] || 0;
 
-            // Fall A: User hat noch Freispiele -> Einfach eins abziehen
+            // Fall A: User hat noch Freispiele
             if (currentPlays > 0) {
                 await usersCollection.updateOne(
                     { _id: userId },
@@ -6302,8 +6309,6 @@ app.post('/api/games/start', isAuthenticated, async (req, res) => {
                 throw new Error("Nicht genug Tokens! Du brauchst 1 Token für 3 Spiele.");
             }
 
-            // Token abziehen UND Freispiele gutschreiben (minus das eine Spiel, das wir jetzt starten)
-            // Also: Token -1, Plays +2 (weil 1 sofort verbraucht wird)
             await usersCollection.updateOne(
                 { _id: userId },
                 { 
@@ -6315,8 +6320,7 @@ app.post('/api/games/start', isAuthenticated, async (req, res) => {
                 { session }
             );
 
-            // Loggen
-            await logTokenTransaction(userId, "game_start_auto_buy", -COST_PER_BUNDLE, user.tokens, user.tokens - COST_PER_BUNDLE, `Auto-buy 3 plays for ${gameId}`);
+            await logTokenTransaction(userId, "game_start_auto_buy", -COST_PER_BUNDLE, user.tokens, user.tokens - COST_PER_BUNDLE, `Auto-buy for ${gameId}`);
             
             return { started: true, deductedToken: true, remaining: (PLAYS_PER_BUNDLE - 1) };
         });
@@ -6335,14 +6339,18 @@ app.post('/api/games/start', isAuthenticated, async (req, res) => {
     }
 });
 
-// 3. Score speichern (Nur speichern, kein Abzug mehr hier!)
+// 3. Score speichern
 app.post('/api/games/submit-score', isAuthenticated, async (req, res) => {
     const { gameId, score } = req.body;
     const userId = new ObjectId(req.session.userId);
     const username = req.session.username;
 
-    if (!score || typeof score !== 'number') return res.status(400).json({ error: "Score fehlt." });
-    if (score > 100000) return res.status(400).json({ error: "Score ungültig." }); // Anti-Cheat light
+    // FIX: Auch hier erlauben wir snake
+    if (!ALLOWED_GAMES.includes(gameId)) return res.status(400).json({ error: "Spiel ungültig." });
+    if (typeof score !== 'number') return res.status(400).json({ error: "Score fehlt." });
+    
+    // Anti-Cheat (Snake Scores können höher sein als Flappy, daher Limit erhöht)
+    if (score > 1000000) return res.status(400).json({ error: "Score ungültig." }); 
 
     try {
         await highscoresCollection.insertOne({
@@ -6358,9 +6366,13 @@ app.post('/api/games/submit-score', isAuthenticated, async (req, res) => {
     }
 });
 
-// 4. Leaderboard (Optimiert)
+// 4. Leaderboard V2 (Bester Score + Suche + Seiten)
 app.get('/api/games/leaderboard/:gameId', async (req, res) => {
     const { gameId } = req.params;
+    
+    // FIX: Auch hier erlauben wir snake
+    if (!ALLOWED_GAMES.includes(gameId)) return res.status(400).json({ error: "Spiel ungültig." });
+
     const search = req.query.search || "";
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
@@ -6368,27 +6380,16 @@ app.get('/api/games/leaderboard/:gameId', async (req, res) => {
 
     try {
         const pipeline = [
-            // 1. Spiel filtern
             { $match: { game: gameId } },
-            
-            // 2. Sortieren (damit der höchste Score oben ist für das Grouping)
             { $sort: { score: -1 } },
-            
-            // 3. Gruppieren (nur den besten Score pro User behalten)
             { $group: {
                 _id: "$userId",
                 username: { $first: "$username" },
                 score: { $max: "$score" },
                 timestamp: { $first: "$timestamp" }
             }},
-
-            // 4. Suchen (Nachdem wir gruppiert haben!)
             ...(search ? [{ $match: { username: { $regex: search, $options: 'i' } } }] : []),
-
-            // 5. Erneut sortieren (Wichtig nach Group/Match)
             { $sort: { score: -1 } },
-
-            // 6. Facet: Hole Daten UND Gesamtanzahl in einer Abfrage
             { $facet: {
                 metadata: [{ $count: "total" }],
                 data: [{ $skip: skip }, { $limit: limit }, { $project: { _id: 0 } }]
@@ -6396,7 +6397,6 @@ app.get('/api/games/leaderboard/:gameId', async (req, res) => {
         ];
 
         const result = await highscoresCollection.aggregate(pipeline).toArray();
-        
         const scores = result[0].data;
         const total = result[0].metadata[0] ? result[0].metadata[0].total : 0;
 
@@ -6420,6 +6420,7 @@ app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
+
 
 
 
