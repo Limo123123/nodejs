@@ -6362,46 +6362,56 @@ app.post('/api/games/submit-score', isAuthenticated, async (req, res) => {
 app.get('/api/games/leaderboard/:gameId', async (req, res) => {
     const { gameId } = req.params;
     const search = req.query.search || "";
-    
-    // Limits: Wir zeigen maximal die Top 100 an
-    const limit = 100; 
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
 
     try {
         const pipeline = [
-            // 1. Nur Scores für dieses Spiel holen
-            { $match: { game: gameId } }, 
+            // 1. Spiel filtern
+            { $match: { game: gameId } },
             
-            // 2. Sortieren, damit der höchste Score sicher oben ist
-            { $sort: { score: -1 } },     
+            // 2. Sortieren (damit der höchste Score oben ist für das Grouping)
+            { $sort: { score: -1 } },
             
-            // 3. Gruppieren nach User (Entfernt Duplikate!)
-            { $group: {                   
-                _id: "$userId", 
-                username: { $first: "$username" }, // Nimm den Namen vom besten Eintrag
-                score: { $max: "$score" },         // Nimm den HÖCHSTEN Score
+            // 3. Gruppieren (nur den besten Score pro User behalten)
+            { $group: {
+                _id: "$userId",
+                username: { $first: "$username" },
+                score: { $max: "$score" },
                 timestamp: { $first: "$timestamp" }
             }},
-            
-            // 4. Die bereinigte Liste wieder sortieren (Platz 1, 2, 3...)
-            { $sort: { score: -1 } }
+
+            // 4. Suchen (Nachdem wir gruppiert haben!)
+            ...(search ? [{ $match: { username: { $regex: search, $options: 'i' } } }] : []),
+
+            // 5. Erneut sortieren (Wichtig nach Group/Match)
+            { $sort: { score: -1 } },
+
+            // 6. Facet: Hole Daten UND Gesamtanzahl in einer Abfrage
+            { $facet: {
+                metadata: [{ $count: "total" }],
+                data: [{ $skip: skip }, { $limit: limit }, { $project: { _id: 0 } }]
+            }}
         ];
 
-        // Optional: Suche einbauen (filtert die fertige Liste)
-        if (search) {
-            pipeline.push({ 
-                $match: { username: { $regex: search, $options: 'i' } } 
-            });
-        }
+        const result = await highscoresCollection.aggregate(pipeline).toArray();
+        
+        const scores = result[0].data;
+        const total = result[0].metadata[0] ? result[0].metadata[0].total : 0;
 
-        // 5. Limitieren und Felder auswählen
-        pipeline.push({ $limit: limit });
-        pipeline.push({ $project: { _id: 0, username: 1, score: 1, timestamp: 1 } });
+        res.json({
+            scores,
+            pagination: {
+                total,
+                page,
+                limit,
+                totalPages: Math.ceil(total / limit)
+            }
+        });
 
-        const scores = await highscoresCollection.aggregate(pipeline).toArray();
-
-        res.json({ scores });
     } catch (e) {
-        console.error("Leaderboard Aggregation Error:", e);
+        console.error("Leaderboard Error:", e);
         res.status(500).json({ error: "Fehler beim Laden der Bestenliste." });
     }
 });
@@ -6410,6 +6420,7 @@ app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
+
 
 
 
