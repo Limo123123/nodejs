@@ -1,9 +1,9 @@
 // server.js - Full Backend for Limo Open Source Project and all of the components of it
-
 const path = require('path');
 const fs = require('fs');
 const dotenv = require('dotenv');
 const os = require('os');
+const helmet = require('helmet');
 
 // Lade Umgebungsvariablen aus secret.env (wenn vorhanden)
 const pathToSecretEnv = '/etc/secrets/secret.env'; // Für Render
@@ -29,6 +29,8 @@ const LOG_PREFIX_CHAT = "[WhatsLim API]";
 const CHAT_COLLECTION_NAME = 'limChats';
 const MESSAGE_COLLECTION_NAME = 'limMessages';
 const USER_CHAT_SETTINGS_COLLECTION_NAME = 'limUserChatSettings';
+const cluster = require('cluster');
+const numCPUs = require('os').cpus().length;
 
 const SELL_COOLDOWN_SECONDS = 59;
 const SELL_COOLDOWN_SECONDS_SHOW = 60;
@@ -84,6 +86,7 @@ const allowedOrigins = [
     frontendDevUrlHttps,
     'https://tcg.limazon.v6.rocks',
 	'https://raspberrypi.tail75d81e.ts.net:8443',
+	'https://api.limazon.v6.rocks',
 ];
 if (frontendProdUrl) { allowedOrigins.push(frontendProdUrl); }
 console.log(`${LOG_PREFIX_SERVER} Erlaubte CORS Origins:`, allowedOrigins);
@@ -120,6 +123,11 @@ app.use(session({
 }));
 
 app.use(compression());
+app.use(helmet({
+    contentSecurityPolicy: false, // Falls du Probleme mit Bildern/Scripts von extern hast, deaktiviere CSP erstmal
+    crossOriginResourcePolicy: { policy: "cross-origin" } // Wichtig für deine CORS Konfiguration
+}));
+app.use('/api/', globalApiRateLimit); // Schützt alle API-Routen
 
 // --- Datenbank Variablen ---
 let db;
@@ -136,6 +144,7 @@ let newsCollection;
 const authCodesCollectionName = 'authCodes';
 let authCodesCollection;
 let robberyLogsCollection;
+let client;
 
 // ==============================================================================
 // === NEU: AUTOMATISIERTE SICHERHEITS- & REPARATURFUNKTIONEN ====================
@@ -563,87 +572,149 @@ function roundMoney(amount) {
     return Math.round((amount + Number.EPSILON) * 100) / 100;
 }
 
+// Neue, schnelle Funktion (ohne DB Check)
+function generateFastTokenCode() {
+    const p1 = Math.random().toString(36).substring(2, 7).toUpperCase();
+    const p2 = Math.random().toString(36).substring(2, 7).toUpperCase();
+    return `LMTKN-${p1}-${p2}`;
+}
+
 // =========================================================
-// === CACHING SYSTEM (LOCAL JSON + RAM) ===
+// === GLOBAL API RATE LIMITER (RAM BASED) ===
 // =========================================================
+const apiRequestCounts = new Map(); 
+const API_WINDOW_MS = 60 * 1000; // 1 Minute Zeitfenster
+const API_MAX_REQS = 300;        // Max 300 Requests pro Minute pro IP
+
+function globalApiRateLimit(req, res, next) {
+    // Admins oder interne Dienste ausnehmen? Optional hier prüfen.
+    
+    const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
+    const now = Date.now();
+
+    let data = apiRequestCounts.get(ip);
+
+    if (!data) {
+        data = { count: 1, resetTime: now + API_WINDOW_MS };
+        apiRequestCounts.set(ip, data);
+        return next();
+    }
+
+    if (now > data.resetTime) {
+        // Fenster abgelaufen -> Reset
+        data.count = 1;
+        data.resetTime = now + API_WINDOW_MS;
+        return next();
+    }
+
+    if (data.count >= API_MAX_REQS) {
+        // Limit erreicht
+        return res.status(429).json({ 
+            error: "Zu viele Anfragen. Bitte warte einen Moment.",
+            retryAfterSeconds: Math.ceil((data.resetTime - now) / 1000)
+        });
+    }
+
+    data.count++;
+    next();
+
+    // Cleanup: Um Speicherlecks zu verhindern, ab und zu aufräumen
+    if (apiRequestCounts.size > 5000) {
+        for (const [key, val] of apiRequestCounts) {
+            if (Date.now() > val.resetTime) apiRequestCounts.delete(key);
+        }
+    }
+}
+
+// =========================================================
+// === CACHING SYSTEM (LOCAL JSON + RAM + PRE-COMPUTED STRING) ===
+// =========================================================
+
+// Globale Variablen
+const CACHE_DIR = path.resolve(__dirname, 'cache');
+const PRODUCTS_CACHE_FILE = path.resolve(CACHE_DIR, 'products_cache.json');
+let globalProductCache = [];
+// NEU: Der fertig berechnete JSON-String für ultimativen Speed
+let globalProductCacheString = '{"products":[]}'; 
 
 async function initCacheSystem() {
     console.log(`${LOG_PREFIX_SERVER} 🚀 Initialisiere Cache System...`);
     
-    // 1. Cache Ordner erstellen, falls nicht vorhanden
+    // 1. Cache Ordner erstellen
     if (!fs.existsSync(CACHE_DIR)) {
         fs.mkdirSync(CACHE_DIR);
-        console.log(`${LOG_PREFIX_SERVER} 📁 Cache Ordner erstellt: ${CACHE_DIR}`);
     }
 
-    // 2. Versuchen, Produkte aus der lokalen JSON zu laden (für sofortigen Start)
+    // 2. Initiales Laden (Versuch)
     if (fs.existsSync(PRODUCTS_CACHE_FILE)) {
         try {
             const rawData = fs.readFileSync(PRODUCTS_CACHE_FILE, 'utf8');
             globalProductCache = JSON.parse(rawData);
-            console.log(`${LOG_PREFIX_SERVER} ⚡ ${globalProductCache.length} Produkte aus lokalem JSON-Cache geladen.`);
+            // Auch den String initial setzen!
+            globalProductCacheString = JSON.stringify({ products: globalProductCache });
+            console.log(`${LOG_PREFIX_SERVER} ⚡ Cache aus Datei geladen.`);
         } catch (err) {
-            console.error(`${LOG_PREFIX_SERVER} ⚠️ Fehler beim Lesen des lokalen Caches, lade neu aus DB.`);
+            console.warn(`${LOG_PREFIX_SERVER} ⚠️ Cache-Datei fehlerhaft, lade neu aus DB.`);
         }
     }
 
-    // 3. Im Hintergrund: Frische Daten aus der DB holen und Cache aktualisieren
+    // 3. Sofortiges Update aus der DB
     await refreshProductCache();
 }
 
 async function refreshProductCache() {
     try {
         // Hole ALLE Produkte aus der DB (ohne History für Speed)
-        const prods = await productsCollection.find({}, {
-            projection: { priceHistory: 0 }
+        // Sortieren nach ID sorgt für konsistente Reihenfolge
+        const prods = await productsCollection.find({}, { 
+            projection: { priceHistory: 0 } 
         }).sort({ id: 1 }).toArray();
 
-        // Datenbereinigung & Preis-Logik Trennung
+        // Datenbereinigung & Preis-Logik (wie gehabt)
         const sanitized = prods.map(p => {
             const s = { ...p };
 
-            // 1. PREIS FÜR HAUPTSEITE (Shop)
-            // Priorität: basePrice > price > 0
-            // Wir formatieren das fest als String "$5.00"
+            // Preis Logik
             let stablePriceVal = 0;
             if (p.basePrice !== undefined && p.basePrice !== null) {
                 stablePriceVal = parseFloat(p.basePrice);
             } else {
-                // Fallback: Nimm den String "$5.00" und mach eine Zahl draus
                 stablePriceVal = parseFloat((p.price || "0").toString().replace(/[^0-9.]/g, '')) || 0;
             }
-            // WICHTIG: s.price ist jetzt IMMER der stabile Preis!
             s.price = `$${stablePriceVal.toFixed(2)}`;
 
-
-            // 2. PREIS FÜR LIMOSTONKS (Börse)
-            // Priorität: currentPrice > basePrice > price
-            let volatilePriceVal = stablePriceVal; // Standard: Gleich dem stabilen Preis
+            // Börsen Preis
+            let volatilePriceVal = stablePriceVal;
             if (p.currentPrice !== undefined && p.currentPrice !== null) {
                 volatilePriceVal = parseFloat(p.currentPrice);
             }
-            // WICHTIG: s.currentPrice ist der schwankende Preis (oder gleich dem stabilen, wenn keine Aktie)
             s.currentPrice = volatilePriceVal;
 
-
-            // Restliche Bereinigung
+            // Rest
             s.stock = (typeof p.stock === 'number' && p.stock >= 0) ? p.stock : 0;
             s.default_stock = (typeof p.default_stock === 'number' && p.default_stock >= 0) ? p.default_stock : (p.isTokenCard ? 99999 : 20);
+            
+            // _id entfernen spart Speicher und Bandbreite beim Senden
             delete s._id; 
             return s;
         });
 
-        // 1. Update RAM
+        // 1. Update RAM Objekt (für interne Logik wie Käufe)
         globalProductCache = sanitized;
 
-        // 2. Update JSON Datei (Asynchron)
+        // 2. Update RAM String (HIER IST DER PERFORMANCE TRICK)
+        // Wir berechnen das JSON EINMAL hier, statt 1000x pro Sekunde bei jedem Request.
+        globalProductCacheString = JSON.stringify({ products: sanitized });
+
+        // 3. Update Datei (Asynchron, Fehler ignorieren wir hier, damit Server nicht crasht)
         fs.writeFile(PRODUCTS_CACHE_FILE, JSON.stringify(sanitized), (err) => {
-            if (err) console.error("Fehler beim Schreiben des Cache-Files:", err);
+            if (err) console.error("Cache-Write Error:", err);
         });
 
-        // Trigger für Smart Polling
+        // Trigger für Smart Polling (Frontend merkt: "Ah, neue Daten!")
         updateDataVersion('products'); 
 
+        // console.log(`${LOG_PREFIX_SERVER} ♻️ Produkt-Cache aktualisiert (${sanitized.length} Items).`);
         return sanitized;
     } catch (err) {
         console.error(`${LOG_PREFIX_SERVER} ❌ Fehler beim Refreshing des Product Caches:`, err);
@@ -682,7 +753,8 @@ async function isAdmin(req, res, next) {
 
 // --- Init MongoDB-Verbindung und Serverstart ---
 MongoClient.connect(mongoUri)
-    .then(async client => {
+    .then(async mongoClient => {
+        client = mongoClient; // Client global speichern für Transaktionen
         db = client.db(mongoDbName);
         
         // --- 1. Collections Initialisieren ---
@@ -701,20 +773,19 @@ MongoClient.connect(mongoUri)
         portfoliosCollection = db.collection('portfolios');
         transactionsCollection = db.collection('transactions');
         ideasCollection = db.collection('ideas');
-		newsCollection = db.collection('news');
-		robberyLogsCollection = db.collection('robberyLogs');
+        newsCollection = db.collection('news');
+        robberyLogsCollection = db.collection('robberyLogs');
         
         // NEU: Human Grades Collections
-        humansCollection = db.collection('humans');      // Früher teachers
+        humansCollection = db.collection('humans');       // Früher teachers
         ratingsCollection = db.collection('ratings');
         criteriaCollection = db.collection('criteria');  // Früher subjects
         categoriesCollection = db.collection('categories');
 
-		authCodesCollection = db.collection(authCodesCollectionName);
-	
-		bankTransactionsCollection = db.collection('bankTransactions');
+        authCodesCollection = db.collection(authCodesCollectionName);
+    
+        bankTransactionsCollection = db.collection('bankTransactions');
         console.log(`${LOG_PREFIX_SERVER} ✅ MongoDB verbunden & alle Collections initialisiert.`);
-
         // --- 2. Indizes & Reparaturen ---
         try {
             // WICHTIG: Alten, fehlerhaften Index löschen (falls vorhanden), um Crash zu verhindern
@@ -775,6 +846,39 @@ MongoClient.connect(mongoUri)
             );
 			await authCodesCollection.createIndex({ "createdAt": 1 }, { expireAfterSeconds: 300 });
 
+			// --- AUTO-DELETE (TTL) INDIZES ---
+			// Löscht Logs automatisch nach einer bestimmten Zeit
+
+			// Bank-Historie: 90 Tage aufheben
+			await bankTransactionsCollection.createIndex(
+			    { "timestamp": 1 }, 
+			    { expireAfterSeconds: 90 * 24 * 60 * 60 } 
+			);
+
+			// Raub-Logs: 30 Tage aufheben (interessiert später niemanden mehr)
+			if (robberyLogsCollection) {
+			    await robberyLogsCollection.createIndex(
+			        { "timestamp": 1 }, 
+			        { expireAfterSeconds: 30 * 24 * 60 * 60 } 
+				);
+			}
+
+			// Token-Logs: 60 Tage aufheben
+			if (tokenTransactionsCollection) {
+ 			   await tokenTransactionsCollection.createIndex(
+ 			     { "timestamp": 1 }, 
+   			     { expireAfterSeconds: 60 * 24 * 60 * 60 } 
+  				);
+			}
+
+			// Nachrichten: Optional, z.B. nach 1 Jahr löschen, wenn der Chat zu voll wird
+			await limMessagesCollection.createIndex(
+			    { "timestamp": 1 }, 
+			    { expireAfterSeconds: 365 * 24 * 60 * 60 } 
+			);
+
+			console.log(`${LOG_PREFIX_SERVER} ♻️ Auto-Delete (TTL) Indizes geprüft.`);
+
             console.log(`${LOG_PREFIX_SERVER} ✅ Alle Indizes erfolgreich geprüft/erstellt.`);
         } catch (indexErr) { 
             console.error(`${LOG_PREFIX_SERVER} ❌ Fehler bei der Indexerstellung:`, indexErr); 
@@ -827,7 +931,7 @@ MongoClient.connect(mongoUri)
             } catch (err) { console.error(`${LOG_PREFIX_SERVER} [AuctionJob] Fehler:`, err); }
         }, 60000);
 
-// =========================================================
+		// =========================================================
         // === BÖRSEN-JOB (Hybrid: User + Chaos + Gravity + LIMITS) ===
         // =========================================================
         const PRICE_UPDATE_INTERVAL_MS = 60000; // 60 Sekunden
@@ -916,6 +1020,38 @@ MongoClient.connect(mongoUri)
         console.error(`${LOG_PREFIX_SERVER} ❌ Kritischer Fehler: MongoDB-Verbindung fehlgeschlagen:`, err); 
         process.exit(1); 
     });
+
+// === GRACEFUL SHUTDOWN (Für Docker) ===
+async function gracefulShutdown(signal) {
+    console.log(`${LOG_PREFIX_SERVER} 🛑 ${signal} empfangen. Fahre sauber herunter...`);
+    
+    // 1. Keine neuen HTTP-Anfragen mehr annehmen
+    server.close(async () => {
+        console.log(`${LOG_PREFIX_SERVER} 🔌 HTTP Server geschlossen. Laufende Requests beendet.`);
+        
+        // 2. Datenbankverbindung sauber trennen
+        if (client) {
+            try {
+                await client.close();
+                console.log(`${LOG_PREFIX_SERVER} 💾 MongoDB Verbindung geschlossen.`);
+            } catch (err) {
+                console.error(`${LOG_PREFIX_SERVER} Fehler beim Schließen der DB:`, err);
+            }
+        }
+        
+        console.log(`${LOG_PREFIX_SERVER} 👋 Tschüss!`);
+        process.exit(0);
+    });
+
+    // Fallback: Wenn er nach 10 Sekunden nicht fertig ist, hart beenden
+    setTimeout(() => {
+        console.error(`${LOG_PREFIX_SERVER} ⚠️ Shutdown dauerte zu lange. Erzwinge Exit.`);
+        process.exit(1);
+    }, 10000);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM')); // Docker Stop Signal
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));   // Strg+C lokal
 
 // === API ENDPOINTS ===
 
@@ -1186,20 +1322,10 @@ app.post('/api/admin/generate-token-code', isAdmin, async (req, res) => {
     } catch (err) { console.error(`${LOG_PREFIX_SERVER} Admin Fehler Code-Generierung:`, err); res.status(500).json({ error: "Fehler bei der Code-Generierung." }); }
 });
 
-app.get('/api/products', async (req, res) => {
-    try {
-        // Performance-Boost: Daten direkt aus dem RAM liefern (Global Variable)
-        if (!globalProductCache || globalProductCache.length === 0) {
-            // Notfall-Fallback, falls Cache leer ist
-            console.log(`${LOG_PREFIX_SERVER} Cache leer, lade direkt aus DB...`);
-            await refreshProductCache();
-        }
-        // Sendet die Daten aus dem Arbeitsspeicher -> Extrem schnell
-        res.json({ products: globalProductCache });
-    } catch (err) {
-        console.error(`${LOG_PREFIX_SERVER} Fehler Abruf Produkte:`, err);
-        res.status(500).json({ error: 'Fehler Abruf Produktliste.' });
-    }
+// --- DER DAZUGEHÖRIGE OPTIMIERTE ENDPOINT ---
+app.get('/api/products', (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    res.send(globalProductCacheString);
 });
 
 app.post('/api/products', isAdmin, async (req, res) => {
@@ -1253,196 +1379,453 @@ app.patch('/api/products/:id', isAdmin, async (req, res) => {
 });
 
 app.post('/api/purchase', isAuthenticated, async (req, res) => {
-    console.log(`${LOG_PREFIX_SERVER} POST /api/purchase von User ${req.session.username}`);
+    console.log(`${LOG_PREFIX_SERVER} 🛒 POST /api/purchase von User ${req.session.username}`);
     const cart = req.body.cart;
+    const userId = new ObjectId(req.session.userId);
 
-    // --- NEU: HARD LIMITS FÜR PERFORMANCE ---
+    // --- Performance & Security Limits ---
     const MAX_ITEMS_PER_TYPE = 50; 
-    const MAX_CART_SIZE = 200;     
+    const MAX_CART_SIZE = 200;      
 
     if (!Array.isArray(cart) || cart.length === 0) return res.status(400).json({ error: 'Warenkorb leer/ungültig.' });
 
-    // Limit Check VOR Datenbankzugriffen
+    // 1. Validierung VOR Datenbankzugriff (spart Ressourcen)
     let totalCartQuantity = 0;
+    const cartItemIds = [];
+    const cartMap = new Map(); // Map für schnellen Zugriff: ID -> Quantity
+
     for (const item of cart) {
+        if (!item.id || typeof item.quantity !== 'number' || item.quantity <= 0) {
+            return res.status(400).json({ error: `Ungültiges Item im Warenkorb.` });
+        }
         if (item.quantity > MAX_ITEMS_PER_TYPE) {
             return res.status(400).json({ error: `Limit überschritten: Maximal ${MAX_ITEMS_PER_TYPE} Stück pro Produkt erlaubt.` });
         }
         totalCartQuantity += item.quantity;
+        cartItemIds.push(item.id);
+        
+        // Summiere Mengen, falls ein Produkt mehrfach im Array auftaucht
+        const currentQty = cartMap.get(item.id) || 0;
+        cartMap.set(item.id, currentQty + item.quantity);
     }
+
     if (totalCartQuantity > MAX_CART_SIZE) {
         return res.status(400).json({ error: `Bestellung zu groß! Maximal ${MAX_CART_SIZE} Items insgesamt erlaubt.` });
     }
 
-    const userId = new ObjectId(req.session.userId); 
-    let user; 
-    let totalOrderValue = 0; 
-    const errors = []; 
-    const productChecks = [];
-    const productDataForOrder = []; 
-    const inventoryOps = []; 
-    const tokenCodeGenerationTasks = []; 
-    let newUnlockOccurred = false;
-
+    // --- START TRANSACTION ---
+    // Dies verhindert den "Slow Internet Exploit" (Race Conditions)
+    const session = client.startSession();
+    
     try {
-        user = await usersCollection.findOne({ _id: userId });
-        if (!user) throw new Error("Benutzer nicht gefunden.");
-        const isInfinityMoneyActiveForPurchase = user.isAdmin || user.infinityMoney;
+        let transactionResult = await session.withTransaction(async () => {
+            // A. User und ALLE Produkte parallel laden (Performance Boost!)
+            const [user, dbProducts] = await Promise.all([
+                usersCollection.findOne({ _id: userId }, { session }),
+                productsCollection.find({ id: { $in: cartItemIds } }, { session }).toArray()
+            ]);
 
-        for (const item of cart) {
-            if (!item || typeof item.id !== 'number' || typeof item.quantity !== 'number' || item.quantity <= 0) { errors.push(`Ungültiges Item.`); continue; }
+            if (!user) throw new Error("Benutzer nicht gefunden.");
+
+            // B. Produkte abgleichen und Preise berechnen
+            let totalOrderValue = 0;
+            const productDataForOrder = [];
+            const inventoryOps = [];
+            const productStockOps = [];
+            const tokenCodeGenerationTasks = [];
+            let newUnlockOccurred = false;
             
-            // Wir prüfen jedes Produkt gegen die Datenbank (für korrekten Stock/Preis)
-            productChecks.push(productsCollection.findOne({ id: item.id }).then(async pDb => {
-                if (!pDb) { errors.push(`Produkt "${item.name || item.id}" nicht gefunden.`); return null; }
+            // Map für DB Produkte erstellen für schnellen Zugriff
+            const dbProductMap = new Map(dbProducts.map(p => [p.id, p]));
+
+            // Über die zusammengefasste Cart-Map iterieren
+            for (const [prodId, quantity] of cartMap.entries()) {
+                const pDb = dbProductMap.get(prodId);
                 
+                if (!pDb) throw new Error(`Produkt ID ${prodId} existiert nicht mehr.`);
+
+                // Preis ermitteln
                 const price = pDb.currentPrice || parseFloat((pDb.price || "$0").replace(/[^0-9.]/g, '')) || 0;
-                totalOrderValue += price * item.quantity;
+                totalOrderValue += price * quantity;
 
-                if (pDb.isTokenCard && pDb.tokenValue > 0) {
-                    for (let i = 0; i < item.quantity; i++) { tokenCodeGenerationTasks.push({ tokenAmount: pDb.tokenValue, limazonProductId: pDb.id, generatedForUserId: userId, originalPricePaid: price }); }
-                    productDataForOrder.push({ productId: pDb.id, name: pDb.name, quantity: item.quantity, price: price, image_url: pDb.image_url, isTokenCardPurchase: true });
-                    return { id: item.id, quantityToDecrement: 0, priceAtPurchase: price, isTokenCard: true, name: pDb.name };
-                } else {
-                    const stockDb = (typeof pDb.stock === 'number' && pDb.stock >= 0) ? pDb.stock : 0;
-                    if (item.quantity > stockDb) { errors.push(`"${pDb.name}": Nur ${stockDb} Stk. verfügbar.`); return null; }
+                // Stock Check (bei normalen Produkten)
+                if (!pDb.isTokenCard) {
+                    const currentStock = (typeof pDb.stock === 'number' && pDb.stock >= 0) ? pDb.stock : 0;
+                    if (quantity > currentStock) {
+                        throw new Error(`Nicht genügend Lagerbestand für "${pDb.name}". Verfügbar: ${currentStock}, Gewünscht: ${quantity}`);
+                    }
                     
-                    productDataForOrder.push({ productId: pDb.id, name: pDb.name, quantity: item.quantity, price: price, image_url: pDb.image_url });
-                    
-                    inventoryOps.push({ updateOne: { filter: { userId: userId, productId: pDb.id }, update: { $inc: { quantityOwned: item.quantity }, $set: { lastAcquiredPrice: price } }, upsert: true } });
-                    
-                    return { id: item.id, quantityToDecrement: item.quantity, priceAtPurchase: price, name: pDb.name };
+                    // Stock abziehen vorbereiten
+                    productStockOps.push({
+                        updateOne: {
+                            filter: { _id: pDb._id },
+                            update: { $inc: { stock: -quantity } }
+                        }
+                    });
+                } else if (pDb.isTokenCard && pDb.tokenValue > 0) {
+                    // Token Codes vorbereiten
+                    for (let i = 0; i < quantity; i++) { 
+                        tokenCodeGenerationTasks.push({ 
+                            tokenAmount: pDb.tokenValue, 
+                            limazonProductId: pDb.id, 
+                            generatedForUserId: userId, 
+                            originalPricePaid: price 
+                        }); 
+                    }
                 }
-            }).catch(e => { errors.push(`DB-Fehler Produktprüfung: ${item.id}`); console.error(`${LOG_PREFIX_SERVER} Product check error:`, e); return null; }));
-        }
 
-        if (errors.length > 0 && productChecks.length === 0) throw new Error(errors.join('; '));
-        const results = await Promise.all(productChecks);
-        
-        const validationErrorsFromPromises = results.filter(r => r === null).map((r, idx) => errors[idx] || `Produktprüfung Item ${idx + 1} fehlgeschlagen.`);
-        const allErrors = errors.filter(e => e && !validationErrorsFromPromises.includes(e)).concat(validationErrorsFromPromises);
-        
-        if (allErrors.length > 0) { console.warn(`${LOG_PREFIX_SERVER} Validierungsfehler Kauf ${user.username}:`, allErrors); throw new Error(allErrors.join('; ')); }
-        
-        const currentBalance = user.balance || 0;
-        if (!isInfinityMoneyActiveForPurchase && currentBalance < totalOrderValue) throw new Error(`Guthaben zu gering. $${totalOrderValue.toFixed(2)} benötigt, du hast $${currentBalance.toFixed(2)}.`);
-        
-        const validRegProdUpds = results.filter(r => r !== null && !r.isTokenCard && r.quantityToDecrement > 0);
-        
-        if (validRegProdUpds.length > 0) {
-            const bulkProdOps = validRegProdUpds.map(upd => ({ updateOne: { filter: { id: upd.id, stock: { $gte: upd.quantityToDecrement } }, update: { $inc: { stock: -upd.quantityToDecrement } } } }));
-            const prodUpdRes = await productsCollection.bulkWrite(bulkProdOps);
-            if (prodUpdRes.modifiedCount !== validRegProdUpds.length) { console.error(`${LOG_PREFIX_SERVER} Fehler Prod-Stock Bulk Write! Erw: ${validRegProdUpds.length}, Mod: ${prodUpdRes.modifiedCount}`); throw new Error('Konflikt Bestandsaktualisierung.'); }
-            
-            // NEU: Cache sofort aktualisieren, damit andere User den neuen Stock sehen!
-            refreshProductCache();
-        }
-        
-        if (inventoryOps.length > 0) await inventoriesCollection.bulkWrite(inventoryOps);
-        
-        const genCodesUserMsg = [];
-        if (tokenCodeGenerationTasks.length > 0) {
-            const codesToIns = [];
-            for (const task of tokenCodeGenerationTasks) { 
-                const uniqueCode = await generateUniqueTokenRedeemCode(); 
-                codesToIns.push({ code: uniqueCode, tokenAmount: task.tokenAmount, isRedeemed: false, createdAt: new Date(), limazonProductId: task.limazonProductId, generatedForUserId: task.generatedForUserId, originalPricePaid: task.originalPricePaid }); 
-                genCodesUserMsg.push(uniqueCode); 
+                // Daten für Order History und Inventar sammeln
+                productDataForOrder.push({ 
+                    productId: pDb.id, 
+                    name: pDb.name, 
+                    quantity: quantity, 
+                    price: price, 
+                    image_url: pDb.image_url, 
+                    isTokenCardPurchase: !!pDb.isTokenCard 
+                });
+
+                // Inventar Update vorbereiten
+                inventoryOps.push({ 
+                    updateOne: { 
+                        filter: { userId: userId, productId: pDb.id }, 
+                        update: { $inc: { quantityOwned: quantity }, $set: { lastAcquiredPrice: price } }, 
+                        upsert: true 
+                    } 
+                });
             }
-            if (codesToIns.length > 0) { await tokenCodesCollection.insertMany(codesToIns); console.log(`${LOG_PREFIX_SERVER} ${codesToIns.length} Token Codes generiert für User ${userId}.`); }
-        }
-        
-        if (!isInfinityMoneyActiveForPurchase && totalOrderValue > 0) {
-            const balUpdRes = await usersCollection.updateOne({ _id: userId, balance: { $gte: totalOrderValue } }, { $inc: { balance: -totalOrderValue } });
-            if (balUpdRes.modifiedCount !== 1) { console.error(`${LOG_PREFIX_SERVER} Kritischer Fehler Guthabenabzug ${userId}! Soll ${totalOrderValue}.`); throw new Error('Kritischer Fehler Guthabenabzug.'); }
-        }
-        
-        if (!user.unlockedInfinityMoney && !user.isAdmin) { 
-            const regItemsForUnlock = productDataForOrder.filter(item => !item.isTokenCardPurchase); 
-            if (regItemsForUnlock.length > 0) { 
-                // Wir nutzen hier den globalProductCache für Speed beim Preisvergleich
+
+            // C. Guthaben prüfen und abziehen
+            const isInfinityMoneyActive = user.isAdmin || user.infinityMoney;
+            
+            // Runden auf 2 Stellen zur Sicherheit
+            totalOrderValue = Math.round((totalOrderValue + Number.EPSILON) * 100) / 100;
+
+            if (!isInfinityMoneyActive) {
+                if (user.balance < totalOrderValue) {
+                    throw new Error(`Zu wenig Guthaben. Benötigt: $${totalOrderValue.toFixed(2)}, Vorhanden: $${user.balance.toFixed(2)}`);
+                }
+                
+                // GELD ABZIEHEN
+                await usersCollection.updateOne(
+                    { _id: userId }, 
+                    { $inc: { balance: -totalOrderValue } }, 
+                    { session }
+                );
+            }
+
+            // D. Alle Datenbank-Updates ausführen (Innerhalb der Transaction)
+            
+            // 1. Produkte Stock Updates
+            if (productStockOps.length > 0) {
+                await productsCollection.bulkWrite(productStockOps, { session });
+            }
+
+            // 2. Inventar Updates
+            if (inventoryOps.length > 0) {
+                await inventoriesCollection.bulkWrite(inventoryOps, { session });
+            }
+
+            // 3. Token Codes generieren (falls nötig)
+            const genCodesStrings = [];
+            if (tokenCodeGenerationTasks.length > 0) {
+                const codesToIns = [];
+                for (const task of tokenCodeGenerationTasks) {
+                    // Hier müssen wir await nutzen, da generateUniqueTokenRedeemCode DB-Calls macht.
+                    // Das ist in Ordnung, da es nicht mehr die Haupt-Race-Condition betrifft.
+                    const uniqueCode = generateFastTokenCode();
+                    codesToIns.push({ 
+                        code: uniqueCode, 
+                        tokenAmount: task.tokenAmount, 
+                        isRedeemed: false, 
+                        createdAt: new Date(), 
+                        limazonProductId: task.limazonProductId, 
+                        generatedForUserId: task.generatedForUserId, 
+                        originalPricePaid: task.originalPricePaid 
+                    });
+                    genCodesStrings.push(uniqueCode);
+                }
+                if (codesToIns.length > 0) {
+                    await tokenCodesCollection.insertMany(codesToIns, { session });
+                }
+            }
+
+            // 4. Order Log speichern
+            await ordersCollection.insertOne({ 
+                userId: userId, 
+                username: user.username, 
+                date: new Date(), 
+                items: productDataForOrder, 
+                total: totalOrderValue 
+            }, { session });
+
+            // 5. Infinity Money Unlock Check (Logik beibehalten)
+            // Dies machen wir außerhalb der kritischen Pfade, da es nur ein Flag ist.
+            // Wir berechnen es hier, geben es zurück und updaten es ggf. nach dem Commit oder in der Session.
+            if (!user.unlockedInfinityMoney && !user.isAdmin) {
+                // Check basierend auf geladenen Daten
                 let maxPriceInShop = 0;
-                if(globalProductCache.length > 0) {
-                     // Suche teuerstes normales Item im Cache
+                if(globalProductCache && globalProductCache.length > 0) {
                      const normalItems = globalProductCache.filter(p => !p.isTokenCard);
                      if(normalItems.length > 0) {
-                         // Sortiere nach Preis absteigend
-                         normalItems.sort((a,b) => {
-                             const pA = parseFloat((a.price||"$0").replace(/[^0-9.]/g, '')) || 0;
-                             const pB = parseFloat((b.price||"$0").replace(/[^0-9.]/g, '')) || 0;
-                             return pB - pA;
-                         });
-                         maxPriceInShop = parseFloat((normalItems[0].price||"$0").replace(/[^0-9.]/g, '')) || 0;
+                         // Schnellste Methode Max zu finden
+                         maxPriceInShop = normalItems.reduce((max, p) => {
+                             const price = parseFloat((p.price||"$0").replace(/[^0-9.]/g, '')) || 0;
+                             return price > max ? price : max;
+                         }, 0);
                      }
                 }
+                
+                const regItems = productDataForOrder.filter(i => !i.isTokenCardPurchase);
+                for (const item of regItems) {
+                    if (item.price >= maxPriceInShop && maxPriceInShop > 0.01) {
+                        await usersCollection.updateOne({ _id: userId }, { $set: { unlockedInfinityMoney: true } }, { session });
+                        newUnlockOccurred = true;
+                        break;
+                    }
+                }
+            }
 
-                for (const boughtItemData of regItemsForUnlock) { 
-                    if (boughtItemData.price >= maxPriceInShop && maxPriceInShop > 0.01) { 
-                        await usersCollection.updateOne({ _id: userId }, { $set: { unlockedInfinityMoney: true } }); 
-                        newUnlockOccurred = true; 
-                        console.log(`${LOG_PREFIX_SERVER} Infinity Money User ${userId} freigeschaltet.`); 
-                        break; 
-                    } 
-                } 
-            } 
-        }
-        
-        try { const order = { userId: userId, username: user.username, date: new Date(), items: productDataForOrder, total: totalOrderValue }; await ordersCollection.insertOne(order); } catch (orderError) { console.error(`${LOG_PREFIX_SERVER} Fehler Speicher Bestellung ${userId}:`, orderError); }
-        
+            return { 
+                totalOrderValue, 
+                genCodesCount: tokenCodeGenerationTasks.length, 
+                newUnlockOccurred 
+            };
+        });
+
+        // --- TRANSACTION ENDE ---
+        // Wenn wir hier sind, war alles erfolgreich.
+
+        // Cache aktualisieren (außerhalb der Session, da global)
+        refreshProductCache();
+
+        // Aktuelle User-Daten für Response holen
         const finalUser = await usersCollection.findOne({ _id: userId }, { projection: { password: 0 } });
         const effInfMonFinal = finalUser.isAdmin ? true : (finalUser.infinityMoney || false);
-        
-        let purMessage = `Kauf erfolgreich!`;
-        if (genCodesUserMsg.length > 0) purMessage += ` ${genCodesUserMsg.length} Token Guthabencode(s) generiert. Siehe "Meine Token Codes".`;
-        if (newUnlockOccurred) purMessage += ' Glückwunsch, Infinity Money freigeschaltet!';
-        
-        console.log(`${LOG_PREFIX_SERVER} User ${user.username} Einkauf $${totalOrderValue.toFixed(2)}. ${genCodesUserMsg.length} Token Codes.`);
-        res.json({ message: purMessage, user: { ...finalUser, tokens: finalUser.tokens || 0, infinityMoney: effInfMonFinal, productSellCooldowns: finalUser.productSellCooldowns || {} } });
 
-    } catch (err) { 
-        console.error(`${LOG_PREFIX_SERVER} POST /api/purchase Fehler User ${req.session.username}:`, err.message); 
-        if (err.message.startsWith("Guthaben zu gering") || err.message.startsWith("Konflikt Bestandsaktualisierung") || err.message.startsWith("Limit überschritten") || err.message.startsWith("Bestellung zu groß")) return res.status(400).json({ error: err.message }); 
-        res.status(500).json({ error: 'Unerwarteter Kauffehler.' }); 
+        let purMessage = `Kauf erfolgreich!`;
+        if (transactionResult.genCodesCount > 0) purMessage += ` ${transactionResult.genCodesCount} Token Guthabencode(s) generiert.`;
+        if (transactionResult.newUnlockOccurred) purMessage += ' Glückwunsch, Infinity Money freigeschaltet!';
+
+        console.log(`${LOG_PREFIX_SERVER} ✅ User ${finalUser.username} Einkauf $${transactionResult.totalOrderValue.toFixed(2)} abgeschlossen.`);
+        
+        res.json({ 
+            message: purMessage, 
+            user: { 
+                ...finalUser, 
+                tokens: finalUser.tokens || 0, 
+                infinityMoney: effInfMonFinal, 
+                productSellCooldowns: finalUser.productSellCooldowns || {} 
+            } 
+        });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} ❌ Kauf fehlgeschlagen (${req.session.username}):`, err.message);
+        // Da die Transaction automatisch abbricht (abort) bei Fehler, ist die DB sauber.
+        if (err.message.includes("Zu wenig Guthaben") || err.message.includes("Lagerbestand") || err.message.includes("Produkt ID")) {
+            return res.status(400).json({ error: err.message });
+        }
+        res.status(500).json({ error: 'Kauf konnte nicht verarbeitet werden. Bitte versuche es erneut.' });
+    } finally {
+        await session.endSession();
     }
 });
 
 // SELL Product
 app.post('/api/products/sell', isAuthenticated, async (req, res) => {
-    const { productId, sellPrice, quantity } = req.body; const userId = new ObjectId(req.session.userId);
-    console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} verkauft Produkt ${productId}. Menge: ${quantity}, Preis: ${sellPrice}`);
-    if (typeof productId !== 'number' || typeof sellPrice !== 'number' || sellPrice <= 0 || typeof quantity !== 'number' || quantity <= 0 || !Number.isInteger(quantity)) return res.status(400).json({ error: 'Ungültige Eingabe Verkauf.' });
+    const { productId, sellPrice, quantity } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const username = req.session.username;
+
+    // 1. Validierung (Input)
+    if (typeof productId !== 'number' || typeof sellPrice !== 'number' || sellPrice <= 0 || typeof quantity !== 'number' || quantity <= 0 || !Number.isInteger(quantity)) {
+        return res.status(400).json({ error: 'Ungültige Eingabe Verkauf.' });
+    }
+
+    console.log(`${LOG_PREFIX_SERVER} 📉 User ${username} will verkaufen: ${quantity}x ID ${productId} für je $${sellPrice}`);
+
+    const session = client.startSession();
+
     try {
-        let user = await usersCollection.findOne({ _id: userId }); if (!user) return res.status(404).json({ error: 'Benutzer nicht gefunden.' });
-        const prodToSell = await productsCollection.findOne({ id: productId, isTokenCard: { $ne: true } }); if (!prodToSell) return res.status(404).json({ error: 'Produkt nicht verkaufbar.' });
-        const invItem = await inventoriesCollection.findOne({ userId: userId, productId: productId }); if (!invItem || invItem.quantityOwned < quantity) return res.status(400).json({ error: `Nicht ${quantity}x "${prodToSell.name}" im Bestand. Aktuell: ${invItem ? invItem.quantityOwned : 0}.` });
-        let cooldowns = user.productSellCooldowns || {}; const lastAttCDISO = cooldowns[productId.toString()];
-        if (lastAttCDISO) { const cdEndTime = new Date(lastAttCDISO).getTime(); if (Date.now() < cdEndTime) { const timeLeft = Math.ceil((cdEndTime - Date.now()) / 1000); return res.status(429).json({ success: false, error: `Cooldown aktiv: Warte ${timeLeft}s.`, cooldownActiveForProduct: productId, cooldownEndsAt: lastAttCDISO, productSellCooldowns: cooldowns }); } else { delete cooldowns[productId.toString()]; await usersCollection.updateOne({ _id: userId }, { $set: { productSellCooldowns: cooldowns } }); } }
+        let resultData = null;
 
-        // === KORREKTUR 1: VERKAUFS-BUG BEHOBEN ===
-        const origPrice = prodToSell.basePrice || parseFloat((prodToSell.price || "$0").replace(/[^0-9.]/g, '')) || 1;
+        await session.withTransaction(async () => {
+            // A. Daten parallel laden (Performance)
+            // Wir laden User, Produkt und Inventar gleichzeitig
+            const [user, prodToSell, invItem] = await Promise.all([
+                usersCollection.findOne({ _id: userId }, { session }),
+                productsCollection.findOne({ id: productId, isTokenCard: { $ne: true } }, { session }),
+                inventoriesCollection.findOne({ userId: userId, productId: productId }, { session })
+            ]);
 
-        let prob = 1.0;
-        if (sellPrice > origPrice) prob = origPrice / sellPrice; else if (sellPrice < origPrice * 0.5) prob = 1.0;
-        const globStock = prodToSell.stock || 0; const defGlobStock = prodToSell.default_stock || 20;
-        if (globStock > defGlobStock * 2.5) prob *= 0.1; else if (globStock > defGlobStock * 1.8) prob *= 0.5; else if (globStock > defGlobStock * 1.2) prob *= 0.8;
-        prob = Math.max(0.01, Math.min(1.0, prob)); const wasSold = Math.random() < prob; let respMsg = "";
-        if (wasSold) {
-            const earnings = parseFloat((sellPrice * quantity).toFixed(2));
-            await inventoriesCollection.updateOne({ userId: userId, productId: productId, quantityOwned: { $gte: quantity } }, { $inc: { quantityOwned: -quantity } });
-            await productsCollection.updateOne({ id: productId }, { $inc: { stock: quantity } });
-            if (!user.isAdmin && !user.infinityMoney) await usersCollection.updateOne({ _id: userId }, { $inc: { balance: earnings } }); else console.log(`${LOG_PREFIX_SERVER} -> Guthaben ${user.username} nicht erhöht (Admin/Inf).`);
-            respMsg = `Erfolgreich ${quantity}x "${prodToSell.name}" für $${sellPrice.toFixed(2)}/Stk. verkauft! Erlös: $${earnings.toFixed(2)}.`;
-            delete cooldowns[productId.toString()]; await usersCollection.updateOne({ _id: userId }, { $set: { productSellCooldowns: cooldowns } });
-            user = await usersCollection.findOne({ _id: userId }, { projection: { password: 0 } }); const effInfMonFinal = user.isAdmin ? true : (user.infinityMoney || false);
-            console.log(`${LOG_PREFIX_SERVER} User ${user.username} verkaufte ${quantity}x ${prodToSell.name}. Erlös: $${earnings.toFixed(2)}.`);
-            res.json({ success: true, message: respMsg, earnings: earnings, probability: prob, user: { ...user, tokens: user.tokens || 0, infinityMoney: effInfMonFinal, productSellCooldowns: user.productSellCooldowns || {} } });
-        } else {
-            respMsg = `Angebot für "${prodToSell.name}" nicht angenommen (Chance ca. ${(prob * 100).toFixed(0)}%).`;
-            const cdEndTime = new Date(Date.now() + SELL_COOLDOWN_SECONDS * 1000); cooldowns[productId.toString()] = cdEndTime.toISOString();
-            await usersCollection.updateOne({ _id: userId }, { $set: { productSellCooldowns: cooldowns } });
-            console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} Verkaufsversuch ${prodToSell.name} fehlgeschlagen. Cooldown bis ${cdEndTime.toISOString()}.`);
-            res.status(429).json({ success: false, error: `${respMsg} Cooldown: ${SELL_COOLDOWN_SECONDS_SHOW}s.`, probability: prob, cooldownActiveForProduct: productId, cooldownEndsAt: cdEndTime.toISOString(), productSellCooldowns: cooldowns });
+            // B. Checks (Logik)
+            if (!user) throw new Error('Benutzer nicht gefunden.');
+            if (!prodToSell) throw new Error('Produkt nicht verkaufbar oder existiert nicht.');
+            
+            // Bestand prüfen
+            if (!invItem || invItem.quantityOwned < quantity) {
+                throw new Error(`Nicht genügend Items! Du besitzt nur ${invItem ? invItem.quantityOwned : 0} Stk. von "${prodToSell.name}".`);
+            }
+
+            // Cooldown prüfen
+            // Wir nutzen die User-Daten aus der DB, nicht aus der Session (sicherer)
+            let cooldowns = user.productSellCooldowns || {};
+            const lastAttCDISO = cooldowns[productId.toString()];
+            if (lastAttCDISO) {
+                const cdEndTime = new Date(lastAttCDISO).getTime();
+                if (Date.now() < cdEndTime) {
+                    const timeLeft = Math.ceil((cdEndTime - Date.now()) / 1000);
+                    throw new Error(`COOLDOWN_ACTIVE:${timeLeft}`); // Spezial-Fehler für Frontend-Handling
+                }
+            }
+
+            // C. Wahrscheinlichkeits-Berechnung (Deine Original-Logik)
+            const origPrice = prodToSell.basePrice || parseFloat((prodToSell.price || "$0").replace(/[^0-9.]/g, '')) || 1;
+            
+            let prob = 1.0;
+            if (sellPrice > origPrice) prob = origPrice / sellPrice;
+            else if (sellPrice < origPrice * 0.5) prob = 1.0;
+
+            // Markt-Sättigung einbeziehen
+            const globStock = prodToSell.stock || 0;
+            const defGlobStock = prodToSell.default_stock || 20;
+            
+            if (globStock > defGlobStock * 2.5) prob *= 0.1;      // Markt überschwemmt -> schwer zu verkaufen
+            else if (globStock > defGlobStock * 1.8) prob *= 0.5;
+            else if (globStock > defGlobStock * 1.2) prob *= 0.8;
+
+            prob = Math.max(0.01, Math.min(1.0, prob));
+            
+            const wasSold = Math.random() < prob;
+
+            // D. Transaktionen ausführen
+            if (wasSold) {
+                // 1. Geld berechnen
+                const earnings = parseFloat((sellPrice * quantity).toFixed(2));
+
+                // 2. Inventar abziehen (ATOMAR & SICHER)
+                // WICHTIG: Das Kriterium { quantityOwned: { $gte: quantity } } verhindert den Exploit!
+                // Wenn der User zwischen Check und Update das Item woanders verkauft hat, schlägt das hier fehl.
+                const invUpdate = await inventoriesCollection.updateOne(
+                    { userId: userId, productId: productId, quantityOwned: { $gte: quantity } },
+                    { $inc: { quantityOwned: -quantity } },
+                    { session }
+                );
+
+                if (invUpdate.modifiedCount === 0) {
+                    throw new Error("Fehler: Item wurde während des Verkaufs entfernt oder ist nicht mehr verfügbar.");
+                }
+
+                // 3. Produkt-Stock erhöhen (Rücklauf in den Markt)
+                await productsCollection.updateOne(
+                    { id: productId },
+                    { $inc: { stock: quantity } },
+                    { session }
+                );
+
+                // 4. Geld gutschreiben (außer Admin/Infinity)
+                if (!user.isAdmin && !user.infinityMoney) {
+                    await usersCollection.updateOne(
+                        { _id: userId },
+                        { $inc: { balance: earnings } },
+                        { session }
+                    );
+                }
+
+                // 5. Cooldown entfernen (falls vorhanden)
+                if (cooldowns[productId.toString()]) {
+                    const newCooldowns = { ...cooldowns };
+                    delete newCooldowns[productId.toString()];
+                    await usersCollection.updateOne(
+                        { _id: userId }, 
+                        { $set: { productSellCooldowns: newCooldowns } }, 
+                        { session } 
+                    );
+                }
+
+                resultData = {
+                    success: true,
+                    message: `Erfolgreich ${quantity}x "${prodToSell.name}" für $${sellPrice.toFixed(2)}/Stk. verkauft!`,
+                    earnings: earnings,
+                    probability: prob
+                };
+
+            } else {
+                // FEHLSCHLAG (Niemand wollte kaufen)
+                
+                // Cooldown setzen
+                const cdEndTime = new Date(Date.now() + SELL_COOLDOWN_SECONDS * 1000);
+                const newCooldowns = { ...cooldowns };
+                newCooldowns[productId.toString()] = cdEndTime.toISOString();
+
+                await usersCollection.updateOne(
+                    { _id: userId },
+                    { $set: { productSellCooldowns: newCooldowns } },
+                    { session }
+                );
+
+                resultData = {
+                    success: false,
+                    error: `Angebot für "${prodToSell.name}" nicht angenommen (Chance ca. ${(prob * 100).toFixed(0)}%).`,
+                    cooldownActiveForProduct: productId,
+                    cooldownEndsAt: cdEndTime.toISOString(),
+                    probability: prob
+                };
+            }
+        });
+
+        // E. Transaktion erfolgreich beendet
+        
+        // Cache aktualisieren, da sich der Global Stock geändert hat
+        if (resultData.success) {
+            refreshProductCache();
         }
-    } catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler /api/products/sell User ${req.session.username}:`, err); res.status(500).json({ error: "Serverfehler Verkaufsversuch." }); }
+
+        // Frische User-Daten für das Frontend holen (außerhalb der Transaction)
+        const updatedUser = await usersCollection.findOne({ _id: userId }, { projection: { password: 0 } });
+        const effInfMonFinal = updatedUser.isAdmin ? true : (updatedUser.infinityMoney || false);
+
+        if (resultData.success) {
+            res.json({
+                success: true,
+                message: resultData.message,
+                earnings: resultData.earnings,
+                probability: resultData.probability,
+                user: { 
+                    ...updatedUser, 
+                    tokens: updatedUser.tokens || 0, 
+                    infinityMoney: effInfMonFinal, 
+                    productSellCooldowns: updatedUser.productSellCooldowns || {} 
+                }
+            });
+        } else {
+            // Fehlgeschlagener Verkauf (429 Too Many Requests ist hier semantisch okay für "Abgelehnt/Cooldown")
+            res.status(429).json({
+                success: false,
+                error: `${resultData.error} Cooldown: ${SELL_COOLDOWN_SECONDS_SHOW}s.`,
+                probability: resultData.probability,
+                cooldownActiveForProduct: resultData.cooldownActiveForProduct,
+                cooldownEndsAt: resultData.cooldownEndsAt,
+                productSellCooldowns: updatedUser.productSellCooldowns || {}
+            });
+        }
+
+    } catch (err) {
+        // Fehlerbehandlung
+        console.error(`${LOG_PREFIX_SERVER} Fehler Verkauf (${username}):`, err.message);
+        
+        if (err.message.startsWith("COOLDOWN_ACTIVE")) {
+            const seconds = err.message.split(":")[1];
+            return res.status(429).json({ success: false, error: `Cooldown aktiv: Warte ${seconds}s.` });
+        }
+        
+        if (err.message.includes("Nicht genügend Items") || err.message.includes("Fehler: Item wurde während")) {
+            return res.status(400).json({ error: err.message });
+        }
+
+        res.status(500).json({ error: "Serverfehler beim Verkauf." });
+    } finally {
+        await session.endSession();
+    }
 });
 
 // TOKEN Endpoints
@@ -3261,87 +3644,95 @@ app.post('/api/auctions/:id/bid', isAuthenticated, async (req, res) => {
     }
     const finalBidAmount = parseFloat(bidAmount.toFixed(2));
 
+    const session = client.startSession();
+
     try {
-        // --- 1. Daten abrufen und validieren ---
-        const auction = await auctionsCollection.findOne({ _id: auctionId });
-        if (!auction) {
-            return res.status(404).json({ error: 'Auktion nicht gefunden.' });
-        }
-        if (auction.status !== 'active') {
-            return res.status(400).json({ error: 'Diese Auktion ist bereits beendet.' });
-        }
-        if (new Date() > new Date(auction.endTime)) {
-            return res.status(400).json({ error: 'Diese Auktion ist bereits abgelaufen.' });
-        }
-        if (auction.sellerId.equals(bidderId)) {
-            return res.status(400).json({ error: 'Du kannst nicht auf deine eigene Auktion bieten.' });
-        }
-        if (finalBidAmount <= auction.currentBid) {
-            return res.status(400).json({ error: `Dein Gebot muss höher als das aktuelle Gebot von $${auction.currentBid.toFixed(2)} sein.` });
-        }
-
-        const bidder = await usersCollection.findOne({ _id: bidderId });
-        if (!bidder || bidder.balance < finalBidAmount) {
-            return res.status(400).json({ error: `Nicht genügend Guthaben. Du benötigst $${finalBidAmount.toFixed(2)}.` });
-        }
-
-        // --- 2. Transaktionen durchführen ---
-
-        // Geld vom neuen Bieter abziehen (reservieren)
-        const bidderDebitResult = await usersCollection.updateOne(
-            { _id: bidderId, balance: { $gte: finalBidAmount } },
-            { $inc: { balance: -finalBidAmount } }
-        );
-        if (bidderDebitResult.modifiedCount === 0) {
-            throw new Error("Guthabenabzug beim neuen Bieter fehlgeschlagen. Möglicherweise Race Condition.");
-        }
-
-        // Wenn es einen vorherigen Höchstbietenden gab, Geld zurückgeben
-        if (auction.highestBidderId) {
-            await usersCollection.updateOne(
-                { _id: auction.highestBidderId },
-                { $inc: { balance: auction.currentBid } }
+        await session.withTransaction(async () => {
+            // 1. Geld beim Bieter prüfen & abziehen (ATOMAR)
+            // Wir prüfen direkt im Update, ob genug Geld da ist.
+            const bidderResult = await usersCollection.updateOne(
+                { _id: bidderId, balance: { $gte: finalBidAmount } },
+                { $inc: { balance: -finalBidAmount } },
+                { session }
             );
-        }
 
-        // --- 3. Auktionsdokument aktualisieren ---
-        const newBid = {
-            bidderId,
-            bidderUsername: req.session.username,
-            amount: finalBidAmount,
-            timestamp: new Date()
-        };
-
-        const auctionUpdateResult = await auctionsCollection.updateOne(
-            { _id: auctionId, status: 'active' }, // Erneute Sicherheitsprüfung
-            {
-                $set: {
-                    currentBid: finalBidAmount,
-                    highestBidderId: bidderId,
-                    highestBidderUsername: req.session.username
-                },
-                $push: {
-                    bids: {
-                        $each: [newBid],
-                        $position: 0 // Neues Gebot an den Anfang des Arrays setzen
-                    }
-                }
+            if (bidderResult.modifiedCount === 0) {
+                // Checken, ob User existiert oder nur pleite ist
+                const userExists = await usersCollection.findOne({_id: bidderId}, {session});
+                if (!userExists) throw new Error("Benutzer nicht gefunden.");
+                throw new Error(`Nicht genügend Guthaben für Gebot von $${finalBidAmount.toFixed(2)}.`);
             }
-        );
 
-        if (auctionUpdateResult.modifiedCount === 0) {
-            throw new Error("Auktions-Update fehlgeschlagen. Auktion wurde möglicherweise in der Zwischenzeit beendet.");
-        }
+            // 2. Auktion aktualisieren (OPTIMISTIC LOCKING)
+            // Der Trick: Wir suchen die Auktion NUR, wenn das aktuelle Gebot < ist als unser neues.
+            const newBidEntry = {
+                bidderId,
+                bidderUsername: req.session.username,
+                amount: finalBidAmount,
+                timestamp: new Date()
+            };
+
+            // Zuerst holen wir die Auktion, um den VORHERIGEN Bieter zu finden (für Rückzahlung)
+            // Da wir in einer Transaktion sind, ist das relativ sicher, aber der atomare Check unten ist entscheidend.
+            const auction = await auctionsCollection.findOne({ _id: auctionId }, { session });
+
+            if (!auction) throw new Error("Auktion nicht gefunden.");
+            if (auction.status !== 'active') throw new Error("Auktion ist beendet.");
+            if (new Date() > new Date(auction.endTime)) throw new Error("Auktion ist abgelaufen.");
+            if (auction.sellerId.equals(bidderId)) throw new Error("Du kannst nicht auf eigene Auktionen bieten.");
+            
+            // Check gegen den geladenen Wert (Soft Check für schnelle Fehlermeldung)
+            if (finalBidAmount <= auction.currentBid) throw new Error(`Gebot zu niedrig. Aktuell: $${auction.currentBid}`);
+
+            // Das eigentliche, sichere Update
+            const auctionUpdate = await auctionsCollection.updateOne(
+                { 
+                    _id: auctionId, 
+                    status: 'active',
+                    currentBid: { $lt: finalBidAmount } // <--- DAS IST DER SCHUTZ!
+                },
+                {
+                    $set: {
+                        currentBid: finalBidAmount,
+                        highestBidderId: bidderId,
+                        highestBidderUsername: req.session.username
+                    },
+                    $push: {
+                        bids: {
+                            $each: [newBidEntry],
+                            $position: 0
+                        }
+                    }
+                },
+                { session }
+            );
+
+            if (auctionUpdate.modifiedCount === 0) {
+                // Das bedeutet: Jemand anders war schneller und hat höher geboten!
+                // Wir müssen den Fehler werfen, damit die Transaktion abbricht 
+                // und das Geld (Schritt 1) automatisch zurückgerollt wird.
+                throw new Error("Jemand hat in der Zwischenzeit höher geboten! Versuch es nochmal.");
+            }
+
+            // 3. Dem vorherigen Höchstbietenden das Geld zurückgeben
+            if (auction.highestBidderId) {
+                await usersCollection.updateOne(
+                    { _id: auction.highestBidderId },
+                    { $inc: { balance: auction.currentBid } },
+                    { session }
+                );
+            }
+        });
 
         console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} bietet $${finalBidAmount} auf Auktion ${auctionId}.`);
-        res.json({ message: 'Gebot erfolgreich abgegeben!', newBid });
+        res.json({ message: 'Gebot erfolgreich abgegeben!', newBidAmount: finalBidAmount });
 
     } catch (err) {
-        console.error(`${LOG_PREFIX_SERVER} Fehler beim Bieten für User ${req.session.username} auf Auktion ${auctionId}:`, err);
-        // WICHTIG: Im Fehlerfall sicherstellen, dass das Geld nicht verloren geht.
-        // Da das Geld bereits abgezogen wurde, müssen wir es hier zurückgeben.
-        await usersCollection.updateOne({ _id: bidderId }, { $inc: { balance: finalBidAmount } });
-        res.status(500).json({ error: 'Serverfehler beim Bieten. Dein Geld wurde dir zurückerstattet.' });
+        console.error(`${LOG_PREFIX_SERVER} Gebotsfehler:`, err.message);
+        // Da wir eine Transaction nutzen, ist das Geld bei Fehler automatisch wieder beim User.
+        res.status(400).json({ error: err.message });
+    } finally {
+        await session.endSession();
     }
 });
 
@@ -4084,73 +4475,60 @@ app.post('/api/bank/transfer', isAuthenticated, async (req, res) => {
     const senderId = new ObjectId(req.session.userId);
     const senderName = req.session.username;
 
-    // KONFIGURATION DER GRENZEN
-    const MAX_MONEY_TRANSFER = 1000000; // Max 1 Mio $ pro Überweisung
-    const MAX_TOKEN_TRANSFER = 1000;    // Max 1.000 Tokens pro Überweisung
+    const MAX_MONEY_TRANSFER = 1000000; 
+    const MAX_TOKEN_TRANSFER = 1000;    
 
     if (!recipientName || !amount || amount <= 0) return res.status(400).json({ error: "Ungültige Daten." });
     if (recipientName.toLowerCase() === senderName.toLowerCase()) return res.status(400).json({ error: "Keine Überweisung an sich selbst." });
 
-    // SAUBER RUNDEN
     const cleanAmount = type === 'token' ? Math.floor(amount) : roundMoney(parseFloat(amount));
+    if (type !== 'token' && cleanAmount > MAX_MONEY_TRANSFER) return res.status(400).json({ error: "Betrag zu hoch." });
+    if (type === 'token' && cleanAmount > MAX_TOKEN_TRANSFER) return res.status(400).json({ error: "Zu viele Tokens." });
 
-    const client = db.client;
     const session = client.startSession();
 
     try {
         await session.withTransaction(async () => {
+            // 1. Sender laden für Status-Checks (Infinity/Admin)
             const sender = await usersCollection.findOne({ _id: senderId }, { session });
-            
-            // --- NEU: SICHERHEITS-CHECKS ---
+            if (sender.infinityMoney && !sender.isAdmin) throw new Error("Infinity-Money User dürfen nicht überweisen.");
 
-            // 1. Infinity-Money Sperre (WICHTIG!)
-            // Wenn der Sender Infinity Money hat (und kein Admin ist, oder selbst als Admin), 
-            // darf er kein Geld aus dem Nichts erschaffen und verteilen.
-            if (sender.infinityMoney && !sender.isAdmin) { 
-                throw new Error("Sicherheitswarnung: Mit Infinity-Money sind keine Überweisungen erlaubt!");
-            }
-            // Optional: Auch Admins verbieten, um Missklick zu vermeiden? 
-            // Falls ja, nimm das "&& !sender.isAdmin" oben weg.
-
-            // 2. Limits prüfen
-            if (type === 'token') {
-                if (cleanAmount > MAX_TOKEN_TRANSFER) {
-                    throw new Error(`Limit überschritten! Maximal ${MAX_TOKEN_TRANSFER} Tokens pro Transaktion.`);
-                }
-            } else {
-                // Geld Transfer
-                if (cleanAmount > MAX_MONEY_TRANSFER) {
-                    throw new Error(`Limit überschritten! Maximal $${MAX_MONEY_TRANSFER.toLocaleString()} pro Transaktion.`);
-                }
-            }
-            // -------------------------------
-
-            const recipient = await usersCollection.findOne({ username: recipientName.toLowerCase() }, { session });
+            // 2. Empfänger suchen
+            const recipient = await usersCollection.findOne({ username: { $regex: new RegExp(`^${recipientName}$`, 'i') } }, { session });
             if (!recipient) throw new Error("Empfänger nicht gefunden.");
 
+            // 3. Sender belasten (ATOMAR & SICHER)
+            const updateFilter = { _id: senderId };
+            const updateAction = {};
+
             if (type === 'token') {
-                if ((sender.tokens || 0) < cleanAmount) throw new Error("Nicht genügend Tokens.");
-                await usersCollection.updateOne({ _id: senderId }, { $inc: { tokens: -cleanAmount } }, { session });
-                await usersCollection.updateOne({ _id: recipient._id }, { $inc: { tokens: cleanAmount } }, { session });
+                updateFilter.tokens = { $gte: cleanAmount }; // Bedingung: Genug Tokens
+                updateAction.$inc = { tokens: -cleanAmount };
             } else {
-                // MONEY LOGIK
-                const currentBalance = roundMoney(sender.balance || 0);
-                
-                // Normale User Check
-                if (currentBalance < cleanAmount && !sender.infinityMoney && !sender.isAdmin) {
-                    throw new Error(`Nicht genügend Guthaben. (${currentBalance} < ${cleanAmount})`);
+                // Bei Geld: Wenn Admin/Infinity -> kein Abzug nötig, sonst Bedingung prüfen
+                if (!sender.isAdmin && !sender.infinityMoney) {
+                    updateFilter.balance = { $gte: cleanAmount }; // Bedingung: Genug Geld
+                    updateAction.$inc = { balance: -cleanAmount };
                 }
-                
-                // Geld abziehen (außer bei Infinity/Admin)
-                if (!sender.infinityMoney && !sender.isAdmin) {
-                    await usersCollection.updateOne({ _id: senderId }, { $inc: { balance: -cleanAmount } }, { session });
-                }
-                
-                // Geld gutschreiben
-                await usersCollection.updateOne({ _id: recipient._id }, { $inc: { balance: cleanAmount } }, { session });
             }
 
-            // Loggen
+            // Nur ausführen, wenn Geld abgezogen werden muss oder Admin
+            if (updateAction.$inc) {
+                const senderResult = await usersCollection.updateOne(updateFilter, updateAction, { session });
+                if (senderResult.modifiedCount === 0) {
+                    throw new Error(type === 'token' ? "Nicht genügend Tokens." : "Nicht genügend Guthaben.");
+                }
+            }
+
+            // 4. Empfänger gutschreiben
+            const targetField = type === 'token' ? 'tokens' : 'balance';
+            await usersCollection.updateOne(
+                { _id: recipient._id },
+                { $inc: { [targetField]: cleanAmount } },
+                { session }
+            );
+
+            // 5. Loggen (innerhalb der Transaktion)
             await bankTransactionsCollection.insertOne({
                 fromId: senderId,
                 fromName: senderName,
@@ -4163,10 +4541,12 @@ app.post('/api/bank/transfer', isAuthenticated, async (req, res) => {
             }, { session });
         });
 
+        // Response mit neuem Kontostand
         const updatedUser = await usersCollection.findOne({ _id: senderId });
         res.json({ message: "Überweisung erfolgreich!", newBalance: updatedUser.balance });
 
     } catch (e) {
+        console.error(`${LOG_PREFIX_SERVER} Transfer Fehler:`, e.message);
         res.status(400).json({ error: e.message || "Transaktion fehlgeschlagen." });
     } finally {
         await session.endSession();
@@ -5876,5 +6256,3 @@ app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
-
-
