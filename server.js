@@ -771,6 +771,7 @@ MongoClient.connect(mongoUri)
         ideasCollection = db.collection('ideas');
         newsCollection = db.collection('news');
         robberyLogsCollection = db.collection('robberyLogs');
+		highscoresCollection = db.collection('highscores');
         
         // NEU: Human Grades Collections
         humansCollection = db.collection('humans');       // Früher teachers
@@ -830,6 +831,7 @@ MongoClient.connect(mongoUri)
             await tokenCodesCollection.createIndex({ code: 1 }, { unique: true });
             await tokenCodesCollection.createIndex({ redeemedByUserId: 1 });
             await tokenCodesCollection.createIndex({ generatedForUserId: 1, isRedeemed: 1 });
+			await highscoresCollection.createIndex({ game: 1, score: -1 });
             
             if (tokenTransactionsCollection) {
                 await tokenTransactionsCollection.createIndex({ userId: 1 });
@@ -6248,8 +6250,176 @@ app.post('/api/admin/engine', isAuthenticated, isAdmin, async (req, res) => {
     }
 });
 
+// =========================================================
+// === GAME CENTER API (FLAPPY BIRD & CO) ===
+// =========================================================
+const highscoresCollection = db.collection('highscores');
+
+// 1. Status abrufen: Wie viele Versuche habe ich?
+app.get('/api/games/status', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const user = await usersCollection.findOne({ _id: userId }, { projection: { gameCredits: 1 } });
+        res.json({ 
+            flappyCredits: user.gameCredits?.flappy || 0 
+        });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden des Spielstatus." });
+    }
+});
+
+// 2. Versuche kaufen (1 Token = 3 Versuche) - MIT TRANSAKTION
+app.post('/api/games/buy-credits', isAuthenticated, async (req, res) => {
+    const { gameId } = req.body; // z.B. "flappy"
+    const userId = new ObjectId(req.session.userId);
+    const COST = 1;
+    const CREDITS_PER_BUY = 3;
+
+    if (gameId !== 'flappy') return res.status(400).json({ error: "Spiel nicht gefunden." });
+
+    const session = client.startSession();
+
+    try {
+        await session.withTransaction(async () => {
+            // User prüfen
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if ((user.tokens || 0) < COST) {
+                throw new Error(`Nicht genug Tokens. Du brauchst ${COST} Token.`);
+            }
+
+            // Token abziehen
+            await usersCollection.updateOne(
+                { _id: userId },
+                { $inc: { tokens: -COST } },
+                { session }
+            );
+
+            // Credits gutschreiben (verschachteltes Feld: gameCredits.flappy)
+            const updatePath = `gameCredits.${gameId}`;
+            await usersCollection.updateOne(
+                { _id: userId },
+                { $inc: { [updatePath]: CREDITS_PER_BUY } },
+                { session }
+            );
+
+            // Transaktions-Log
+            await logTokenTransaction(userId, "game_credits", -COST, user.tokens, user.tokens - COST, `Bought ${CREDITS_PER_BUY} credits for ${gameId}.`);
+        });
+
+        // Antwort mit neuem Stand
+        const updatedUser = await usersCollection.findOne({ _id: userId });
+        res.json({ 
+            message: `Erfolg! ${CREDITS_PER_BUY} Versuche gekauft.`, 
+            newTokens: updatedUser.tokens,
+            newCredits: updatedUser.gameCredits?.flappy || 0
+        });
+
+    } catch (e) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Credits-Kauf:`, e);
+        res.status(400).json({ error: e.message || "Kauf fehlgeschlagen." });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// 3. Score einreichen (Kostet 1 Credit) - MIT TRANSAKTION
+app.post('/api/games/submit-score', isAuthenticated, async (req, res) => {
+    const { gameId, score } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const username = req.session.username;
+
+    if (gameId !== 'flappy' || typeof score !== 'number') return res.status(400).json({ error: "Ungültige Daten." });
+
+    // Kleiner Anti-Cheat Check: Unmögliche Scores filtern
+    if (score > 10000) return res.status(400).json({ error: "Score unrealistisch hoch." });
+
+    const session = client.startSession();
+
+    try {
+        await session.withTransaction(async () => {
+            // 1. Prüfen, ob Credits da sind
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            const currentCredits = user.gameCredits?.[gameId] || 0;
+
+            if (currentCredits < 1) {
+                throw new Error("Keine Versuche mehr übrig! Bitte kaufe neue.");
+            }
+
+            // 2. Credit abziehen
+            const updatePath = `gameCredits.${gameId}`;
+            await usersCollection.updateOne(
+                { _id: userId },
+                { $inc: { [updatePath]: -1 } },
+                { session }
+            );
+
+            // 3. Score speichern
+            await highscoresCollection.insertOne({
+                game: gameId,
+                userId: userId,
+                username: username,
+                score: score,
+                timestamp: new Date()
+            }, { session });
+        });
+
+        res.json({ success: true, message: "Score gespeichert!" });
+
+    } catch (e) {
+        res.status(400).json({ error: e.message || "Fehler beim Speichern." });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// 4. Leaderboard (Mit Paginierung & Suche)
+app.get('/api/games/leaderboard/:gameId', async (req, res) => {
+    const { gameId } = req.params;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const search = req.query.search || "";
+    const skip = (page - 1) * limit;
+
+    if (gameId !== 'flappy') return res.status(400).json({ error: "Spiel nicht gefunden." });
+
+    try {
+        let query = { game: gameId };
+        
+        // Suche nach Usernamen
+        if (search) {
+            query.username = { $regex: search, $options: 'i' };
+        }
+
+        // Parallel Count & Data holen (Performance)
+        const [total, scores] = await Promise.all([
+            highscoresCollection.countDocuments(query),
+            highscoresCollection.find(query)
+                .sort({ score: -1 }) // Höchster Score zuerst
+                .skip(skip)
+                .limit(limit)
+                .project({ username: 1, score: 1, timestamp: 1, _id: 0 }) // IDs verstecken
+                .toArray()
+        ]);
+
+        res.json({
+            scores,
+            pagination: {
+                total,
+                page,
+                limit,
+                totalPages: Math.ceil(total / limit)
+            }
+        });
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Laden der Bestenliste." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
+
 
