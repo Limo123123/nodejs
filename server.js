@@ -145,6 +145,7 @@ const authCodesCollectionName = 'authCodes';
 let authCodesCollection;
 let robberyLogsCollection;
 let client;
+let highscoresCollection;
 
 // ==============================================================================
 // === NEU: AUTOMATISIERTE SICHERHEITS- & REPARATURFUNKTIONEN ====================
@@ -6253,7 +6254,6 @@ app.post('/api/admin/engine', isAuthenticated, isAdmin, async (req, res) => {
 // =========================================================
 // === GAME CENTER API (FLAPPY BIRD & CO) ===
 // =========================================================
-const highscoresCollection = db.collection('highscores');
 
 // 1. Status abrufen: Wie viele Versuche habe ich?
 app.get('/api/games/status', isAuthenticated, async (req, res) => {
@@ -6421,5 +6421,6 @@ app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
+
 
 
