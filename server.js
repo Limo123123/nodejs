@@ -630,10 +630,6 @@ function globalApiRateLimit(req, res, next) {
 // === CACHING SYSTEM (LOCAL JSON + RAM + PRE-COMPUTED STRING) ===
 // =========================================================
 
-// Globale Variablen
-const CACHE_DIR = path.resolve(__dirname, 'cache');
-const PRODUCTS_CACHE_FILE = path.resolve(CACHE_DIR, 'products_cache.json');
-let globalProductCache = [];
 // NEU: Der fertig berechnete JSON-String für ultimativen Speed
 let globalProductCacheString = '{"products":[]}'; 
 
@@ -6256,3 +6252,4 @@ app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
+
