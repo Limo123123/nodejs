@@ -5145,6 +5145,16 @@ const ACHIEVEMENT_DEFINITIONS = [
       check: (u) => Math.round(u.balance) === 777 },
     { id: 'admin_power', icon: '🛡️', title: 'Admin Power', desc: 'Du hast Admin-Rechte.', 
       check: (u) => u.isAdmin },
+
+	// --- SPECIAL / BUG BOUNTY ---
+    { 
+      id: 'badge_hunter', 
+      icon: '🐛', 
+      title: 'Bug Hunter', 
+      desc: 'Hat einen Fehler in der Matrix gefunden und eliminiert.', 
+      // check gibt immer false zurück, da dieses Badge nur manuell/per Kauf vergeben wird
+      check: () => false 
+    }
 ];
 
 // Hilfsfunktion: Automatische Prüfung (Erweitert V2)
@@ -5570,7 +5580,7 @@ app.get('/api/admin/health-check', isAuthenticated, isAdmin, async (req, res) =>
 });
 
 // =========================================================
-// === STEUER SYSTEM (THE TAXMAN) ===
+// === STEUER SYSTEM (THE TAXMAN) - UPDATED ===
 // =========================================================
 const TAX_THRESHOLD = 100000000; // 100 Millionen
 const TAX_RATE = 0.005; // 0,5%
@@ -5593,10 +5603,34 @@ async function collectTaxes() {
 
         let totalTaxCollected = 0;
         const bulkOps = [];
+        const inventoryOps = []; // Für verbrauchte Schilde
 
         for (const user of richUsers) {
-            // Steuer berechnen: 0.5% vom aktuellen Guthaben
-            const taxAmount = Math.floor(user.balance * TAX_RATE * 100) / 100; // Auf 2 Stellen runden
+            // 1. PRÜFUNG: Hat der User ein Steuerschutz-Zertifikat?
+            // Wir schauen direkt in die Inventar-Collection
+            const shield = await inventoriesCollection.findOne({ 
+                userId: user._id, 
+                productId: 'tax_shield', 
+                quantityOwned: { $gt: 0 } 
+            });
+
+            if (shield) {
+                console.log(`${LOG_PREFIX_SERVER} 🛡️ User ${user.username} ist geschützt! Verbrauche 1x Steuerschutz.`);
+                
+                // Schild verbrauchen (-1 quantity)
+                inventoryOps.push({
+                    updateOne: {
+                        filter: { _id: shield._id },
+                        update: { $inc: { quantityOwned: -1 } }
+                    }
+                });
+                
+                // Wir ziehen KEIN Geld ab -> weiter zum nächsten User
+                continue; 
+            }
+
+            // 2. STEUER EINZIEHEN (Wenn kein Schild da ist)
+            const taxAmount = Math.floor(user.balance * TAX_RATE * 100) / 100;
 
             if (taxAmount > 0) {
                 bulkOps.push({
@@ -5604,8 +5638,8 @@ async function collectTaxes() {
                         filter: { _id: user._id },
                         update: { 
                             $inc: { 
-                                balance: -taxAmount,      // Geld abziehen
-                                totalTaxesPaid: taxAmount // Statistik erhöhen
+                                balance: -taxAmount, 
+                                totalTaxesPaid: taxAmount 
                             } 
                         }
                     }
@@ -5614,13 +5648,19 @@ async function collectTaxes() {
             }
         }
 
+        // Führe Datenbank-Operationen aus
+        if (inventoryOps.length > 0) {
+            await inventoriesCollection.bulkWrite(inventoryOps);
+        }
+
         if (bulkOps.length > 0) {
             await usersCollection.bulkWrite(bulkOps);
-            // Optional: News generieren, wenn viel Steuer eingesammelt wurde
+            
+            // News generieren, wenn Steuern geflossen sind
             if (totalTaxCollected > 1000000) {
                 await newsCollection.insertOne({
-                    headline: "Rekord-Steuereinnahmen!",
-                    content: `Das Finanzamt hat heute insgesamt $${totalTaxCollected.toLocaleString()} von den Superreichen eingezogen.`,
+                    headline: "Das Finanzamt war da!",
+                    content: `Heute wurden insgesamt $${totalTaxCollected.toLocaleString()} Steuern eingezogen. ${inventoryOps.length} Reiche konnten sich durch Zertifikate retten.`,
                     author: "Limo Tax Bot",
                     category: "Wirtschaft",
                     createdAt: new Date(),
@@ -5629,7 +5669,7 @@ async function collectTaxes() {
             }
         }
 
-        console.log(`${LOG_PREFIX_SERVER} 📉 Steuer-Lauf beendet. ${richUsers.length} User besteuert. Summe: $${totalTaxCollected.toFixed(2)}`);
+        console.log(`${LOG_PREFIX_SERVER} 📉 Steuer-Lauf beendet. Summe: $${totalTaxCollected.toFixed(2)}. Geschützte User: ${inventoryOps.length}`);
 
     } catch (err) {
         console.error(`${LOG_PREFIX_SERVER} Fehler beim Steuereintreiben:`, err);
@@ -6959,5 +6999,6 @@ app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
+
 
 
