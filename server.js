@@ -7359,9 +7359,73 @@ app.post('/api/heist/start', isAuthenticated, async (req, res) => {
     }
 });
 
+// =========================================================
+// === ADMIN CHAT INSPECTOR ===
+// =========================================================
+
+// 1. Liste aller Tinda-Chats abrufen (Wer schreibt mit wem?)
+app.get('/api/admin/chat/tinda-conversations', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        // Suche alle Chats vom Typ 'tinda'
+        const chats = await limChatsCollection.find({ type: 'tinda' })
+            .sort({ updatedAt: -1 }) // Aktuellste zuerst
+            .limit(50)
+            .toArray();
+
+        // Wir holen uns noch die Usernamen der echten User dazu (nicht der KI)
+        // In Tinda Chats ist participants[0] meist der echte User
+        const enrichedChats = [];
+        
+        for (const chat of chats) {
+            const realUserId = chat.participants[0]; 
+            const realUser = await usersCollection.findOne({ _id: realUserId }, { projection: { username: 1 } });
+            
+            enrichedChats.push({
+                chatId: chat._id,
+                user: realUser ? realUser.username : "Unbekannt",
+                partner: chat.tindaPartnerName, // Name der KI/Person
+                lastMsg: chat.lastMessagePreview,
+                lastActive: chat.updatedAt
+            });
+        }
+
+        res.json({ count: enrichedChats.length, chats: enrichedChats });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der Chats." });
+    }
+});
+
+// 2. Nachrichten lesen (Filterbar)
+// Nutzung: /api/admin/chat/messages?chatId=... ODER /api/admin/chat/messages?onlyAi=true
+app.get('/api/admin/chat/messages', isAuthenticated, isAdmin, async (req, res) => {
+    const { chatId, onlyAi, limit } = req.query;
+    const query = {};
+
+    try {
+        // Filter: Bestimmter Chat?
+        if (chatId) {
+            query.chatId = new ObjectId(chatId);
+        }
+
+        // Filter: Nur KI-Nachrichten?
+        if (onlyAi === 'true') {
+            query.isAi = true;
+        }
+
+        // Suche in der DB
+        const messages = await limMessagesCollection.find(query)
+            .sort({ timestamp: -1 }) // Neueste zuerst
+            .limit(parseInt(limit) || 100) // Standardmäßig max 100
+            .toArray();
+
+        res.json({ count: messages.length, messages });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Laden der Nachrichten." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
-
-
