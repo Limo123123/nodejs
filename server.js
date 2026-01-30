@@ -6679,19 +6679,40 @@ app.delete('/api/tinda/chat/:chatId', isAuthenticated, isChatParticipant, async 
     }
 });
 
-// --- NEU: PERSONEN SUCHE ---
+// --- PERSONEN SUCHE ---
 app.get('/api/tinda/search', isAuthenticated, async (req, res) => {
     const { q } = req.query;
     if (!q || q.length < 2) return res.json({ results: [] });
 
     try {
-        // Suche in der Human DB nach Namen
-        const results = await humansCollection.find({ 
+        // 1. Rohe Daten suchen
+        const rawResults = await humansCollection.find({ 
             name: { $regex: q, $options: 'i' } 
         }).limit(10).project({ name: 1, categoryId: 1, image_url: 1 }).toArray();
 
+        // 2. Mapping für schöne Kategorienamen (identisch zum Stack)
+        const categoryMap = {
+            'lehrer': 'Lehrer 🎓',
+            'politiker': 'Politiker 🏛️',
+            'promis': 'Promi ✨',
+            'schler': 'Schüler 🎒',
+            'influencer': 'Influencer 📱'
+        };
+
+        const results = rawResults.map(h => {
+            const catKey = h.categoryId ? h.categoryId.toLowerCase() : 'default';
+            // Versuche Mapping, sonst nimm das Original mit großem Anfangsbuchstaben
+            const niceCategory = categoryMap[catKey] || (catKey.charAt(0).toUpperCase() + catKey.slice(1));
+            
+            return {
+                ...h,
+                categoryId: niceCategory // Hier wird "schler" zu "Schüler 🎒"
+            };
+        });
+
         res.json({ results });
     } catch (e) {
+        console.error(e);
         res.status(500).json({ error: "Suchfehler." });
     }
 });
@@ -6744,3 +6765,4 @@ app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
+
