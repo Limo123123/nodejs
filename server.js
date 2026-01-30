@@ -146,6 +146,7 @@ let authCodesCollection;
 let robberyLogsCollection;
 let client;
 let highscoresCollection;
+let tindaSwipesCollection;
 
 // ==============================================================================
 // === NEU: AUTOMATISIERTE SICHERHEITS- & REPARATURFUNKTIONEN ====================
@@ -779,7 +780,7 @@ MongoClient.connect(mongoUri)
         ratingsCollection = db.collection('ratings');
         criteriaCollection = db.collection('criteria');  // Früher subjects
         categoriesCollection = db.collection('categories');
-		const tindaSwipesCollection = db.collection('tindaSwipes'); // Neue Collection
+		tindaSwipesCollection = db.collection('tindaSwipes'); // Neue Collection
 
         authCodesCollection = db.collection(authCodesCollectionName);
     
@@ -6593,3 +6594,4 @@ app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
+
