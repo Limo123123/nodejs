@@ -779,6 +779,7 @@ MongoClient.connect(mongoUri)
         ratingsCollection = db.collection('ratings');
         criteriaCollection = db.collection('criteria');  // Früher subjects
         categoriesCollection = db.collection('categories');
+		const tindaSwipesCollection = db.collection('tindaSwipes'); // Neue Collection
 
         authCodesCollection = db.collection(authCodesCollectionName);
     
@@ -6416,14 +6417,179 @@ app.get('/api/games/leaderboard/:gameId', async (req, res) => {
     }
 });
 
+// =========================================================
+// === TINDA (TINDER CLONE) BACKEND ===
+// =========================================================
+const OLLAMA_PI_URL = process.env.OLLAMA_URL || "http://192.168.178.170:11434/api/generate"; // IP deines 2. Pi anpassen!
+const OLLAMA_MODEL = "llama3"; // oder "mistral", je nachdem was auf dem Pi läuft
+
+// 1. STACK LADEN (Menschen, die man noch nicht geswiped hat)
+app.get('/api/tinda/stack', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        // IDs holen, die der User schon geswiped hat
+        const swipedDocs = await tindaSwipesCollection.find({ userId: userId }).toArray();
+        const swipedHumanIds = swipedDocs.map(s => s.humanId);
+
+        // Zufällige Humans laden, die NICHT in swipedHumanIds sind
+        const stack = await humansCollection.aggregate([
+            { $match: { _id: { $nin: swipedHumanIds } } },
+            { $sample: { size: 10 } }, // Hole 10 zufällige
+            { $project: { name: 1, categoryId: 1, image_url: 1, averages: 1 } } // Nur nötige Daten
+        ]).toArray();
+
+        // Dummy-Daten für Bio/Alter (da Humans DB das vllt. nicht hat)
+        const enrichedStack = stack.map(h => ({
+            ...h,
+            age: Math.floor(Math.random() * (60 - 25 + 1)) + 25,
+            bio: `Ich bin ein ${h.categoryId}. Bewerte mich gut!` // Platzhalter
+        }));
+
+        res.json({ stack: enrichedStack });
+    } catch (e) {
+        console.error("Tinda Stack Error:", e);
+        res.status(500).json({ error: "Konnte Stack nicht laden." });
+    }
+});
+
+// 2. SWIPE AKTION (Rechts = Match Chance, Links = Skip)
+app.post('/api/tinda/swipe', isAuthenticated, async (req, res) => {
+    const { humanId, direction } = req.body; // direction: 'left' oder 'right'
+    const userId = new ObjectId(req.session.userId);
+
+    if (!humanId || !['left', 'right'].includes(direction)) return res.status(400).json({ error: "Daten fehlen." });
+
+    const hIdObj = new ObjectId(humanId);
+
+    try {
+        // Swipe speichern, damit Person nicht nochmal kommt
+        await tindaSwipesCollection.insertOne({
+            userId, humanId: hIdObj, direction, timestamp: new Date()
+        });
+
+        if (direction === 'left') {
+            return res.json({ match: false, message: "Nope." });
+        }
+
+        // Bei Rechts-Swipe: Match berechnen (z.B. 70% Chance oder basierend auf Human Grade)
+        // Hier simpel: 80% Chance auf Match
+        const isMatch = Math.random() < 0.8;
+
+        if (isMatch) {
+            const human = await humansCollection.findOne({ _id: hIdObj });
+            
+            // Chat erstellen (Typ 'tinda')
+            // WICHTIG: Wir nutzen humanId als Pseudo-Partner
+            const newChat = {
+                type: 'tinda',
+                participants: [userId], // Nur User ist "echter" Teilnehmer
+                tindaPartnerId: hIdObj, // Referenz auf Human DB
+                tindaPartnerName: human.name,
+                createdAt: new Date(),
+                updatedAt: new Date(),
+                lastMessagePreview: "Es ist ein Match!",
+                lastMessageTimestamp: new Date()
+            };
+            
+            // Prüfen ob Chat schon existiert (Reset Logik optional)
+            const existingChat = await limChatsCollection.findOne({ type: 'tinda', participants: userId, tindaPartnerId: hIdObj });
+            
+            if (!existingChat) {
+                await limChatsCollection.insertOne(newChat);
+                
+                // Erste Nachricht von der KI generieren lassen (Initialer Gruß)
+                // Wir rufen die KI Funktion asynchron auf, ohne auf Antwort zu warten
+                triggerAiResponse(userId, hIdObj, newChat._id, "Generiere einen kurzen, flirty Anmachspruch.");
+            }
+
+            return res.json({ match: true, humanName: human.name });
+        }
+
+        res.json({ match: false });
+
+    } catch (e) {
+        console.error("Swipe Error:", e);
+        res.status(500).json({ error: "Serverfehler beim Swipen." });
+    }
+});
+
+// 3. NACHRICHT SENDEN & KI ANTWORTEN LASSEN
+app.post('/api/tinda/chat/:chatId/message', isAuthenticated, isChatParticipant, async (req, res) => {
+    const { content } = req.body;
+    const chatId = new ObjectId(req.params.chatId);
+    const userId = new ObjectId(req.session.userId);
+    const chat = req.chat; // Kommt aus Middleware
+
+    if(chat.type !== 'tinda') return res.status(400).json({error: "Kein Tinda Chat."});
+
+    // 1. User Nachricht speichern
+    const userMsg = {
+        chatId, senderId: userId, senderUsername: req.session.username,
+        content, timestamp: new Date()
+    };
+    await limMessagesCollection.insertOne(userMsg);
+    
+    // Chat updaten
+    await limChatsCollection.updateOne({_id: chatId}, {
+        $set: { lastMessagePreview: content.substring(0,30), updatedAt: new Date() }
+    });
+
+    res.json({ message: "Gesendet", sentMessage: userMsg });
+
+    // 2. KI Trigger (Feuer & Vergessen)
+    triggerAiResponse(userId, chat.tindaPartnerId, chatId, content);
+});
+
+// --- HELPER: OLLAMA BRIDGE ---
+async function triggerAiResponse(userId, humanId, chatId, userMessage) {
+    try {
+        const human = await humansCollection.findOne({ _id: new ObjectId(humanId) });
+        if(!human) return;
+
+        // Prompt Engineering für die Persona
+        const systemPrompt = `Du bist ${human.name} in einer Dating-App. 
+        Kategorie: ${human.categoryId}.
+        Antworte kurz, charmant oder witzig auf die Nachricht. 
+        Bleibe in der Rolle. Max 2 Sätze.`;
+
+        const payload = {
+            model: OLLAMA_MODEL,
+            prompt: `${systemPrompt}\nUser schreibt: "${userMessage}"\nAntwort:`,
+            stream: false
+        };
+
+        // Anfrage an den 2. Pi senden
+        const aiRes = await axios.post(OLLAMA_PI_URL, payload);
+        const aiText = aiRes.data.response;
+
+        if (aiText) {
+            // KI Nachricht in DB speichern
+            const aiMsg = {
+                chatId: new ObjectId(chatId),
+                senderId: humanId, // Human ID als Sender
+                senderUsername: human.name,
+                content: aiText.trim(),
+                timestamp: new Date(),
+                isAi: true
+            };
+            await limMessagesCollection.insertOne(aiMsg);
+            
+            // Chat updaten (Polling Trigger)
+            await limChatsCollection.updateOne({_id: new ObjectId(chatId)}, {
+                $set: { 
+                    lastMessagePreview: aiText.substring(0,30), 
+                    updatedAt: new Date(),
+                    lastMessageTimestamp: new Date()
+                }
+            });
+            updateDataVersion('chat'); // Frontend Bescheid geben
+        }
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Ollama Fehler (Ist der 2. Pi an?):`, err.message);
+    }
+}
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
-
-
-
-
-
-
-
