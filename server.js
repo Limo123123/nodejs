@@ -148,6 +148,7 @@ let client;
 let highscoresCollection;
 let tindaSwipesCollection;
 let bugReportsCollection;
+let systemSettingsCollection;
 
 // ==============================================================================
 // === NEU: AUTOMATISIERTE SICHERHEITS- & REPARATURFUNKTIONEN ====================
@@ -776,6 +777,7 @@ MongoClient.connect(mongoUri)
         robberyLogsCollection = db.collection('robberyLogs');
 		highscoresCollection = db.collection('highscores');
 		bugReportsCollection = db.collection('bugReports');
+		systemSettingsCollection = db.collection('systemSettings');
         
         // NEU: Human Grades Collections
         humansCollection = db.collection('humans');       // Früher teachers
@@ -1055,6 +1057,23 @@ async function gracefulShutdown(signal) {
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM')); // Docker Stop Signal
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));   // Strg+C lokal
+
+// Hilfsfunktion: Geld in die Staatskasse legen
+async function addToStateTreasury(amount) {
+    if (amount <= 0) return;
+    await systemSettingsCollection.updateOne(
+        { id: 'state_treasury' },
+        { $inc: { balance: amount } },
+        { upsert: true }
+    );
+    console.log(`${LOG_PREFIX_SERVER} 🏦 Staatskasse: +$${amount.toFixed(2)} eingezahlt.`);
+}
+
+// Hilfsfunktion: Staatskasse abrufen
+async function getStateTreasuryBalance() {
+    const doc = await systemSettingsCollection.findOne({ id: 'state_treasury' });
+    return doc ? doc.balance : 500000; // Startet mit 500k, falls leer
+}
 
 // === API ENDPOINTS ===
 
@@ -5154,14 +5173,49 @@ const ACHIEVEMENT_DEFINITIONS = [
       desc: 'Hat einen Fehler in der Matrix gefunden und eliminiert.', 
       // check gibt immer false zurück, da dieses Badge nur manuell/per Kauf vergeben wird
       check: () => false 
-    }
+    },
+	// --- 🔥 TINDA (DATING) ---
+    { id: 'romeo', icon: '🌹', title: 'Romeo', desc: 'Habe dein erstes Tinda-Match.', 
+      check: (u, s) => s.tindaMatchCount >= 1 },
+    { id: 'casanova', icon: '😘', title: 'Casanova', desc: 'Sammle 10 Tinda-Matches.', 
+      check: (u, s) => s.tindaMatchCount >= 10 },
+    { id: 'heartbreaker', icon: '💔', title: 'Heartbreaker', desc: 'Sammle 50 Tinda-Matches.', 
+      check: (u, s) => s.tindaMatchCount >= 50 },
+
+    // --- 🦹 CRIME & JUSTIZ ---
+    { id: 'master_thief', icon: '💰', title: 'Meisterdieb', desc: 'Erbeute insgesamt über $50.000 durch Überfälle.', 
+      check: (u) => (u.crimeStats?.totalStolen || 0) >= 50000 },
+    { id: 'busted', icon: '🚓', title: 'Erwischt!', desc: 'Zahle insgesamt über $10.000 an Strafen (Fehlgeschlagene Überfälle).', 
+      check: (u) => (u.crimeStats?.totalFines || 0) >= 10000 },
+    { id: 'victim', icon: '🤕', title: 'Opferlamm', desc: 'Wurde 5-mal erfolgreich ausgeraubt.', 
+      // Das müssen wir über Logs prüfen oder im User speichern. Einfachheitshalber:
+      // Wir nehmen an, du speicherst "timesRobbed" im User bei einem Überfall (siehe Schritt 3 unten)
+      check: (u) => (u.crimeStats?.timesRobbed || 0) >= 5 },
+
+    // --- 🏛️ STEUERN & STAAT ---
+    { id: 'good_citizen', icon: '🫡', title: 'Vorzeigebürger', desc: 'Zahle insgesamt über $1.000.000 an Steuern.', 
+      check: (u) => (u.totalTaxesPaid || 0) >= 1000000 },
+    { id: 'tax_evader', icon: '🕳️', title: 'Steuerflüchtling', desc: 'Besitze ein Steuerschutz-Zertifikat im Inventar.', 
+      // Prüft ob man das Item besitzt
+      check: (u, s) => s.hasTaxShield },
+
+    // --- 🎮 GAMES (HIGHSCORES) ---
+    // Hier prüfen wir, ob der User in der Highscore DB einen Score über X hat
+    { id: 'flappy_noob', icon: '🐤', title: 'Flugschule', desc: 'Erreiche Score 10 in Flappy Limo.', 
+      check: (u, s) => s.bestFlappyScore >= 10 },
+    { id: 'flappy_ace', icon: '🦅', title: 'Flug-Ass', desc: 'Erreiche Score 50 in Flappy Limo.', 
+      check: (u, s) => s.bestFlappyScore >= 50 },
+    { id: 'snake_eater', icon: '🐍', title: 'Schlangenbeschwörer', desc: 'Erreiche Score 100 in Snake.', 
+      check: (u, s) => s.bestSnakeScore >= 100 },
+
+    // --- 🐛 DELTA & BUGS ---
+    { id: 'delta_force', icon: '🔺', title: 'Delta Force', desc: 'Besitze 5 Delta Coins.', 
+      check: (u) => (u.deltaCoins || 0) >= 5 },
 ];
 
-// Hilfsfunktion: Automatische Prüfung (Erweitert V2)
+// Hilfsfunktion: Automatische Prüfung (V3 - Extended Edition)
 async function updateUserAchievements(user) {
     const userId = user._id;
-    
-    // Wir holen uns Referenzen auf die Collections, falls sie oben nicht im Scope waren
     
     // Parallel alle Counts abfragen für Performance
     const [
@@ -5169,11 +5223,18 @@ async function updateUserAchievements(user) {
         portCount, 
         ratingCount, 
         auctionCreatedCount, 
-        auctionWonCount, // NEU: Gewonnene Auktionen
+        auctionWonCount,
         wheelCount,
-        messageCount,    // NEU: Chat Nachrichten
-        ideaCount,       // NEU: Eingereichte Ideen
-        transferCount    // NEU: Getätigte Überweisungen
+        messageCount,    
+        ideaCount,       
+        transferCount,
+        // NEU: Tinda Matches zählen (Chats vom Typ 'tinda')
+        tindaMatchCount,
+        // NEU: Highscores abrufen
+        bestFlappy,
+        bestSnake,
+        // NEU: Hat er ein Steuerschutz-Item?
+        taxShieldItem
     ] = await Promise.all([
         inventoriesCollection.countDocuments({ userId }),
         portfoliosCollection.countDocuments({ userId }),
@@ -5183,9 +5244,17 @@ async function updateUserAchievements(user) {
         wheelsCollection.countDocuments({ creatorId: userId }),
         limMessagesCollection.countDocuments({ senderId: userId }),
         ideasCollection.countDocuments({ submitterId: userId }),
-        bankTransactionsCollection.countDocuments({ fromId: userId })
+        bankTransactionsCollection.countDocuments({ fromId: userId }),
+        // Tinda:
+        limChatsCollection.countDocuments({ type: 'tinda', participants: userId }),
+        // Games (Höchster Score):
+        highscoresCollection.findOne({ userId, game: 'flappy' }, { sort: { score: -1 } }),
+        highscoresCollection.findOne({ userId, game: 'snake' }, { sort: { score: -1 } }),
+        // Inventar Check für Badge:
+        inventoriesCollection.findOne({ userId, productId: 'tax_shield', quantityOwned: { $gt: 0 } })
     ]);
     
+    // Das Statistik-Objekt ("s"), das wir an die Checks übergeben
     const stats = {
         inventoryCount: invCount,
         stockCount: portCount,
@@ -5196,7 +5265,12 @@ async function updateUserAchievements(user) {
         messageCount: messageCount,
         ideaCount: ideaCount,
         transferCount: transferCount,
-        dailyStreak: user.dailyStreak || 0
+        dailyStreak: user.dailyStreak || 0,
+        // NEUE STATS:
+        tindaMatchCount: tindaMatchCount,
+        bestFlappyScore: bestFlappy ? bestFlappy.score : 0,
+        bestSnakeScore: bestSnake ? bestSnake.score : 0,
+        hasTaxShield: !!taxShieldItem
     };
 
     const unlocked = user.achievements || [];
@@ -5206,6 +5280,7 @@ async function updateUserAchievements(user) {
     for (const ach of ACHIEVEMENT_DEFINITIONS) {
         if (!unlocked.includes(ach.id)) {
             try {
+                // Wir übergeben User (u) und Stats (s)
                 if (ach.check(user, stats)) {
                     newUnlocks.push(ach.id);
                 }
@@ -5219,8 +5294,7 @@ async function updateUserAchievements(user) {
             { _id: user._id }, 
             { $addToSet: { achievements: { $each: newUnlocks } } }
         );
-        // Optional: Loggen
-        // console.log(`User ${user.username} hat ${newUnlocks.length} Achievements freigeschaltet.`);
+        console.log(`${LOG_PREFIX_SERVER} 🏆 User ${user.username} hat ${newUnlocks.length} neue Achievements: ${newUnlocks.join(', ')}`);
         return newUnlocks;
     }
     return [];
@@ -5669,6 +5743,11 @@ async function collectTaxes() {
             }
         }
 
+		if (totalTaxCollected > 0) {
+            // GELD GEHT AN DEN SERVER, NICHT INS NICHTS!
+            await addToStateTreasury(totalTaxCollected);
+        }
+
         console.log(`${LOG_PREFIX_SERVER} 📉 Steuer-Lauf beendet. Summe: $${totalTaxCollected.toFixed(2)}. Geschützte User: ${inventoryOps.length}`);
 
     } catch (err) {
@@ -6030,33 +6109,42 @@ app.post('/api/crime/rob', isAuthenticated, async (req, res) => {
             stolen = Math.floor(victim.balance * percent);
             if(stolen > 100000) stolen = 100000; // Cap bei 100k pro Raub
 
-            await usersCollection.updateOne({ _id: victim._id }, { $inc: { balance: -stolen } });
+            // --- UPDATE BEIM OPFER (Geld weg + Achievement Zähler hoch) ---
+            await usersCollection.updateOne(
+                { _id: victim._id }, 
+                { 
+                    $inc: { 
+                        balance: -stolen, 
+                        "crimeStats.timesRobbed": 1 // <--- WICHTIG FÜR ACHIEVEMENT "OPFERLAMM"
+                    } 
+                }
+            );
+
+            // Update beim Räuber
             await usersCollection.updateOne({ _id: robberId }, { 
                 $inc: { balance: stolen, "crimeStats.successfulRobberies": 1, "crimeStats.totalStolen": stolen },
                 $set: { lastRobberyAt: new Date() }
             });
             logMessage = `Wurde von ${robberName} ausgeraubt.`;
+
         } else {
             // FEHLSCHLAG: Strafe zahlen
             const percentFine = (Math.random() * 0.05) + 0.05; // 5% bis 10%
             fine = Math.floor(robber.balance * percentFine);
             
-            // --- FIX START: LIMITS SETZEN ---
-            // Wenn die Strafe über 2.000.000 (2 Mio) geht, kappen wir sie.
+            // Limits für Strafe
             if (fine > 2000000) fine = 2000000; 
-            // Minimum bleibt 500
             if (fine < 500) fine = 500;
-            // --- FIX ENDE ---
 
             await usersCollection.updateOne({ _id: robberId }, { 
                 $inc: { balance: -fine, "crimeStats.failedRobberies": 1, "crimeStats.totalFines": fine },
                 $set: { lastRobberyAt: new Date() }
             });
+			await addToStateTreasury(fine);
             logMessage = `Versuchter Überfall durch ${robberName} (abgewehrt).`;
         }
 
         // --- LOGBUCH EINTRAG ---
-        // Wir speichern das für das Opfer, damit es sehen kann, was passiert ist
         if (robberyLogsCollection) {
             await robberyLogsCollection.insertOne({
                 victimId: victim._id,
@@ -6073,7 +6161,7 @@ app.post('/api/crime/rob', isAuthenticated, async (req, res) => {
         res.json({
             success: isSuccess,
             amount: isSuccess ? stolen : -fine,
-            chanceWas: (successChance * 100).toFixed(1), // Zeige Chance im Nachhinein an
+            chanceWas: (successChance * 100).toFixed(1),
             newBalance: updatedRobber.balance,
             message: isSuccess ? `Erfolg! $${stolen} erbeutet.` : `Erwischt! $${fine} Strafe gezahlt.`
         });
@@ -6995,10 +7083,167 @@ app.post('/api/bug-bounty/buy', isAuthenticated, async (req, res) => {
     }
 });
 
+// =========================================================
+// === THE HEIST V2 (COMMUNITY RAID) ===
+// =========================================================
+
+// Helfer: Status abrufen
+async function getHeistState() {
+    // Hole Firewall Status
+    let fwSetting = await systemSettingsCollection.findOne({ id: 'heist_firewall' });
+    if (!fwSetting) {
+        fwSetting = { id: 'heist_firewall', integrity: 100.00, openUntil: 0 };
+        await systemSettingsCollection.insertOne(fwSetting);
+    }
+    
+    // Prüfen ob Zeitfenster abgelaufen
+    if (fwSetting.integrity <= 0 && Date.now() > fwSetting.openUntil) {
+        // Reset
+        console.log(`${LOG_PREFIX_SERVER} 🛡️ Firewall hat sich regeneriert. Reset auf 100%.`);
+        await systemSettingsCollection.updateOne({ id: 'heist_firewall' }, { $set: { integrity: 100.00, openUntil: 0 } });
+        fwSetting.integrity = 100.00;
+        fwSetting.openUntil = 0;
+    }
+
+    const treasury = await getStateTreasuryBalance();
+    
+    return { 
+        integrity: fwSetting.integrity, 
+        isOpen: fwSetting.integrity <= 0,
+        openUntil: fwSetting.openUntil,
+        treasuryBalance: treasury 
+    };
+}
+
+// 1. Info abrufen (Polling)
+app.get('/api/heist/info', isAuthenticated, async (req, res) => {
+    const state = await getHeistState();
+    res.json(state);
+});
+
+// 2. HACKEN (Vorbereitung - Teamwork)
+app.post('/api/heist/hack', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    
+    // Kleiner Hack kostet $500 und senkt Firewall um 1-3%
+    const COST = 500;
+    
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (user.balance < COST) throw new Error("Zu wenig Geld für Hacker-Tools ($500).");
+
+            const currentState = await systemSettingsCollection.findOne({ id: 'heist_firewall' }, { session });
+            if (currentState.integrity <= 0) throw new Error("Firewall ist bereits unten! Starte den Überfall!");
+
+            // Geld abziehen
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -COST } }, { session });
+            
+            // Schaden berechnen (1.5% bis 4.0%)
+            const damage = (Math.random() * 2.5) + 1.5;
+            let newIntegrity = currentState.integrity - damage;
+            let openUntil = 0;
+
+            if (newIntegrity <= 0) {
+                newIntegrity = 0;
+                // Tresor öffnet sich für 60 Minuten
+                openUntil = Date.now() + (60 * 60 * 1000);
+                
+                // News Broadcast
+                await newsCollection.insertOne({
+                    headline: "FIREWALL DOWN! 🔓",
+                    content: `Die Sicherheits-Systeme der Staatskasse sind ausgefallen! Der Tresor ist offen! Zugriff für 60 Minuten möglich.`,
+                    author: "Anonymous",
+                    category: "Verbrechen",
+                    createdAt: new Date(),
+                    likes: 0
+                }, { session });
+            }
+
+            await systemSettingsCollection.updateOne(
+                { id: 'heist_firewall' },
+                { $set: { integrity: newIntegrity, openUntil: openUntil } },
+                { session }
+            );
+        });
+
+        res.json({ message: "Hack erfolgreich! Firewall beschädigt." });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// 3. ZUGRIFF (Der Raub - Nur wenn offen)
+app.post('/api/heist/start', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    
+    // Großer Raub kostet mehr Equipment
+    const COST = 2000;
+
+    const session = client.startSession();
+    try {
+        let result = {};
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (user.balance < COST) throw new Error("Nicht genug Geld für Equipment ($2000).");
+
+            // Status prüfen
+            const fw = await systemSettingsCollection.findOne({ id: 'heist_firewall' }, { session });
+            const treasuryDoc = await systemSettingsCollection.findOne({ id: 'state_treasury' }, { session });
+            const pot = treasuryDoc ? treasuryDoc.balance : 0;
+
+            if (fw.integrity > 0) throw new Error("Firewall ist noch aktiv! Hackt sie erst runter.");
+            if (pot < 1000) throw new Error("Tresor ist leer.");
+
+            // Cooldown pro User (damit man nicht 100x klickt in der Stunde)
+            // Sagen wir: 5 Minuten Cooldown zwischen Versuchen
+            const lastHeist = user.lastHeistAt ? new Date(user.lastHeistAt).getTime() : 0;
+            if (Date.now() - lastHeist < 5 * 60 * 1000) throw new Error("Fahndungslevel zu hoch. Warte 5 Minuten.");
+
+            // Kosten
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -COST } }, { session });
+
+            // CHANCE: Wenn offen -> 60% Erfolg!
+            const isSuccess = Math.random() < 0.60; 
+
+            if (isSuccess) {
+                // Beute: 5% bis 10% des AKTUELLEN Pots (damit für andere was übrig bleibt)
+                const percent = (Math.random() * 0.05) + 0.05;
+                const loot = Math.floor(pot * percent);
+
+                await systemSettingsCollection.updateOne({ id: 'state_treasury' }, { $inc: { balance: -loot } }, { session });
+                await usersCollection.updateOne(
+                    { _id: userId }, 
+                    { $inc: { balance: loot }, $set: { lastHeistAt: new Date() } }, 
+                    { session }
+                );
+                result = { success: true, message: `TREFFER! Du hast $${loot.toLocaleString()} erbeutet!` };
+            } else {
+                // Erwischt: Kleine Strafe
+                const fine = 5000;
+                await usersCollection.updateOne(
+                    { _id: userId }, 
+                    { $inc: { balance: -fine }, $set: { lastHeistAt: new Date() } }, 
+                    { session }
+                );
+                // Strafe in den Pot
+                await systemSettingsCollection.updateOne({ id: 'state_treasury' }, { $inc: { balance: fine } }, { session });
+                
+                result = { success: false, message: `ALARM! Du musstest fliehen und $${fine} Bestechungsgeld zahlen.` };
+            }
+        });
+        res.json(result);
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
-
-
-
