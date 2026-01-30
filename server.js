@@ -6578,36 +6578,138 @@ app.get('/api/tinda/stack', isAuthenticated, async (req, res) => {
             'influencer': 'Influencer 📱'
         };
 
-        const bioTemplates = {
+		const bioTemplates = {
             'lehrer': [
                 "Ich korrigiere auch deine WhatsApp-Nachrichten.",
                 "Ruhe bitte! Oder swipe rechts.",
                 "Ich gebe keine Noten, ich verteile Chancen.",
-                "Mathe ist mein Leben, du könntest es auch sein."
+                "Mathe ist mein Leben, du könntest es auch sein.",
+                "Der Gong beendet den Unterricht, nicht unser Date.",
+                "Ich habe einen Rotstift und ich weiß, wie man ihn benutzt.",
+                "Lust auf eine Einzelstunde?",
+                "Bei mir gibt es keine Hausaufgaben, nur Hausbesuche.",
+                "Ich erkläre dir die Welt, wenn du zuhörst.",
+                "Pädagogisch wertvoll, privat eher ungezogen.",
+                "Klassenfahrten sind mein einziges Hobby.",
+                "Ich kann sehr streng sein... wenn du willst.",
+                "Setzen, sechs! Oder setzen, Sekt?",
+                "Lehrer aus Leidenschaft, Single aus Zeitmangel.",
+                "Grammatik ist sexy. Punkt.",
+                "Ich bringe dir Dinge bei, die nicht im Lehrplan stehen.",
+                "Physik ist überall, spürst du die Anziehung?",
+                "Große Pause? Ich hoffe, wir haben keine.",
+                "Meine Tafel ist sauber, meine Gedanken nicht immer.",
+                "Biologie war schon immer mein Lieblingsfach."
             ],
             'politiker': [
                 "Ich verspreche dir das Blaue vom Himmel.",
                 "Wähl mich, ich bin die beste Option.",
                 "Die Rente ist sicher, unser Date auch?",
-                "Keine leeren Versprechungen, nur leere Gläser."
+                "Keine leeren Versprechungen, nur leere Gläser.",
+                "Ich suche eine Koalition fürs Leben.",
+                "Mehr Netto vom Brutto, mehr Liebe für dich.",
+                "Ich habe den besten Plan für unsere Zukunft.",
+                "Lass uns über Diäten reden – ich breche meine ständig.",
+                "Ich bin sehr gut im Verhandeln. Probier's aus.",
+                "Meine Umfragewerte steigen, wenn ich dich sehe.",
+                "Kein Kommentar zu meiner Vergangenheit.",
+                "Ich stehe für Transparenz (außer im Schlafzimmer).",
+                "Lobbyismus für die Liebe.",
+                "Ich rede viel, aber ich küsse besser.",
+                "Stimmenthaltung ist keine Option.",
+                "Ich repräsentiere das Volk, aber ich will nur dich.",
+                "Krise? Welche Krise? Wir sind stabil.",
+                "Ich trete nicht zurück, ich trete näher.",
+                "Diplomatenpass vorhanden, Herz noch zu vergeben.",
+                "Glaub mir, ich bin Politiker."
             ],
             'promis': [
                 "Keine Fotos bitte, nur Autogramme.",
                 "Ja, ich bin's wirklich.",
                 "Mein Leben ist ein Film, spielst du mit?",
-                "Follow me to the moon."
+                "Follow me to the moon.",
+                "Mein Manager hat gesagt, ich soll mich unters Volk mischen.",
+                "Verifizierter Account, verifiziertes Herz.",
+                "Champagner ist mein Wasser.",
+                "Ich suche jemanden, der mich nicht googelt.",
+                "Privatjet oder Yacht? Entscheide du.",
+                "Paparazzi nerven, du hoffentlich nicht.",
+                "Ich bin nicht arrogant, ich bin nur berühmt.",
+                "Mein Gesicht hängt am Times Square, bald an deiner Wand?",
+                "VIP-Zugang zu meinem Herzen: Swipe rechts.",
+                "Ich gewinne jeden Award, außer den für die Liebe.",
+                "Mein Hund hat mehr Follower als du.",
+                "Business im Kopf, Party im Blut.",
+                "Ich brauche keine Vorstellung, du kennst mich.",
+                "Exklusiv und limitiert.",
+                "Red Carpet Ready.",
+                "Lass uns Schlagzeilen machen."
             ],
             'schler': [
                 "Hausaufgaben vergessen, aber dich nicht.",
                 "In der letzten Reihe sitzt es sich am besten.",
                 "Schule nervt, Dates nicht.",
-                "Suche jemanden, der mir Mathe erklärt."
+                "Suche jemanden, der mir Mathe erklärt.",
+                "Mein Rucksack ist schwerer als mein Leben.",
+                "5 Minuten vor der Prüfung lernen reicht.",
+                "Ich schwänze nicht, ich mache Homeoffice.",
+                "Pausenbrot teilen?",
+                "Eigentlich müsste ich lernen.",
+                "Ferien sind mein einziger Lichtblick.",
+                "Lehrerhasser, Liebesliebhaber.",
+                "Hast du die Lösungen für Bio?",
+                "Ich bin nur hier, weil der Unterricht langweilig ist.",
+                "Spicker-Profi sucht Komplizen.",
+                "Mein Schlafrhythmus ist kaputt, genau wie mein Füller.",
+                "Bus verpasst, Herz verloren.",
+                "Ich weiß nicht, was ich werden will, aber vllt. dein Freund?",
+                "Abi 20xx (hoffentlich).",
+                "Energie-Drink-Sucht inklusive.",
+                "Klassenclown sucht Publikum."
+            ],
+            'influencer': [
+                "Link in Bio!",
+                "Swipe up für mehr.",
+                "Kooperation? Schreib DM.",
+                "Mein Leben ist ein Filter.",
+                "Suche jemanden für Couple-Content.",
+                "Hast du mich schon abonniert?",
+                "Foodie, Traveler, Dreamer.",
+                "Unboxing my heart.",
+                "Keine Zeit, muss posten.",
+                "Hashtag Love.",
+                "Goldene Stunde ist meine Zeit.",
+                "Ich mache alles für den Algorithmus.",
+                "Sponsoren gesucht (für Drinks).",
+                "Mein Feed ist perfekt, ich bin es auch.",
+                "Vlogge unser erstes Date.",
+                "Like for Like?",
+                "Social Media Break? Niemals.",
+                "Ich bin online, also bin ich.",
+                "Influencer aus Leidenschaft.",
+                "Content Creator & Heart Breaker."
             ],
             'default': [
                 "Neu hier, zeig mir deine Welt.",
                 "Suche jemanden zum Pferde stehlen.",
                 "Kaffee oder Tee?",
-                "Lass uns Geschichte schreiben."
+                "Lass uns Geschichte schreiben.",
+                "Ich koche besser, als ich aussehe.",
+                "Humor ist mir wichtiger als Muskeln.",
+                "Suche den Grund, die App zu löschen.",
+                "Hobby: Atmen und Essen.",
+                "1,85m, falls das wichtig ist.",
+                "Katzenmensch.",
+                "Hundemensch.",
+                "Ich mag lange Spaziergänge zum Kühlschrank.",
+                "Netflix & Chill?",
+                "Einfach mal gucken, was passiert.",
+                "Nicht hier für Spiele.",
+                "Abenteuerlustig.",
+                "Sonntage sind für Pancakes.",
+                "Musik an, Welt aus.",
+                "Träumer & Macher.",
+                "Wer das liest, muss swipen."
             ]
         };
 
@@ -7261,4 +7363,5 @@ app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
+
 
