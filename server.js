@@ -147,6 +147,7 @@ let robberyLogsCollection;
 let client;
 let highscoresCollection;
 let tindaSwipesCollection;
+let bugReportsCollection;
 
 // ==============================================================================
 // === NEU: AUTOMATISIERTE SICHERHEITS- & REPARATURFUNKTIONEN ====================
@@ -774,6 +775,7 @@ MongoClient.connect(mongoUri)
         newsCollection = db.collection('news');
         robberyLogsCollection = db.collection('robberyLogs');
 		highscoresCollection = db.collection('highscores');
+		bugReportsCollection = db.collection('bugReports');
         
         // NEU: Human Grades Collections
         humansCollection = db.collection('humans');       // Früher teachers
@@ -6761,8 +6763,201 @@ app.post('/api/tinda/match/direct', isAuthenticated, async (req, res) => {
     }
 });
 
+// =========================================================
+// === BUG BOUNTY SYSTEM V2 (MIT DELTA COINS) ===
+// =========================================================
+
+// DEFINITION: Der Exklusive Delta-Shop
+const DELTA_SHOP_ITEMS = [
+    { 
+        id: 'tax_shield', 
+        name: 'Steuerschutz-Zertifikat 🛡️', 
+        cost: 1, 
+        desc: 'Verhindert einmalig, dass das Finanzamt dir Geld abzieht.',
+        type: 'item' // Fügt Item ins Inventar
+    },
+    { 
+        id: 'badge_hunter', 
+        name: 'Badge: Bug Hunter 🐛', 
+        cost: 3, 
+        desc: 'Ein exklusives Abzeichen für dein Profil.',
+        type: 'badge' // Fügt Achievement hinzu
+    },
+    { 
+        id: 'job_reset', 
+        name: 'Energy Drink ⚡', 
+        cost: 1, 
+        desc: 'Setzt sofort deinen Arbeits-Cooldown im Jobcenter zurück.',
+        type: 'effect_job' // Sofortiger Effekt
+    },
+    { 
+        id: 'crime_cleaner', 
+        name: 'Gefälschter Pass 🕵️', 
+        cost: 2, 
+        desc: 'Setzt deinen Überfall-Cooldown (Crime) sofort zurück.',
+        type: 'effect_crime' // Sofortiger Effekt
+    }
+];
+
+// 1. Report einreichen (Unverändert)
+app.post('/api/bugs', isAuthenticated, async (req, res) => {
+    const { title, description, steps } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const username = req.session.username;
+
+    if (!title || !description) return res.status(400).json({ error: "Titel und Beschreibung fehlen." });
+
+    const report = {
+        userId,
+        username,
+        title: title.trim(),
+        description: description.trim(),
+        steps: steps ? steps.trim() : "",
+        status: 'open',
+        rewardGiven: false,
+        createdAt: new Date()
+    };
+
+    await bugReportsCollection.insertOne(report);
+    console.log(`${LOG_PREFIX_SERVER} 🐛 Bug Report von ${username}: ${title}`);
+    res.status(201).json({ message: "Report eingereicht! Warte auf Genehmigung." });
+});
+
+// 2. Admin: Reports ansehen (Unverändert)
+app.get('/api/admin/bugs', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const reports = await bugReportsCollection.find({}).sort({ createdAt: -1 }).toArray();
+        res.json({ reports });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// 3. Admin: Status ändern & Delta-Coin vergeben (ANGEPASST)
+app.post('/api/admin/bugs/:id/resolve', isAuthenticated, isAdmin, async (req, res) => {
+    const { status, giveReward } = req.body; 
+    const reportId = new ObjectId(req.params.id);
+
+    try {
+        const report = await bugReportsCollection.findOne({ _id: reportId });
+        if (!report) return res.status(404).json({ error: "Report nicht gefunden." });
+
+        const updateData = { status, updatedAt: new Date() };
+        let rewardMsg = "";
+
+        // WENN GENEHMIGT UND BELOHNUNG AKTIV:
+        if (status === 'resolved' && giveReward && !report.rewardGiven) {
+            
+            // Gib dem User genau 1 Delta Coin
+            await usersCollection.updateOne(
+                { _id: report.userId },
+                { $inc: { deltaCoins: 1 } } 
+            );
+
+            updateData.rewardGiven = true;
+            rewardMsg = " 1 Delta-Coin (∆) wurde dem User gutgeschrieben.";
+        }
+
+        await bugReportsCollection.updateOne({ _id: reportId }, { $set: updateData });
+        res.json({ message: `Status geändert.${rewardMsg}` });
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Serverfehler." });
+    }
+});
+
+// 4. User: Delta-Shop Infos laden (NEU)
+app.get('/api/bug-bounty/shop', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    const user = await usersCollection.findOne({ _id: userId }, { projection: { deltaCoins: 1 } });
+    
+    res.json({ 
+        deltaCoins: user.deltaCoins || 0,
+        items: DELTA_SHOP_ITEMS
+    });
+});
+
+// 5. User: Item für Delta-Coins kaufen (NEU)
+app.post('/api/bug-bounty/buy', isAuthenticated, async (req, res) => {
+    const { itemId } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    const itemDef = DELTA_SHOP_ITEMS.find(i => i.id === itemId);
+    if (!itemDef) return res.status(400).json({ error: "Item nicht gefunden." });
+
+    const session = client.startSession();
+
+    try {
+        await session.withTransaction(async () => {
+            // A. User checken (Coins vorhanden?)
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            const currentCoins = user.deltaCoins || 0;
+
+            if (currentCoins < itemDef.cost) {
+                throw new Error(`Nicht genügend Delta-Coins. Du hast ${currentCoins}∆, brauchst aber ${itemDef.cost}∆.`);
+            }
+
+            // B. Coins abziehen
+            await usersCollection.updateOne(
+                { _id: userId },
+                { $inc: { deltaCoins: -itemDef.cost } },
+                { session }
+            );
+
+            // C. Effekt ausführen
+            if (itemDef.type === 'item') {
+                // Item ins Inventar (z.B. Tax Shield)
+                // Sicherstellen, dass das Produkt existiert (Mock-Check)
+                const prodExists = await productsCollection.findOne({ id: itemDef.id }, { session });
+                if (!prodExists) {
+                    await productsCollection.insertOne({
+                        id: itemDef.id, name: itemDef.name, price: '$0.00',
+                        description: itemDef.desc, stock: 0, isTokenCard: false, image_url: 'https://placehold.co/150/000/fff?text=DELTA'
+                    }, { session });
+                }
+                await inventoriesCollection.updateOne(
+                    { userId: userId, productId: itemDef.id },
+                    { $inc: { quantityOwned: 1 } },
+                    { upsert: true, session }
+                );
+
+            } else if (itemDef.type === 'badge') {
+                // Badge zum Profil
+                await usersCollection.updateOne(
+                    { _id: userId },
+                    { $addToSet: { achievements: itemDef.id } },
+                    { session }
+                );
+
+            } else if (itemDef.type === 'effect_job') {
+                // Job Cooldown Reset
+                await usersCollection.updateOne(
+                    { _id: userId },
+                    { $set: { lastWorkedAt: 0 } }, // Auf 0 setzen = sofort bereit
+                    { session }
+                );
+
+            } else if (itemDef.type === 'effect_crime') {
+                // Crime Cooldown Reset
+                await usersCollection.updateOne(
+                    { _id: userId },
+                    { $set: { lastRobberyAt: 0 } },
+                    { session }
+                );
+            }
+        });
+
+        res.json({ message: `Gekauft: ${itemDef.name}. Danke für deine Treue!` });
+
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
+
 
