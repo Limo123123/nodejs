@@ -6424,7 +6424,7 @@ app.get('/api/games/leaderboard/:gameId', async (req, res) => {
 const OLLAMA_PI_URL = process.env.OLLAMA_URL || "http://192.168.178.170:11434/api/generate"; // IP deines 2. Pi anpassen!
 const OLLAMA_MODEL = "llama3"; // oder "mistral", je nachdem was auf dem Pi läuft
 
-// 1. STACK LADEN (Menschen, die man noch nicht geswiped hat)
+// 1. STACK LADEN (Mit verbesserter Anzeige für Kategorien & Bios)
 app.get('/api/tinda/stack', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
     try {
@@ -6436,15 +6436,75 @@ app.get('/api/tinda/stack', isAuthenticated, async (req, res) => {
         const stack = await humansCollection.aggregate([
             { $match: { _id: { $nin: swipedHumanIds } } },
             { $sample: { size: 10 } }, // Hole 10 zufällige
-            { $project: { name: 1, categoryId: 1, image_url: 1, averages: 1 } } // Nur nötige Daten
+            { $project: { name: 1, categoryId: 1, image_url: 1, averages: 1 } }
         ]).toArray();
 
-        // Dummy-Daten für Bio/Alter (da Humans DB das vllt. nicht hat)
-        const enrichedStack = stack.map(h => ({
-            ...h,
-            age: Math.floor(Math.random() * (60 - 25 + 1)) + 25,
-            bio: `Ich bin ein ${h.categoryId}. Bewerte mich gut!` // Platzhalter
-        }));
+        // --- HIER IST DIE MAGIE FÜR SCHÖNERE PROFILE ---
+        const categoryMap = {
+            'lehrer': 'Lehrer 🎓',
+            'politiker': 'Politiker 🏛️',
+            'promis': 'Promi ✨',
+            'schler': 'Schüler 🎒',  // Hier fixen wir "schler"
+            'influencer': 'Influencer 📱'
+        };
+
+        const bioTemplates = {
+            'lehrer': [
+                "Ich korrigiere auch deine WhatsApp-Nachrichten.",
+                "Ruhe bitte! Oder swipe rechts.",
+                "Ich gebe keine Noten, ich verteile Chancen.",
+                "Mathe ist mein Leben, du könntest es auch sein."
+            ],
+            'politiker': [
+                "Ich verspreche dir das Blaue vom Himmel.",
+                "Wähl mich, ich bin die beste Option.",
+                "Die Rente ist sicher, unser Date auch?",
+                "Keine leeren Versprechungen, nur leere Gläser."
+            ],
+            'promis': [
+                "Keine Fotos bitte, nur Autogramme.",
+                "Ja, ich bin's wirklich.",
+                "Mein Leben ist ein Film, spielst du mit?",
+                "Follow me to the moon."
+            ],
+            'schler': [
+                "Hausaufgaben vergessen, aber dich nicht.",
+                "In der letzten Reihe sitzt es sich am besten.",
+                "Schule nervt, Dates nicht.",
+                "Suche jemanden, der mir Mathe erklärt."
+            ],
+            'default': [
+                "Neu hier, zeig mir deine Welt.",
+                "Suche jemanden zum Pferde stehlen.",
+                "Kaffee oder Tee?",
+                "Lass uns Geschichte schreiben."
+            ]
+        };
+
+        // Daten anreichern und verschönern
+        const enrichedStack = stack.map(h => {
+            const catKey = h.categoryId ? h.categoryId.toLowerCase() : 'default';
+            
+            // 1. Schöner Name für die Kategorie (oder Fallback auf Original mit Großbuchstaben)
+            const niceCategory = categoryMap[catKey] || (catKey.charAt(0).toUpperCase() + catKey.slice(1));
+
+            // 2. Zufällige Bio auswählen
+            const templates = bioTemplates[catKey] || bioTemplates['default'];
+            const randomBio = templates[Math.floor(Math.random() * templates.length)];
+
+            // 3. Alter schätzen (Promis/Politiker älter, Schüler jünger)
+            let minAge = 25, maxAge = 60;
+            if (catKey === 'schler') { minAge = 18; maxAge = 22; }
+            if (catKey === 'promis') { minAge = 20; maxAge = 50; }
+            const randomAge = Math.floor(Math.random() * (maxAge - minAge + 1)) + minAge;
+
+            return {
+                ...h,
+                categoryId: niceCategory, // Überschreibt die "hässliche" ID für das Frontend
+                age: randomAge,
+                bio: randomBio
+            };
+        });
 
         res.json({ stack: enrichedStack });
     } catch (e) {
@@ -6594,4 +6654,5 @@ app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
+
 
