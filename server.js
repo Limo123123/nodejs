@@ -7121,39 +7121,53 @@ app.get('/api/heist/info', isAuthenticated, async (req, res) => {
     res.json(state);
 });
 
-// 2. HACKEN (Vorbereitung - Teamwork)
+// 2. HACKEN (Mit Cooldown gegen Spam)
 app.post('/api/heist/hack', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
-    
-    // Kleiner Hack kostet $500 und senkt Firewall um 1-3%
     const COST = 500;
-    
+    const HACK_COOLDOWN = 60 * 1000; // 60 Sekunden Pause pro Spieler
+
     const session = client.startSession();
     try {
         await session.withTransaction(async () => {
             const user = await usersCollection.findOne({ _id: userId }, { session });
+            
+            // A. Cooldown prüfen
+            const now = Date.now();
+            const lastHack = user.lastHackAt ? new Date(user.lastHackAt).getTime() : 0;
+            if (now - lastHack < HACK_COOLDOWN) {
+                const left = Math.ceil((HACK_COOLDOWN - (now - lastHack)) / 1000);
+                throw new Error(`Hacking-Tools überhitzt! Warte ${left}s.`);
+            }
+
             if (user.balance < COST) throw new Error("Zu wenig Geld für Hacker-Tools ($500).");
 
             const currentState = await systemSettingsCollection.findOne({ id: 'heist_firewall' }, { session });
             if (currentState.integrity <= 0) throw new Error("Firewall ist bereits unten! Starte den Überfall!");
 
-            // Geld abziehen
-            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -COST } }, { session });
+            // B. Geld abziehen & Timestamp setzen
+            await usersCollection.updateOne(
+                { _id: userId }, 
+                { 
+                    $inc: { balance: -COST },
+                    $set: { lastHackAt: new Date() } // WICHTIG: Zeit speichern
+                }, 
+                { session }
+            );
             
-            // Schaden berechnen (1.5% bis 4.0%)
+            // C. Schaden berechnen (1.5% bis 4.0%)
             const damage = (Math.random() * 2.5) + 1.5;
             let newIntegrity = currentState.integrity - damage;
             let openUntil = 0;
 
             if (newIntegrity <= 0) {
                 newIntegrity = 0;
-                // Tresor öffnet sich für 60 Minuten
-                openUntil = Date.now() + (60 * 60 * 1000);
+                openUntil = Date.now() + (60 * 60 * 1000); // 60 Min offen
                 
                 // News Broadcast
                 await newsCollection.insertOne({
                     headline: "FIREWALL DOWN! 🔓",
-                    content: `Die Sicherheits-Systeme der Staatskasse sind ausgefallen! Der Tresor ist offen! Zugriff für 60 Minuten möglich.`,
+                    content: `Die Sicherheits-Systeme der Staatskasse sind ausgefallen! Zugriff möglich!`,
                     author: "Anonymous",
                     category: "Verbrechen",
                     createdAt: new Date(),
@@ -7247,3 +7261,4 @@ app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
+
