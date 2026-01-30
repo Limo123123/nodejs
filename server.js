@@ -6552,7 +6552,7 @@ app.get('/api/games/leaderboard/:gameId', async (req, res) => {
 // === TINDA (TINDER CLONE) BACKEND ===
 // =========================================================
 const OLLAMA_PI_URL = process.env.OLLAMA_URL || "http://192.168.178.170:11434/api/generate"; // IP deines 2. Pi anpassen!
-const OLLAMA_MODEL = "dolphin-llama3";
+const OLLAMA_MODEL = "llama3";
 
 // 1. STACK LADEN (Mit verbesserter Anzeige für Kategorien & Bios)
 app.get('/api/tinda/stack', isAuthenticated, async (req, res) => {
@@ -7478,6 +7478,7 @@ app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
+
 
 
 
