@@ -6650,9 +6650,97 @@ async function triggerAiResponse(userId, humanId, chatId, userMessage) {
     }
 }
 
+app.post('/api/tinda/reset-swipes', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        // Lösche nur die Swipes mit direction: 'left'
+        await tindaSwipesCollection.deleteMany({ userId: userId, direction: 'left' });
+        res.json({ message: "Alle 'Nopes' wurden zurückgesetzt. Du siehst die Leute jetzt wieder!" });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Reset." });
+    }
+});
+
+// --- NEU: CHAT LÖSCHEN ---
+app.delete('/api/tinda/chat/:chatId', isAuthenticated, isChatParticipant, async (req, res) => {
+    const chatId = new ObjectId(req.params.chatId);
+    try {
+        // Chat löschen
+        await limChatsCollection.deleteOne({ _id: chatId });
+        // Nachrichten auch löschen (sauberer)
+        await limMessagesCollection.deleteMany({ chatId: chatId });
+        
+        // Optional: Swipe auch löschen, damit man die Person wieder matchen könnte?
+        // Hier lassen wir es erstmal so, Chat weg ist weg.
+        
+        res.json({ message: "Chat gelöscht." });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Löschen." });
+    }
+});
+
+// --- NEU: PERSONEN SUCHE ---
+app.get('/api/tinda/search', isAuthenticated, async (req, res) => {
+    const { q } = req.query;
+    if (!q || q.length < 2) return res.json({ results: [] });
+
+    try {
+        // Suche in der Human DB nach Namen
+        const results = await humansCollection.find({ 
+            name: { $regex: q, $options: 'i' } 
+        }).limit(10).project({ name: 1, categoryId: 1, image_url: 1 }).toArray();
+
+        res.json({ results });
+    } catch (e) {
+        res.status(500).json({ error: "Suchfehler." });
+    }
+});
+
+// --- NEU: DIREKT-MATCH (durch Suche) ---
+app.post('/api/tinda/match/direct', isAuthenticated, async (req, res) => {
+    const { humanId } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const hIdObj = new ObjectId(humanId);
+
+    try {
+        // Prüfen, ob Chat schon existiert
+        const existing = await limChatsCollection.findOne({ type: 'tinda', participants: userId, tindaPartnerId: hIdObj });
+        if (existing) return res.json({ success: true, chat: existing, message: "Chat existiert schon." });
+
+        const human = await humansCollection.findOne({ _id: hIdObj });
+        if(!human) return res.status(404).json({error: "Person nicht gefunden."});
+
+        // Neuen Chat erstellen
+        const newChat = {
+            type: 'tinda',
+            participants: [userId],
+            tindaPartnerId: hIdObj,
+            tindaPartnerName: human.name,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+            lastMessagePreview: "Direktes Match durch Suche!",
+            lastMessageTimestamp: new Date()
+        };
+        await limChatsCollection.insertOne(newChat);
+
+        // Swipe Eintrag faken (damit er nicht mehr im Stack kommt)
+        await tindaSwipesCollection.updateOne(
+            { userId, humanId: hIdObj },
+            { $set: { direction: 'right', timestamp: new Date() } },
+            { upsert: true }
+        );
+
+        // KI Trigger für Begrüßung
+        triggerAiResponse(userId, hIdObj, newChat._id, "Der User hat dich über die Suche gefunden. Begrüße ihn überrascht aber erfreut.");
+
+        res.json({ success: true, chat: newChat });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Erstellen." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
-
-
