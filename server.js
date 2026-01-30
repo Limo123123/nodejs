@@ -7425,7 +7425,53 @@ app.get('/api/admin/chat/messages', isAuthenticated, isAdmin, async (req, res) =
     }
 });
 
+// 3. Als Admin in einen Chat schreiben
+app.post('/api/admin/chat/send', isAuthenticated, isAdmin, async (req, res) => {
+    const { chatId, content } = req.body;
+    
+    if (!chatId || !content) return res.status(400).json({ error: "Fehlende Daten." });
+
+    const cId = new ObjectId(chatId);
+    const adminName = req.session.username;
+
+    try {
+        // Nachricht erstellen
+        const msg = {
+            chatId: cId,
+            senderId: new ObjectId(req.session.userId),
+            // WICHTIG: Wir setzen einen Prefix, damit der User es checkt (oder du lässt es weg für Pranks)
+            senderUsername: `[ADMIN] ${adminName}`, 
+            content: content.trim(),
+            timestamp: new Date(),
+            isAdminMessage: true // Markierung für internes Styling
+        };
+
+        await limMessagesCollection.insertOne(msg);
+
+        // Chat updaten (damit es beim User als "neu" angezeigt wird)
+        await limChatsCollection.updateOne(
+            { _id: cId },
+            { 
+                $set: { 
+                    lastMessagePreview: `[ADMIN]: ${content.substring(0, 20)}...`, 
+                    updatedAt: new Date(),
+                    lastMessageTimestamp: new Date()
+                } 
+            }
+        );
+        
+        // Polling Trigger für den User
+        updateDataVersion('chat');
+
+        res.json({ message: "Gesendet.", msg });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Senden." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
+
