@@ -4636,69 +4636,180 @@ app.post('/api/daily', isAuthenticated, async (req, res) => {
 });
 
 // =========================================================
-// === LIMO NEWS NETWORK (LNN) MIT GEMINI AI ===
+// === LIMO NEWS NETWORK (LNN) - SMART V2 ===
 // =========================================================
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const NEWS_INTERVAL_MS = 30 * 60 * 1000; // 30 Minuten
+// Wir erhöhen das Intervall leicht auf 45 Min, damit sich Ereignisse "ansammeln" können
+const NEWS_INTERVAL_MS = 45 * 60 * 1000; 
 
-// Hilfsfunktion: Prüfen, ob im System was los war
-async function checkSystemActivity() {
-    const threshold = new Date(Date.now() - NEWS_INTERVAL_MS);
-    const [nRate, nOrd, nMsg, nPost] = await Promise.all([
-        ratingsCollection.countDocuments({ timestamp: { $gt: threshold } }),
-        ordersCollection.countDocuments({ date: { $gt: threshold } }),
-        limMessagesCollection.countDocuments({ timestamp: { $gt: threshold } }),
-        dontBlameMeCollection.countDocuments({ createdAt: { $gt: threshold } })
-    ]);
-    return { active: (nRate + nOrd + nMsg + nPost) > 0 };
+// Hilfsfunktion: Zeitstempel des letzten Laufs aus der DB holen & aktualisieren
+// Das verhindert, dass der Bot alte Kamellen wiederholt.
+async function getLastNewsTime(update = false) {
+    // Wir speichern den Zeitstempel in 'systemSettings', damit er auch Neustarts überlebt
+    const setting = await systemSettingsCollection.findOne({ id: 'lnn_last_run' });
+    
+    // Wenn noch nie gelaufen, nimm "jetzt minus Intervall"
+    const lastRun = setting ? new Date(setting.timestamp) : new Date(Date.now() - NEWS_INTERVAL_MS);
+    
+    if (update) {
+        await systemSettingsCollection.updateOne(
+            { id: 'lnn_last_run' },
+            { $set: { timestamp: new Date() } },
+            { upsert: true }
+        );
+    }
+    return lastRun;
 }
 
-// Hilfsfunktion: Kontext sammeln
-async function gatherNewsContext() {
-    const lastRating = await ratingsCollection.aggregate([{$sort:{timestamp:-1}},{$limit:1},{$lookup:{from:"humans",localField:"humanId",foreignField:"_id",as:"h"}},{$unwind:"$h"}]).toArray();
-    const lastOrder = await ordersCollection.find().sort({ date: -1 }).limit(1).toArray();
-    const lastPost = await dontBlameMeCollection.find().sort({ createdAt: -1 }).limit(1).toArray();
+// Hauptfunktion: Kontext sammeln (VIELE DATENQUELLEN & ZEITFILTER)
+async function gatherSmartNewsContext(lastRun) {
+    console.log(`${LOG_PREFIX_SERVER} [LNN] Sammle Daten seit: ${lastRun.toLocaleTimeString()}`);
 
-    let context = "Hier sind die aktuellen Ereignisse im Limo-Universum (eine Community mit Shop, Bank, Schule):";
-    if (lastRating.length > 0) context += `\n- Im Human Grades System wurde "${lastRating[0].h.name}" bewertet.`;
-    if (lastOrder.length > 0) context += `\n- User "${lastOrder[0].username}" hat im Shop eingekauft (Wert: $${lastOrder[0].total.toFixed(2)}).`;
-    if (lastPost.length > 0) context += `\n- Neuer Post in 'Don't Blame Me': "${lastPost[0].reason}".`;
-    
-    // Fallback, falls gar keine Daten da sind (für manuellen Trigger)
-    if (context.length < 150) context += "\n- Es ist gerade ruhig. Erfinde ein kleines Gerücht über die Limo Bank oder einen fiktiven Skandal.";
-    
-    return context;
+    // 1. Don't Blame Me (Nur NEUE Posts seit dem letzten Lauf)
+    const newConfessions = await dontBlameMeCollection.find({ 
+        createdAt: { $gt: lastRun } 
+    }).limit(3).toArray();
+
+    // 2. Shop / Economy (Große Käufe seit dem letzten Lauf)
+    const bigOrders = await ordersCollection.find({ 
+        date: { $gt: lastRun },
+        total: { $gt: 500 } // Nur relevante Käufe über $500
+    }).limit(3).toArray();
+
+    // 3. Crime (Überfälle seit dem letzten Lauf)
+    let crimeNews = [];
+    if (typeof robberyLogsCollection !== 'undefined') {
+        crimeNews = await robberyLogsCollection.find({
+            timestamp: { $gt: lastRun },
+            success: true // Nur erfolgreiche Überfälle sind spannend
+        }).sort({ amountLost: -1 }).limit(2).toArray();
+    }
+
+    // 4. Stonks / Aktien (Größte Bewegung aktuell)
+    // Hier schauen wir auf den aktuellen Markt, aber nur auf starke Ausreißer
+    const volatileStock = await productsCollection.aggregate([
+        { $match: { isTokenCard: { $ne: true } } },
+        { $addFields: { 
+            // Berechne Differenz zwischen aktuellem Preis und Basispreis
+            change: { $abs: { $subtract: ["$currentPrice", "$basePrice"] } } 
+        }},
+        { $sort: { change: -1 } }, // Größte Veränderung zuerst
+        { $limit: 1 }
+    ]).toArray();
+
+    // 5. Auktionen (Beendete Auktionen seit dem letzten Lauf)
+    const endedAuctions = await auctionsCollection.find({
+        status: 'ended_sold',
+        endTime: { $gt: lastRun } 
+    }).sort({ currentBid: -1 }).limit(1).toArray();
+
+    // 6. Neue Tinda Matches (Optional, falls Tinda aktiv)
+    const tindaMatches = await limChatsCollection.countDocuments({
+        type: 'tinda',
+        createdAt: { $gt: lastRun }
+    });
+
+
+    // --- ZUSAMMENBAU DES KONTEXTS FÜR DIE KI ---
+    let contextParts = [];
+    let hasContent = false;
+
+    if (newConfessions.length > 0) {
+        const texts = newConfessions.map(c => `"${c.reason}"`).join(", ");
+        contextParts.push(`- Gerüchteküche ('Don't Blame Me'): Neue Beichten: ${texts}.`);
+        hasContent = true;
+    }
+
+    if (bigOrders.length > 0) {
+        const buyers = bigOrders.map(o => `${o.username} ($${o.total.toFixed(0)})`).join(", ");
+        contextParts.push(`- Wirtschaft: Der Konsum brummt! Große Einkäufe von: ${buyers}.`);
+        hasContent = true;
+    }
+
+    if (crimeNews.length > 0) {
+        const heist = crimeNews[0];
+        contextParts.push(`- BLAULICHT: Ein Überfall fand statt! ${heist.attackerName} hat ${heist.amountLost.toFixed(2)} von einem Opfer erbeutet.`);
+        hasContent = true;
+    }
+
+    if (volatileStock.length > 0) {
+        const stock = volatileStock[0];
+        const diff = (stock.currentPrice || 0) - (stock.basePrice || 0);
+        // Nur berichten, wenn die Änderung signifikant ist (mehr als $5 Unterschied)
+        if (Math.abs(diff) > 5) {
+            const direction = diff > 0 ? "gestiegen 📈" : "gefallen 📉";
+            contextParts.push(`- Börse: Die Aktie "${stock.name}" spielt verrückt! Sie ist massiv ${direction} auf $${(stock.currentPrice||0).toFixed(2)}.`);
+            hasContent = true;
+        }
+    }
+
+    if (endedAuctions.length > 0) {
+        const auc = endedAuctions[0];
+        contextParts.push(`- Auktionshaus: "${auc.productName}" wurde für sagenhafte $${auc.currentBid} an ${auc.highestBidderUsername} versteigert.`);
+        hasContent = true;
+    }
+
+    if (tindaMatches > 0) {
+        contextParts.push(`- Liebe liegt in der Luft: Es gab ${tindaMatches} neue Tinda-Matches!`);
+        hasContent = true;
+    }
+
+    // Wenn NICHTS passiert ist
+    if (!hasContent) {
+        return null; // Rückgabe null signalisiert: "Keine News generieren"
+    }
+
+    return contextParts.join("\n");
 }
 
 // Hauptfunktion: News generieren
 async function generateAiNews(force = false) {
-    if (!GEMINI_API_KEY) throw new Error("Kein API Key.");
-
-    // 1. Aktivitätscheck (überspringen bei 'force')
-    if (!force) {
-        const activity = await checkSystemActivity();
-        if (!activity.active) {
-            console.log(`${LOG_PREFIX_SERVER} [LNN] Keine Aktivität. Skip.`);
-            return null; 
-        }
+    if (!GEMINI_API_KEY) {
+        console.warn(`${LOG_PREFIX_SERVER} [LNN] Kein Gemini API Key gefunden.`);
+        return;
     }
 
-    // 2. Generierung
-    const contextData = await gatherNewsContext();
-    console.log(`${LOG_PREFIX_SERVER} [LNN] Generiere News (Force: ${force})...`);
+    // 1. Zeitfenster bestimmen (Wann liefen wir zuletzt?)
+    const lastRun = await getLastNewsTime();
+    
+    // 2. Daten sammeln (Nur Dinge, die NACH lastRun passiert sind)
+    const contextData = await gatherSmartNewsContext(lastRun);
 
-    // HIER DEIN GEWÜNSCHTES MODELL:
-    const modelName = "gemini-2.5-flash"; 
+    // Wenn keine Daten da sind und wir nicht gezwungen werden (force=true), brechen wir ab.
+    // Das verhindert, dass der Bot sich wiederholt oder langweiliges Zeug schreibt.
+    if (!contextData && !force) {
+        console.log(`${LOG_PREFIX_SERVER} [LNN] Zu wenig Ereignisse für News. Überspringe.`);
+        // Wir updaten die Zeit trotzdem NICHT, damit beim nächsten Mal der Zeitraum größer ist 
+        // und wir vielleicht dann genug Daten haben.
+        return null; 
+    }
 
-    // URL Aufbau für v1beta
+    // Fallback für Force-Mode (z.B. manueller Admin-Button), falls wirklich gar nichts da ist
+    const promptData = contextData || "Es ist gerade sehr ruhig in Limazon. Die Bank hat geöffnet, die Vögel zwitschern.";
+
+    console.log(`${LOG_PREFIX_SERVER} [LNN] Generiere News mit Kontext...`);
+
+    const modelName = "gemini-2.5-flash"; // Nutze ein schnelles Modell
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
     
-    const prompt = `${contextData}
-    Aufgabe: Schreibe einen kurzen, witzigen News-Artikel (max. 40 Wörter) als "Breaking News" für das "Limo News Network". 
-    Stil: Boulevard-Zeitung, etwas übertrieben, satirisch.
-    Format: JSON mit den Feldern "headline" und "content". (Antworte NUR mit dem JSON).
-    Sprache: Deutsch.`;
+    // Der Prompt ist jetzt aggressiver formuliert für mehr Entertainment
+    const prompt = `
+    Du bist der skrupellose Chefredakteur des "Limo News Network" (LNN).
+    Hier sind die Fakten der letzten Stunde aus unserer Community:
+    ${promptData}
+
+    AUFGABE:
+    Schreibe EINEN kurzen, reißerischen Zeitungsartikel (max. 40-50 Wörter).
+    Stil: Boulevard-Presse, dramatisch, witzig, sarkastisch, gerne mit Emojis.
+    Erwähne unbedingt die Namen der User, wenn sie in den Fakten stehen.
+    
+    Antworte NUR im JSON-Format:
+    {
+      "headline": "Deine krasse Schlagzeile",
+      "content": "Dein Artikeltext"
+    }
+    `;
 
     try {
         const response = await axios.post(url, { 
@@ -4706,20 +4817,20 @@ async function generateAiNews(force = false) {
         });
 
         if (!response.data || !response.data.candidates || !response.data.candidates[0]) {
-            throw new Error("Keine Antwort von Gemini erhalten.");
+            throw new Error("Keine Antwort von Gemini.");
         }
 
         let textResponse = response.data.candidates[0].content.parts[0].text;
         
-        // JSON Cleaning
+        // JSON Cleaning (Markdown entfernen, falls Gemini welches sendet)
         textResponse = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
         
         let article;
         try {
             article = JSON.parse(textResponse);
         } catch (jsonErr) {
-            console.warn(`${LOG_PREFIX_SERVER} [LNN] KI hat kein valides JSON geliefert. Versuche Fallback.`);
-            article = { headline: "Limo News Update", content: textResponse };
+            console.warn(`${LOG_PREFIX_SERVER} [LNN] JSON Parse Fehler. Nutze Raw Text.`);
+            article = { headline: "LNN Eilmeldung", content: textResponse };
         }
 
         // Speichern
@@ -4732,20 +4843,28 @@ async function generateAiNews(force = false) {
             likes: 0
         };
         await newsCollection.insertOne(newEntry);
+        
+        // WICHTIG: Jetzt den Zeitstempel aktualisieren, damit wir diese Events nicht nochmal berichten
+        await getLastNewsTime(true); 
+        
+        // Frontend informieren (Polling Update)
+        if (typeof updateDataVersion === 'function') updateDataVersion('news');
+
         console.log(`${LOG_PREFIX_SERVER} [LNN] News veröffentlicht: "${article.headline}"`);
         return newEntry;
 
     } catch (apiErr) {
-        console.error(`${LOG_PREFIX_SERVER} [LNN] Gemini API Fehler:`, apiErr.response ? apiErr.response.data : apiErr.message);
-        throw new Error("Fehler bei der KI-Generierung (Modell: " + modelName + ")");
+        console.error(`${LOG_PREFIX_SERVER} [LNN] API Fehler:`, apiErr.message);
+        return null;
     }
 }
 
 // Job starten
 if (GEMINI_API_KEY) {
+    // Erster Check nach 60 Sekunden, dann Intervall
+    setTimeout(() => generateAiNews(false), 60000); 
     setInterval(() => generateAiNews(false), NEWS_INTERVAL_MS);
 }
-
 // --- API ENDPOINTS ---
 
 // News abrufen
