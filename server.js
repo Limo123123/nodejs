@@ -4687,98 +4687,101 @@ async function getLastNewsTime(update = false) {
 async function gatherSmartNewsContext(lastRun) {
     console.log(`${LOG_PREFIX_SERVER} [LNN] Sammle Daten seit: ${lastRun.toLocaleTimeString()}`);
 
-    // 1. Don't Blame Me (Nur NEUE Posts seit dem letzten Lauf)
+    // 1. Don't Blame Me (Nur NEUE Posts)
     const newConfessions = await dontBlameMeCollection.find({ 
         createdAt: { $gt: lastRun } 
     }).limit(3).toArray();
 
-    // 2. Shop / Economy (Große Käufe seit dem letzten Lauf)
+    // 2. Shop / Economy (Große Käufe)
     const bigOrders = await ordersCollection.find({ 
         date: { $gt: lastRun },
-        total: { $gt: 500 } // Nur relevante Käufe über $500
+        total: { $gt: 500 } 
     }).limit(3).toArray();
 
-    // 3. Crime (Überfälle seit dem letzten Lauf)
+    // 3. Crime (Überfälle)
     let crimeNews = [];
     if (typeof robberyLogsCollection !== 'undefined') {
         crimeNews = await robberyLogsCollection.find({
             timestamp: { $gt: lastRun },
-            success: true // Nur erfolgreiche Überfälle sind spannend
+            success: true 
         }).sort({ amountLost: -1 }).limit(2).toArray();
     }
 
-    // 4. Stonks / Aktien (Größte Bewegung aktuell)
-    // Hier schauen wir auf den aktuellen Markt, aber nur auf starke Ausreißer
-    const volatileStock = await productsCollection.aggregate([
-        { $match: { isTokenCard: { $ne: true } } },
-        { $addFields: { 
-            // Berechne Differenz zwischen aktuellem Preis und Basispreis
-            change: { $abs: { $subtract: ["$currentPrice", "$basePrice"] } } 
-        }},
-        { $sort: { change: -1 } }, // Größte Veränderung zuerst
-        { $limit: 1 }
-    ]).toArray();
-
-    // 5. Auktionen (Beendete Auktionen seit dem letzten Lauf)
+    // 4. Auktionen (Beendete Auktionen)
     const endedAuctions = await auctionsCollection.find({
         status: 'ended_sold',
         endTime: { $gt: lastRun } 
     }).sort({ currentBid: -1 }).limit(1).toArray();
 
-    // 6. Neue Tinda Matches (Optional, falls Tinda aktiv)
+    // 5. Tinda Matches
     const tindaMatches = await limChatsCollection.countDocuments({
         type: 'tinda',
         createdAt: { $gt: lastRun }
     });
 
+    // 6. STONKS FIX: Suche nur nach Aktien, die sich in den LETZTEN MINUTEN stark verändert haben!
+    let volatileStockContext = null;
+    try {
+        // Wir holen alle normalen Aktien
+        const allStocks = await productsCollection.find({ isTokenCard: { $ne: true } }).toArray();
+        let maxPercentChange = 0;
+
+        for (const stock of allStocks) {
+            // Wir brauchen eine Historie, um einen Trend zu erkennen
+            if (!stock.priceHistory || stock.priceHistory.length < 2) continue;
+
+            // Vergleich: Aktueller Preis vs. Ältester Preis in der Historie (max. 30 Min alt)
+            const currentPrice = stock.priceHistory[stock.priceHistory.length - 1].price;
+            const oldestPrice = stock.priceHistory[0].price;
+
+            // Prozentuale Veränderung im letzten Intervall berechnen
+            const percentChange = Math.abs((currentPrice - oldestPrice) / oldestPrice) * 100;
+
+            // Nur interessant, wenn die Aktie sich um mehr als 5% bewegt hat!
+            if (percentChange > 5 && percentChange > maxPercentChange) {
+                maxPercentChange = percentChange;
+                const direction = currentPrice > oldestPrice ? "gestiegen 📈" : "gefallen 📉";
+                volatileStockContext = `- Börse: Die Aktie "${stock.name}" ist in den letzten 30 Minuten extrem volatil! Sie ist um ${percentChange.toFixed(1)}% ${direction} auf $${currentPrice.toFixed(2)}.`;
+            }
+        }
+    } catch (e) { console.error("Stock News Error:", e); }
+
 
     // --- ZUSAMMENBAU DES KONTEXTS FÜR DIE KI ---
     let contextParts = [];
-    let hasContent = false;
 
     if (newConfessions.length > 0) {
         const texts = newConfessions.map(c => `"${c.reason}"`).join(", ");
         contextParts.push(`- Gerüchteküche ('Don't Blame Me'): Neue Beichten: ${texts}.`);
-        hasContent = true;
     }
 
     if (bigOrders.length > 0) {
         const buyers = bigOrders.map(o => `${o.username} ($${o.total.toFixed(0)})`).join(", ");
         contextParts.push(`- Wirtschaft: Der Konsum brummt! Große Einkäufe von: ${buyers}.`);
-        hasContent = true;
     }
 
     if (crimeNews.length > 0) {
         const heist = crimeNews[0];
-        contextParts.push(`- BLAULICHT: Ein Überfall fand statt! ${heist.attackerName} hat ${heist.amountLost.toFixed(2)} von einem Opfer erbeutet.`);
-        hasContent = true;
-    }
-
-    if (volatileStock.length > 0) {
-        const stock = volatileStock[0];
-        const diff = (stock.currentPrice || 0) - (stock.basePrice || 0);
-        // Nur berichten, wenn die Änderung signifikant ist (mehr als $5 Unterschied)
-        if (Math.abs(diff) > 5) {
-            const direction = diff > 0 ? "gestiegen 📈" : "gefallen 📉";
-            contextParts.push(`- Börse: Die Aktie "${stock.name}" spielt verrückt! Sie ist massiv ${direction} auf $${(stock.currentPrice||0).toFixed(2)}.`);
-            hasContent = true;
-        }
+        contextParts.push(`- BLAULICHT: Ein Überfall fand statt! ${heist.attackerName} hat $${heist.amountLost.toFixed(2)} von einem Opfer erbeutet.`);
     }
 
     if (endedAuctions.length > 0) {
         const auc = endedAuctions[0];
         contextParts.push(`- Auktionshaus: "${auc.productName}" wurde für sagenhafte $${auc.currentBid} an ${auc.highestBidderUsername} versteigert.`);
-        hasContent = true;
     }
 
     if (tindaMatches > 0) {
         contextParts.push(`- Liebe liegt in der Luft: Es gab ${tindaMatches} neue Tinda-Matches!`);
-        hasContent = true;
     }
 
-    // Wenn NICHTS passiert ist
-    if (!hasContent) {
-        return null; // Rückgabe null signalisiert: "Keine News generieren"
+    // Die Börsen-News nur einfügen, wenn es WIRKLICH eine Änderung gab
+    if (volatileStockContext) {
+        contextParts.push(volatileStockContext);
+    }
+
+    // Wenn NICHTS passiert ist -> null
+    if (contextParts.length === 0) {
+        return null; 
     }
 
     return contextParts.join("\n");
@@ -4797,33 +4800,41 @@ async function generateAiNews(force = false) {
     // 2. Daten sammeln (Nur Dinge, die NACH lastRun passiert sind)
     const contextData = await gatherSmartNewsContext(lastRun);
 
-    // Wenn keine Daten da sind und wir nicht gezwungen werden (force=true), brechen wir ab.
-    // Das verhindert, dass der Bot sich wiederholt oder langweiliges Zeug schreibt.
+    // ABBRUCHBEDINGUNG: Wenn keine neuen Daten da sind, nicht posten!
     if (!contextData && !force) {
-        console.log(`${LOG_PREFIX_SERVER} [LNN] Zu wenig Ereignisse für News. Überspringe.`);
-        // Wir updaten die Zeit trotzdem NICHT, damit beim nächsten Mal der Zeitraum größer ist 
-        // und wir vielleicht dann genug Daten haben.
+        console.log(`${LOG_PREFIX_SERVER} [LNN] Nichts Neues passiert. Bot hält den Mund.`);
+        // Zeitstempel wird NICHT aktualisiert, damit Daten sich für den nächsten Lauf weiter ansammeln.
         return null; 
     }
 
-    // Fallback für Force-Mode (z.B. manueller Admin-Button), falls wirklich gar nichts da ist
+    // Wir holen die Headline der LETZTEN News aus der DB, damit die KI sich nicht wiederholt
+    let lastHeadline = "Keine";
+    try {
+        const lastNews = await newsCollection.find().sort({ createdAt: -1 }).limit(1).toArray();
+        if (lastNews.length > 0) lastHeadline = lastNews[0].headline;
+    } catch(e) {}
+
     const promptData = contextData || "Es ist gerade sehr ruhig in Limazon. Die Bank hat geöffnet, die Vögel zwitschern.";
 
     console.log(`${LOG_PREFIX_SERVER} [LNN] Generiere News mit Kontext...`);
 
-    const modelName = "gemini-2.5-flash"; // Nutze ein schnelles Modell
+    const modelName = "gemini-2.5-flash"; 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
     
-    // Der Prompt ist jetzt aggressiver formuliert für mehr Entertainment
+    // NEUER PROMPT: Zwingt die KI, NICHT das Gleiche wie beim letzten Mal zu schreiben
     const prompt = `
-    Du bist der skrupellose Chefredakteur des "Limo News Network" (LNN).
-    Hier sind die Fakten der letzten Stunde aus unserer Community:
+    Du bist der sarkastische Chefredakteur des "Limo News Network" (LNN).
+    Hier sind die frischen Fakten aus unserer Community:
     ${promptData}
 
+    WICHTIG: Die LETZTE Schlagzeile war "${lastHeadline}". 
+    Regel 1: Wiederhole DIESES THEMA NICHT! Such dir einen ANDEREN Fakt aus der Liste oben aus.
+    Regel 2: Wenn es nur um Börse geht, fokussiere dich auf ein anderes Detail als beim letzten Mal.
+    
     AUFGABE:
     Schreibe EINEN kurzen, reißerischen Zeitungsartikel (max. 40-50 Wörter).
-    Stil: Boulevard-Presse, dramatisch, witzig, sarkastisch, gerne mit Emojis.
-    Erwähne unbedingt die Namen der User, wenn sie in den Fakten stehen.
+    Stil: Boulevard-Presse, dramatisch, witzig, sarkastisch.
+    Erwähne Usernamen.
     
     Antworte NUR im JSON-Format:
     {
@@ -4842,8 +4853,6 @@ async function generateAiNews(force = false) {
         }
 
         let textResponse = response.data.candidates[0].content.parts[0].text;
-        
-        // JSON Cleaning (Markdown entfernen, falls Gemini welches sendet)
         textResponse = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
         
         let article;
@@ -4865,10 +4874,10 @@ async function generateAiNews(force = false) {
         };
         await newsCollection.insertOne(newEntry);
         
-        // WICHTIG: Jetzt den Zeitstempel aktualisieren, damit wir diese Events nicht nochmal berichten
+        // WICHTIG: Zeitstempel JETZT aktualisieren, da erfolgreich gepostet wurde
         await getLastNewsTime(true); 
         
-        // Frontend informieren (Polling Update)
+        // Frontend informieren (Polling Trigger)
         if (typeof updateDataVersion === 'function') updateDataVersion('news');
 
         console.log(`${LOG_PREFIX_SERVER} [LNN] News veröffentlicht: "${article.headline}"`);
