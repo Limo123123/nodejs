@@ -5525,14 +5525,14 @@ app.post('/api/profile/edit', isAuthenticated, async (req, res) => {
     } catch (e) { res.status(500).json({ error: "Fehler." }); }
 });
 // =========================================================
-// === SYSTEM STATS API (FINAL) ===
+// === SYSTEM STATS API  ===
 // =========================================================
 
 app.get('/api/system/stats', async (req, res) => {
     
-    // 👇 HIER DEINE DATEN:
     const GITHUB_USER = "limo123123"; 
-    const FRONTEND_REPO = "limazon"; 
+    // Hier stehen jetzt alle deine Limo-Projekte
+    const FRONTEND_REPOS = ["limazon", "teacher-grades", "whatslim"]; 
 
     try {
         // 1. DATENBANK STATS
@@ -5540,9 +5540,7 @@ app.get('/api/system/stats', async (req, res) => {
             usersCollection.countDocuments({}),
             productsCollection.countDocuments({}),
             wheelsCollection.countDocuments({}),
-            
             humansCollection.countDocuments({}),
-            
             auctionsCollection.countDocuments({})
         ]);
 
@@ -5554,26 +5552,38 @@ app.get('/api/system/stats', async (req, res) => {
             serverLoc = serverCode.split('\n').length;
         } catch(e) { serverLoc = 0; }
 
-        // 3. FRONTEND LOC (Via GitHub API)
+        // 3. FRONTEND LOC (Via GitHub API für ALLE 3 Repos)
         let frontendLoc = 0;
         try {
-            const ghRes = await fetch(`https://api.github.com/repos/${GITHUB_USER}/${FRONTEND_REPO}/languages`);
-            if (ghRes.ok) {
-                const langs = await ghRes.json();
-                
-                // Wir summieren alle Bytes deiner Frontend-Sprachen
-                const totalBytes = (langs.HTML || 0) + 
-                                   (langs.JavaScript || 0) + 
-                                   (langs.CSS || 0) + 
-                                   (langs.Python || 0); // Python nehmen wir auch mit
-                
-                // Umrechnungsfaktor (35 Bytes ca. 1 Zeile Code)
-                frontendLoc = Math.floor(totalBytes / 35);
-            }
+            // Wir fragen GitHub für alle 3 Repos GLEICHZEITIG an (Performance-Boost)
+            const repoPromises = FRONTEND_REPOS.map(repo => 
+                fetch(`https://api.github.com/repos/${GITHUB_USER}/${repo}/languages`)
+                    .then(res => res.ok ? res.json() : {})
+                    .catch(() => ({}))
+            );
+
+            // Warten bis alle Daten da sind
+            const repoLangsArray = await Promise.all(repoPromises);
+
+            let totalBytes = 0;
+
+            // Zähle die relevanten Sprachen aus allen Repositories zusammen
+            repoLangsArray.forEach(langs => {
+                totalBytes += (langs.HTML || 0) + 
+                              (langs.JavaScript || 0) + 
+                              (langs.CSS || 0) + 
+                              (langs.TypeScript || 0) + 
+                              (langs.Python || 0);
+            });
+            
+            // Umrechnungsfaktor (35 Bytes ca. 1 Zeile Code)
+            frontendLoc = Math.floor(totalBytes / 35);
+
         } catch(e) { 
-            console.error("GitHub Stats Error:", e);
+            console.error("GitHub Stats Error:", e); 
         }
 
+        // Antwort an das Dashboard (Struktur bleibt gleich)
         res.json({
             users,
             products,
