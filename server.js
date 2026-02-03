@@ -1350,6 +1350,27 @@ app.get('/api/products', (req, res) => {
     res.send(globalProductCacheString);
 });
 
+// NEU: Endpunkt für den Börsen-Verlauf eines einzelnen Produkts
+app.get('/api/products/:id/history', async (req, res) => {
+    const prodId = parseInt(req.params.id, 10);
+    try {
+        const product = await productsCollection.findOne(
+            { id: prodId },
+            { projection: { name: 1, currentPrice: 1, priceHistory: 1, _id: 0 } }
+        );
+
+        if (!product) return res.status(404).json({ error: "Produkt nicht gefunden." });
+
+        // Falls noch keine Historie existiert, einen Dummy-Startwert setzen
+        const history = product.priceHistory || [{ price: product.currentPrice || 0, timestamp: new Date() }];
+
+        res.json({ name: product.name, history: history });
+    } catch (err) {
+        console.error("Fehler beim Laden der Preis-Historie:", err);
+        res.status(500).json({ error: "Fehler beim Laden der Historie." });
+    }
+});
+
 app.post('/api/products', isAdmin, async (req, res) => {
     let { name, image_url, price, stock, isTokenCard, tokenValue } = req.body;
     console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} fügt Produkt hinzu:`, { name, price, stock, isTokenCard, tokenValue });
