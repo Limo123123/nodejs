@@ -5524,18 +5524,23 @@ app.post('/api/profile/edit', isAuthenticated, async (req, res) => {
         res.json({ message: "Gespeichert." });
     } catch (e) { res.status(500).json({ error: "Fehler." }); }
 });
+
 // =========================================================
-// === SYSTEM STATS API  ===
+// === SYSTEM STATS API ===
 // =========================================================
+
+// NEU: Cache-Variablen, damit GitHub uns nicht blockiert!
+let cachedFrontendLoc = 0;
+let lastGithubFetchTime = 0;
+const GITHUB_CACHE_DURATION = 60 * 60 * 1000; // 1 Stunde in Millisekunden
 
 app.get('/api/system/stats', async (req, res) => {
     
     const GITHUB_USER = "limo123123"; 
-    // Hier stehen jetzt alle deine Limo-Projekte
     const FRONTEND_REPOS = ["limazon", "teacher-grades", "whatslim"]; 
 
     try {
-        // 1. DATENBANK STATS
+        // 1. DATENBANK STATS (Echtzeit)
         const [users, products, wheels, humans, auctions] = await Promise.all([
             usersCollection.countDocuments({}),
             productsCollection.countDocuments({}),
@@ -5544,7 +5549,7 @@ app.get('/api/system/stats', async (req, res) => {
             auctionsCollection.countDocuments({})
         ]);
 
-        // 2. SERVER LOC (Liest sich selbst -> 100% genau)
+        // 2. SERVER LOC (Echtzeit, da lokale Datei)
         const fs = require('fs');
         let serverLoc = 0;
         try {
@@ -5552,38 +5557,37 @@ app.get('/api/system/stats', async (req, res) => {
             serverLoc = serverCode.split('\n').length;
         } catch(e) { serverLoc = 0; }
 
-        // 3. FRONTEND LOC (Via GitHub API für ALLE 3 Repos)
-        let frontendLoc = 0;
-        try {
-            // Wir fragen GitHub für alle 3 Repos GLEICHZEITIG an (Performance-Boost)
-            const repoPromises = FRONTEND_REPOS.map(repo => 
-                fetch(`https://api.github.com/repos/${GITHUB_USER}/${repo}/languages`)
-                    .then(res => res.ok ? res.json() : {})
-                    .catch(() => ({}))
-            );
+        // 3. FRONTEND LOC (Mit Cache-System gegen Rate-Limits)
+        const now = Date.now();
+        if (cachedFrontendLoc === 0 || (now - lastGithubFetchTime) > GITHUB_CACHE_DURATION) {
+            try {
+                const repoPromises = FRONTEND_REPOS.map(repo => 
+                    fetch(`https://api.github.com/repos/${GITHUB_USER}/${repo}/languages`)
+                        .then(res => res.ok ? res.json() : {})
+                        .catch(() => ({}))
+                );
 
-            // Warten bis alle Daten da sind
-            const repoLangsArray = await Promise.all(repoPromises);
+                const repoLangsArray = await Promise.all(repoPromises);
+                let totalBytes = 0;
 
-            let totalBytes = 0;
+                repoLangsArray.forEach(langs => {
+                    totalBytes += (langs.HTML || 0) + 
+                                  (langs.JavaScript || 0) + 
+                                  (langs.CSS || 0) + 
+                                  (langs.TypeScript || 0) + 
+                                  (langs.Python || 0);
+                });
+                
+                // Neuen Wert berechnen und speichern
+                if (totalBytes > 0) {
+                    cachedFrontendLoc = Math.floor(totalBytes / 35);
+                    lastGithubFetchTime = now;
+                    console.log(`[SYSTEM] GitHub LOC aktualisiert: ${cachedFrontendLoc} Zeilen.`);
+                }
 
-            // Zähle die relevanten Sprachen aus allen Repositories zusammen
-            repoLangsArray.forEach(langs => {
-                totalBytes += (langs.HTML || 0) + 
-                              (langs.JavaScript || 0) + 
-                              (langs.CSS || 0) + 
-                              (langs.TypeScript || 0) + 
-                              (langs.Python || 0);
-            });
-            
-            // Umrechnungsfaktor (35 Bytes ca. 1 Zeile Code)
-            frontendLoc = Math.floor(totalBytes / 35);
-
-        } catch(e) { 
-            console.error("GitHub Stats Error:", e); 
+            } catch(e) { console.error("GitHub Fetch Error:", e); }
         }
 
-        // Antwort an das Dashboard (Struktur bleibt gleich)
         res.json({
             users,
             products,
@@ -5592,13 +5596,12 @@ app.get('/api/system/stats', async (req, res) => {
             auctions,
             loc: {
                 server: serverLoc,      
-                frontend: frontendLoc,  
-                total: serverLoc + frontendLoc
+                frontend: cachedFrontendLoc,  
+                total: serverLoc + cachedFrontendLoc
             }
         });
 
     } catch (e) {
-        console.error(e);
         res.status(500).json({ error: "Fehler beim Laden der Stats." });
     }
 });
