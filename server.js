@@ -7995,6 +7995,59 @@ app.post('/api/limterest/user/:targetUsername/follow', isAuthenticated, async (r
     }
 });
 
+// 4. Pin merken (Save to Profile)
+app.post('/api/limterest/pin/:id/save', isAuthenticated, async (req, res) => {
+    const pinId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        // Wir speichern die gemerkten Pin-IDs im User-Dokument
+        const user = await usersCollection.findOne({ _id: userId });
+        const saved = user.savedPins || [];
+        
+        // Toggle Logik (Merken / Entmerken)
+        const isSaved = saved.some(id => id.equals(pinId));
+
+        if (isSaved) {
+            await usersCollection.updateOne({ _id: userId }, { $pull: { savedPins: pinId } });
+            res.json({ message: "Pin entfernt.", isSaved: false });
+        } else {
+            await usersCollection.updateOne({ _id: userId }, { $addToSet: { savedPins: pinId } });
+            res.json({ message: "Pin gemerkt!", isSaved: true });
+        }
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Merken." });
+    }
+});
+
+// 5. Pin melden (Report)
+app.post('/api/limterest/pin/:id/report', isAuthenticated, async (req, res) => {
+    const pinId = new ObjectId(req.params.id);
+    const username = req.session.username;
+
+    try {
+        // Wir nutzen einfach die existierende 'bugReportsCollection' oder erstellen eine 'reportsCollection'
+        // Der Einfachheit halber loggen wir es in eine "moderationQueue" (oder erstellen sie)
+        const reportEntry = {
+            type: 'pin_report',
+            pinId: pinId,
+            reportedBy: username,
+            reason: "Inappropriate Content",
+            timestamp: new Date(),
+            status: 'open'
+        };
+        
+        // Speichern in einer allgemeinen Admin-Liste (nutze SystemSettings oder eine neue Collection)
+        // Hier erstellen wir kurzentschlossen eine 'reportsCollection' dynamisch
+        await db.collection('reports').insertOne(reportEntry);
+
+        console.log(`${LOG_PREFIX_PIN} Pin ${pinId} wurde von ${username} gemeldet.`);
+        res.json({ message: "Meldung empfangen. Wir kümmern uns darum." });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Melden." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
