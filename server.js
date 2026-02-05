@@ -70,6 +70,7 @@ const compression = require('compression');
 const CACHE_DIR = path.resolve(__dirname, 'cache');
 const PRODUCTS_CACHE_FILE = path.resolve(CACHE_DIR, 'products_cache.json');
 let globalProductCache = [];
+const limterestCollectionName = 'limterestPins';
 
 // --- Glücksrad & Token Konstanten ---
 const DEFAULT_STARTING_TOKENS = 10;
@@ -150,6 +151,7 @@ let tindaSwipesCollection;
 let bugReportsCollection;
 let systemSettingsCollection;
 let restaurantOrdersCollection;
+let limterestCollection;
 
 // ==============================================================================
 // === NEU: AUTOMATISIERTE SICHERHEITS- & REPARATURFUNKTIONEN ====================
@@ -779,14 +781,13 @@ MongoClient.connect(mongoUri)
 		highscoresCollection = db.collection('highscores');
 		bugReportsCollection = db.collection('bugReports');
 		systemSettingsCollection = db.collection('systemSettings');
-        
-        // NEU: Human Grades Collections
         humansCollection = db.collection('humans');
         ratingsCollection = db.collection('ratings');
         criteriaCollection = db.collection('criteria');  
         categoriesCollection = db.collection('categories');
 		tindaSwipesCollection = db.collection('tindaSwipes'); 
 		restaurantOrdersCollection = db.collection('restaurantOrders');
+		limterestCollection = db.collection(limterestCollectionName);
 
         authCodesCollection = db.collection(authCodesCollectionName);
     
@@ -835,6 +836,7 @@ MongoClient.connect(mongoUri)
             await tokenCodesCollection.createIndex({ redeemedByUserId: 1 });
             await tokenCodesCollection.createIndex({ generatedForUserId: 1, isRedeemed: 1 });
 			await highscoresCollection.createIndex({ game: 1, score: -1 });
+			await limterestCollection.createIndex({ tags: 1 });
             
             if (tokenTransactionsCollection) {
                 await tokenTransactionsCollection.createIndex({ userId: 1 });
@@ -7823,11 +7825,106 @@ app.get('/api/restaurant/history', isAuthenticated, async (req, res) => {
     res.json({ history });
 });
 
+// =========================================================
+// === LIMTEREST API (Pinterest Clone) ===
+// =========================================================
+const LOG_PREFIX_PIN = "[Limterest]";
+
+// 1. Feed laden (Alle Pins)
+app.get('/api/limterest/feed', async (req, res) => {
+    try {
+        // Wir mischen die Pins zufällig ($sample), damit es immer frisch aussieht
+        // Oder sortieren nach 'createdAt' (-1) für neueste
+        const pins = await limterestCollection.aggregate([
+            { $sort: { createdAt: -1 } },
+            { $limit: 50 }
+        ]).toArray();
+        
+        res.json({ pins });
+    } catch (e) {
+        console.error(`${LOG_PREFIX_PIN} Fehler beim Laden:`, e);
+        res.status(500).json({ error: "Konnte Feed nicht laden." });
+    }
+});
+
+// 2. Neuen Pin erstellen (NUR URL!)
+app.post('/api/limterest/pin', isAuthenticated, async (req, res) => {
+    const { title, imageUrl, tags } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const username = req.session.username;
+
+    // Validierung: Wir erlauben KEINE Base64 Strings (die sind zu lang und füllen die DB)
+    if (!imageUrl || imageUrl.length > 1000) {
+        return res.status(400).json({ error: "URL zu lang oder ungültig. Bitte keine Base64-Bilder!" });
+    }
+    // Einfacher Check ob es wie eine URL aussieht
+    if (!imageUrl.startsWith('http')) {
+        return res.status(400).json({ error: "Das ist keine gültige Bild-URL (muss mit http starten)." });
+    }
+
+    // Tags verarbeiten ("Auto, Rot, Schnell" -> ["Auto", "Rot", "Schnell"])
+    let tagArray = [];
+    if (tags && typeof tags === 'string') {
+        tagArray = tags.split(',').map(t => t.trim()).filter(t => t.length > 0);
+    }
+
+    try {
+        const newPin = {
+            userId,
+            username,
+            title: title || "Ohne Titel",
+            imageUrl: imageUrl,
+            tags: tagArray,
+            likes: 0,
+            likedBy: [],
+            createdAt: new Date()
+        };
+
+        await limterestCollection.insertOne(newPin);
+        
+        // Achievement Check: "Influencer" oder so könnte man hier triggern
+        
+        console.log(`${LOG_PREFIX_PIN} Neuer Pin von ${username}: ${title}`);
+        res.status(201).json({ message: "Gepinnt!", pin: newPin });
+
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Pinnen." });
+    }
+});
+
+// 3. Pin liken
+app.post('/api/limterest/pin/:id/like', isAuthenticated, async (req, res) => {
+    const pinId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const pin = await limterestCollection.findOne({ _id: pinId });
+        if (!pin) return res.status(404).json({ error: "Pin nicht gefunden." });
+
+        // Toggle Like
+        const hasLiked = pin.likedBy && pin.likedBy.some(id => id.equals(userId));
+
+        if (hasLiked) {
+            // Unlike
+            await limterestCollection.updateOne(
+                { _id: pinId },
+                { $inc: { likes: -1 }, $pull: { likedBy: userId } }
+            );
+            res.json({ message: "Unliked", likes: pin.likes - 1 });
+        } else {
+            // Like
+            await limterestCollection.updateOne(
+                { _id: pinId },
+                { $inc: { likes: 1 }, $addToSet: { likedBy: userId } }
+            );
+            res.json({ message: "Liked", likes: pin.likes + 1 });
+        }
+    } catch (e) {
+        res.status(500).json({ error: "Fehler." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
 });
-
-
-
-
