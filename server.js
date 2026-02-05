@@ -149,6 +149,7 @@ let highscoresCollection;
 let tindaSwipesCollection;
 let bugReportsCollection;
 let systemSettingsCollection;
+let restaurantOrdersCollection;
 
 // ==============================================================================
 // === NEU: AUTOMATISIERTE SICHERHEITS- & REPARATURFUNKTIONEN ====================
@@ -780,11 +781,12 @@ MongoClient.connect(mongoUri)
 		systemSettingsCollection = db.collection('systemSettings');
         
         // NEU: Human Grades Collections
-        humansCollection = db.collection('humans');       // Früher teachers
+        humansCollection = db.collection('humans');
         ratingsCollection = db.collection('ratings');
-        criteriaCollection = db.collection('criteria');  // Früher subjects
+        criteriaCollection = db.collection('criteria');  
         categoriesCollection = db.collection('categories');
-		tindaSwipesCollection = db.collection('tindaSwipes'); // Neue Collection
+		tindaSwipesCollection = db.collection('tindaSwipes'); 
+		restaurantOrdersCollection = db.collection('restaurantOrders');
 
         authCodesCollection = db.collection(authCodesCollectionName);
     
@@ -792,21 +794,15 @@ MongoClient.connect(mongoUri)
         console.log(`${LOG_PREFIX_SERVER} ✅ MongoDB verbunden & alle Collections initialisiert.`);
         // --- 2. Indizes & Reparaturen ---
         try {
-            // WICHTIG: Alten, fehlerhaften Index löschen (falls vorhanden), um Crash zu verhindern
             try {
                 await ratingsCollection.dropIndex("teacherId_1_userId_1");
                 console.log(`${LOG_PREFIX_SERVER} ♻️ Alter Index 'teacherId_1_userId_1' erfolgreich entfernt.`);
             } catch (e) { /* Index existiert nicht mehr, alles gut */ }
 
-            // Neuen korrekten Index für Human Grades erstellen
             await ratingsCollection.createIndex({ humanId: 1, userId: 1 }, { unique: true });
-
-            // Standard Indizes
             await humansCollection.createIndex({ id: 1 }, { unique: true, sparse: true });
             await criteriaCollection.createIndex({ id: 1 }, { unique: true });
             await categoriesCollection.createIndex({ id: 1 }, { unique: true });
-
-            // Bestehende Indizes
 			await initCacheSystem();
             await usersCollection.createIndex({ userShareCode: 1 }, { unique: true, sparse: true });
             await limChatsCollection.createIndex({ participants: 1 });
@@ -5360,6 +5356,12 @@ const ACHIEVEMENT_DEFINITIONS = [
     // --- 🐛 DELTA & BUGS ---
     { id: 'delta_force', icon: '🔺', title: 'Delta Force', desc: 'Besitze 5 Delta Coins.', 
       check: (u) => (u.deltaCoins || 0) >= 5 },
+	{ id: 'foodie', icon: '🌭', title: 'Der Vorkoster', desc: 'Iss 10 Gerichte im Restaurant.', 
+      check: (u, s) => s.foodEaten >= 10 },
+    { id: 'regular', icon: '😋', title: 'Stammkunde', desc: 'Iss 50 Gerichte. Der Koch kennt deinen Namen.', 
+      check: (u, s) => s.foodEaten >= 50 },
+    { id: 'glutton', icon: '🐋', title: 'Vielfraß', desc: 'Iss 500 Gerichte. Die Stühle ächzen.', 
+      check: (u, s) => s.foodEaten >= 500 },
 ];
 
 // Hilfsfunktion: Automatische Prüfung (V3 - Extended Edition)
@@ -5415,10 +5417,10 @@ async function updateUserAchievements(user) {
         ideaCount: ideaCount,
         transferCount: transferCount,
         dailyStreak: user.dailyStreak || 0,
-        // NEUE STATS:
         tindaMatchCount: tindaMatchCount,
         bestFlappyScore: bestFlappy ? bestFlappy.score : 0,
         bestSnakeScore: bestSnake ? bestSnake.score : 0,
+		foodEaten: user.stats?.foodEaten || 0,
         hasTaxShield: !!taxShieldItem
     };
 
@@ -7634,6 +7636,191 @@ app.post('/api/admin/chat/send', isAuthenticated, isAdmin, async (req, res) => {
         console.error(e);
         res.status(500).json({ error: "Fehler beim Senden." });
     }
+});
+
+// =========================================================
+// === RESTAURANT CONFIG ===
+// =========================================================
+const RESTAURANT_MENU = [
+    // Hauptgerichte
+    { id: 'fries', name: 'Pommes Frites', price: 150.00, energy: 10, type: 'main', icon: '🍟', desc: 'Salzig und fettig.' },
+    { id: 'burger', name: 'Cheeseburger', price: 450.00, energy: 40, type: 'main', icon: '🍔', desc: 'Der Klassiker.' },
+    { id: 'pizza', name: 'Pizza Salami', price: 600.00, energy: 60, type: 'main', icon: '🍕', desc: 'Heiß und fettig!' },
+    { id: 'steak', name: 'Gold Steak', price: 250000.00, energy: 100, type: 'main', icon: '🥩', desc: 'Gönn dir was.' },
+    // Getränke
+    { id: 'coke', name: 'Limo Cola', price: 200.00, energy: 15, type: 'drink', icon: '🥤', desc: 'Zucker pur.' },
+    { id: 'coffee', name: 'Schwarzer Kaffee', price: 100.00, energy: 20, type: 'drink', icon: '☕', desc: 'Macht wach.' },
+    // Beilagen (Günstig, wenig Energie, aber lecker)
+    { id: 'dip_ketchup', name: 'Ketchup', price: 20.00, energy: 1, type: 'side', icon: '🍅', desc: 'Rot und süß.' },
+    { id: 'dip_mayo', name: 'Mayo', price: 2.00, energy: 1, type: 'side', icon: '🥚', desc: 'Weiß und cremig.' },
+    { id: 'nuggets', name: '4er Nuggets', price: 120.00, energy: 8, type: 'side', icon: '🍗', desc: 'Knusprig.' },
+    { id: 'onion_rings', name: 'Zwiebelringe', price: 100.00, energy: 6, type: 'side', icon: '🧅', desc: 'Für den Atem.' },
+    { id: 'icecream', name: 'Eisbecher', price: 250.00, energy: 15, type: 'side', icon: '🍨', desc: 'Nachtisch muss sein.' }
+];
+
+// =========================================================
+// === RESTAURANT API (LIMO'S DINER) ===
+// =========================================================
+const LOG_PREFIX_REST = "[Restaurant API]";
+
+// 1. Speisekarte abrufen
+app.get('/api/restaurant/menu', isAuthenticated, (req, res) => {
+    res.json({ menu: RESTAURANT_MENU });
+});
+
+// 2. Essen bestellen (Reduziert Job-Cooldown!)
+app.post('/api/restaurant/order', isAuthenticated, async (req, res) => {
+    // Erwartet body: { itemIds: ["burger", "fries", "dip_ketchup"] }
+    // Oder Legacy Support: { itemId: "burger" }
+    let { itemIds, itemId } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    // Support für alte Aufrufe (falls du nur ein Item schickst)
+    if (itemId && !itemIds) itemIds = [itemId];
+
+    if (!itemIds || !Array.isArray(itemIds) || itemIds.length === 0) {
+        return res.status(400).json({ error: "Der Teller ist leer. Wähle etwas aus!" });
+    }
+
+    const session = client.startSession();
+
+    try {
+        let totalPrice = 0;
+        let totalEnergy = 0;
+        let itemNames = [];
+        let itemsDetails = []; // Für die Historie
+
+        // Preise und Energie berechnen
+        for (const id of itemIds) {
+            const food = RESTAURANT_MENU.find(i => i.id === id);
+            if (!food) throw new Error(`Gericht '${id}' steht nicht auf der Karte.`);
+            
+            totalPrice += food.price;
+            totalEnergy += food.energy;
+            itemNames.push(food.name);
+            itemsDetails.push({ name: food.name, icon: food.icon });
+        }
+
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            
+            if (user.balance < totalPrice) {
+                throw new Error(`Nicht genug Geld! Das Menü kostet $${totalPrice.toFixed(2)}.`);
+            }
+
+            // --- EFFEKT ---
+            let newLastWorkedAt = user.lastWorkedAt || 0;
+            const reductionMs = totalEnergy * 60 * 1000; 
+
+            if (newLastWorkedAt > 0) {
+                const oldDate = new Date(newLastWorkedAt).getTime();
+                // Zeit zurückdrehen = Energie auffüllen
+                newLastWorkedAt = new Date(oldDate - reductionMs);
+            }
+
+            // A. User Update
+            await usersCollection.updateOne(
+                { _id: userId },
+                { 
+                    $inc: { 
+                        balance: -totalPrice,
+                        "stats.foodEaten": itemIds.length 
+                    },
+                    $set: { lastWorkedAt: newLastWorkedAt } 
+                },
+                { session }
+            );
+
+            // B. NEU: Historie Eintrag speichern!
+            await restaurantOrdersCollection.insertOne({
+                userId: userId,
+                username: req.session.username,
+                items: itemsDetails, // Was wurde gegessen?
+                cost: totalPrice,
+                energyGained: totalEnergy,
+                date: new Date()
+            }, { session });
+        });
+
+        const updatedUser = await usersCollection.findOne({ _id: userId }, { projection: { balance: 1 } });
+        
+        console.log(`${LOG_PREFIX_REST} User ${req.session.username} bestellte: ${itemNames.join(", ")}.`);
+        
+        let msg = `Guten Appetit! Du hast ${itemNames.length} Teile verdrückt ($${totalPrice.toFixed(2)}).`;
+        if (itemNames.length <= 3) msg = `Lecker: ${itemNames.join(" + ")}! ($${totalPrice.toFixed(2)})`;
+
+        res.json({ 
+            message: `${msg} Energie regeneriert!`,
+            newBalance: updatedUser.balance,
+            energyGain: totalEnergy,
+            itemsEaten: itemNames
+        });
+
+    } catch (e) {
+        console.error(`${LOG_PREFIX_REST} Fehler bei Bestellung:`, e.message);
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// 3. Status abrufen (Energie & Historie-Vorschau)
+app.get('/api/restaurant/status', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        
+        // --- ENERGIE BERECHNUNG ---
+        let energyPercent = 100;
+        let statusText = "Volle Energie! Geh arbeiten.";
+        
+        if (user.job) {
+            const jobDef = JOB_LIST.find(j => j.id === user.job);
+            if (jobDef && user.lastWorkedAt) {
+                const now = Date.now();
+                const lastWork = new Date(user.lastWorkedAt).getTime();
+                const cooldownMs = jobDef.cooldownSeconds * 1000;
+                const timePassed = now - lastWork;
+
+                if (timePassed < cooldownMs) {
+                    // Wenn Cooldown aktiv ist, berechnen wir den Fortschritt
+                    // 0ms vergangen = 0% Energie. cooldownMs vergangen = 100% Energie.
+                    energyPercent = Math.floor((timePassed / cooldownMs) * 100);
+                    statusText = `Erholt sich... (${energyPercent}%)`;
+                }
+            }
+        }
+
+        // --- LETZTE MAHLZEITEN ---
+        const lastMeals = await restaurantOrdersCollection
+            .find({ userId: userId })
+            .sort({ date: -1 })
+            .limit(5)
+            .toArray();
+
+        res.json({ 
+            energy: energyPercent,
+            statusText: statusText,
+            job: user.job || "Arbeitslos",
+            lastMeals: lastMeals
+        });
+
+    } catch (e) {
+        console.error(`${LOG_PREFIX_REST} Status-Fehler:`, e);
+        res.status(500).json({ error: "Konnte Energie nicht messen." });
+    }
+});
+
+app.get('/api/restaurant/history', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    const history = await restaurantOrdersCollection
+        .find({ userId: userId })
+        .sort({ date: -1 })
+        .limit(50) // Die letzten 50 Mahlzeiten
+        .toArray();
+        
+    res.json({ history });
 });
 
 app.use((req, res) => {
