@@ -7830,23 +7830,6 @@ app.get('/api/restaurant/history', isAuthenticated, async (req, res) => {
 // =========================================================
 const LOG_PREFIX_PIN = "[Limterest]";
 
-// 1. Feed laden (Alle Pins)
-app.get('/api/limterest/feed', async (req, res) => {
-    try {
-        // Wir mischen die Pins zufällig ($sample), damit es immer frisch aussieht
-        // Oder sortieren nach 'createdAt' (-1) für neueste
-        const pins = await limterestCollection.aggregate([
-            { $sort: { createdAt: -1 } },
-            { $limit: 50 }
-        ]).toArray();
-        
-        res.json({ pins });
-    } catch (e) {
-        console.error(`${LOG_PREFIX_PIN} Fehler beim Laden:`, e);
-        res.status(500).json({ error: "Konnte Feed nicht laden." });
-    }
-});
-
 // 2. Neuen Pin erstellen (NUR URL!)
 app.post('/api/limterest/pin', isAuthenticated, async (req, res) => {
     const { title, imageUrl, tags } = req.body;
