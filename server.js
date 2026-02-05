@@ -8048,6 +8048,39 @@ app.post('/api/limterest/pin/:id/report', isAuthenticated, async (req, res) => {
     }
 });
 
+// 6. Status eines Pins prüfen (Ist er gemerkt?)
+app.get('/api/limterest/pin/:id/is-saved', isAuthenticated, async (req, res) => {
+    const pinId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const user = await usersCollection.findOne({ _id: userId }, { projection: { savedPins: 1 } });
+        const isSaved = user.savedPins && user.savedPins.some(id => id.equals(pinId));
+        res.json({ isSaved: !!isSaved });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler." });
+    }
+});
+
+// 7. Alle gemerkten Pins laden
+app.get('/api/limterest/my-saved', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    
+    try {
+        const user = await usersCollection.findOne({ _id: userId }, { projection: { savedPins: 1 } });
+        
+        if (!user.savedPins || user.savedPins.length === 0) {
+            return res.json({ pins: [] });
+        }
+
+        // Alle Pins laden, deren ID im savedPins Array ist
+        const pins = await limterestCollection.find({ _id: { $in: user.savedPins } }).toArray();
+        res.json({ pins });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
