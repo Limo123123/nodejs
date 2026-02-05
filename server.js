@@ -7924,6 +7924,94 @@ app.post('/api/limterest/pin/:id/like', isAuthenticated, async (req, res) => {
     }
 });
 
+// 1. Feed laden (MIT SUCHE & USER-FILTER)
+app.get('/api/limterest/feed', async (req, res) => {
+    const { q, username } = req.query;
+    const match = {};
+
+    // Filter: Suche (Case-Insensitive)
+    if (q) {
+        match.$or = [
+            { title: { $regex: q, $options: 'i' } },
+            { tags: { $in: [new RegExp(q, 'i')] } }
+        ];
+    }
+
+    // Filter: Bestimmter User
+    if (username) {
+        match.username = username;
+    }
+
+    try {
+        const pins = await limterestCollection.aggregate([
+            { $match: match },
+            { $sort: { createdAt: -1 } },
+            { $limit: 50 } // Pagination könnte man hier noch erweitern
+        ]).toArray();
+        
+        res.json({ pins });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden." });
+    }
+});
+
+// 2. User Profil laden (Stats & Follow Status)
+app.get('/api/limterest/user/:targetUsername', isAuthenticated, async (req, res) => {
+    const { targetUsername } = req.params;
+    const myId = new ObjectId(req.session.userId);
+
+    try {
+        const user = await usersCollection.findOne({ username: targetUsername });
+        if (!user) return res.status(404).json({ error: "User nicht gefunden." });
+
+        // Stats berechnen
+        const pinCount = await limterestCollection.countDocuments({ username: targetUsername });
+        const followersCount = (user.followers || []).length;
+        
+        // Folge ich ihm schon?
+        const isFollowing = user.followers && user.followers.some(id => id.equals(myId));
+
+        res.json({
+            username: user.username,
+            bio: user.bio || "Keine Bio.",
+            stats: { pins: pinCount, followers: followersCount },
+            isFollowing: !!isFollowing,
+            joinDate: user._id.getTimestamp()
+        });
+    } catch (e) {
+        res.status(500).json({ error: "Profil-Fehler." });
+    }
+});
+
+// 3. Follow / Unfollow
+app.post('/api/limterest/user/:targetUsername/follow', isAuthenticated, async (req, res) => {
+    const { targetUsername } = req.params;
+    const myId = new ObjectId(req.session.userId);
+
+    try {
+        const targetUser = await usersCollection.findOne({ username: targetUsername });
+        if (!targetUser) return res.status(404).json({ error: "User 404" });
+        if (targetUser._id.equals(myId)) return res.status(400).json({ error: "Kein Eigen-Follow." });
+
+        // Check if already following
+        const isFollowing = targetUser.followers && targetUser.followers.some(id => id.equals(myId));
+
+        if (isFollowing) {
+            // UNFOLLOW
+            await usersCollection.updateOne({ _id: targetUser._id }, { $pull: { followers: myId } });
+            await usersCollection.updateOne({ _id: myId }, { $pull: { following: targetUser._id } });
+            res.json({ message: "Unfollowed", isFollowing: false });
+        } else {
+            // FOLLOW
+            await usersCollection.updateOne({ _id: targetUser._id }, { $addToSet: { followers: myId } });
+            await usersCollection.updateOne({ _id: myId }, { $addToSet: { following: targetUser._id } });
+            res.json({ message: "Followed", isFollowing: true });
+        }
+    } catch (e) {
+        res.status(500).json({ error: "Follow Fehler." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
