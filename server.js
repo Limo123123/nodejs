@@ -8237,34 +8237,37 @@ app.get('/api/yakuza/catalog', isAuthenticated, async (req, res) => {
     try {
         const userId = new ObjectId(req.session.userId);
         
-        // 1. User frisch aus der DB laden (damit wir auch NEUE Achievements sehen)
+        // 1. User Besitz laden
         const user = await usersCollection.findOne({ _id: userId });
-        
-        // 2. Besitz zusammenführen (Normale + Gekaufte Badges)
         const owned = [
             ...(user.achievements || []), 
             ...(user.badges || [])
         ];
 
-        // 3. Yakuza Exclusives definieren
+        // 2. Die "Besonderen" Yakuza Badges definieren
         const exclusives = [
             { id: 'badge_yakuza', title: 'Yakuza', icon: '🐉', desc: 'Teil der Familie.', price: 5000000 },
             { id: 'badge_hacker', title: 'Hacker', icon: '💻', desc: 'Systembrecher.', price: 10000000 },
             { id: 'badge_rich', title: 'Tycoon', icon: '🎩', desc: 'Geld regiert.', price: 25000000 },
-            { id: 'badge_illuminati', title: 'Illuminati', icon: '👁️', desc: 'Allsehend.', price: 50000000 }
+            { id: 'badge_illuminati', title: 'Illuminati', icon: '👁️', desc: 'Allsehend.', price: 50000000 },
+            // Bug Hunter auch hier als Exclusive definieren, damit der Preis stimmt (1 Mrd)
+            { id: 'badge_hunter', title: 'Bug Hunter', icon: '🐛', desc: 'Elite.', price: 1000000000 }
         ];
         
-        // 4. Normale Achievements aus der globalen Liste holen
-        // (ACHTUNG: Stelle sicher, dass ACHIEVEMENT_DEFINITIONS in server.js existiert!)
-        const regular = ACHIEVEMENT_DEFINITIONS.map(ach => ({
-            id: ach.id, 
-            title: ach.title, 
-            icon: ach.icon, 
-            desc: ach.desc,
-            price: ACHIEVEMENT_MARKET_PRICES[ach.id] || 15000000 // 15 Mio Standard
-        }));
+        // Liste der IDs erstellen, die wir schon haben (um Duplikate zu vermeiden)
+        const exclusiveIds = exclusives.map(e => e.id);
 
-        // 5. Alles zurücksenden: Katalog UND was der User besitzt
+        // 3. Normale Liste laden, aber Exclusives RAUSFILTERN
+        const regular = ACHIEVEMENT_DEFINITIONS
+            .filter(ach => !exclusiveIds.includes(ach.id)) // <--- HIER IST DER FIX
+            .map(ach => ({
+                id: ach.id, 
+                title: ach.title, 
+                icon: ach.icon, 
+                desc: ach.desc,
+                price: ACHIEVEMENT_MARKET_PRICES[ach.id] || 15000000 // 15 Mio Standard
+            }));
+
         res.json({ 
             catalog: [...exclusives, ...regular],
             owned: owned 
