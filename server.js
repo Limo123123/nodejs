@@ -8238,22 +8238,46 @@ const ACHIEVEMENT_MARKET_PRICES = {
 
 // GET: Katalog laden
 app.get('/api/yakuza/catalog', isAuthenticated, async (req, res) => {
-    // Normal + Exclusive Badges
-    const exclusives = [
-        { id: 'badge_yakuza', title: 'Yakuza', icon: '🐉', desc: 'Teil der Familie.', price: 5000000 },
-        { id: 'badge_hacker', title: 'Hacker', icon: '💻', desc: 'Systembrecher.', price: 10000000 },
-        { id: 'badge_rich', title: 'Tycoon', icon: '🎩', desc: 'Geld regiert.', price: 25000000 },
-        { id: 'badge_illuminati', title: 'Illuminati', icon: '👁️', desc: 'Allsehend.', price: 50000000 }
-    ];
-    
-    // Wir nehmen die Definitionen aus deiner globalen Konstante ACHIEVEMENT_DEFINITIONS
-    // (Stelle sicher, dass diese Variable in server.js verfügbar ist)
-    const regular = ACHIEVEMENT_DEFINITIONS.map(ach => ({
-        id: ach.id, title: ach.title, icon: ach.icon, desc: ach.desc,
-        price: ACHIEVEMENT_MARKET_PRICES[ach.id] || 15000000 // 15 Mio Standard
-    }));
+    try {
+        const userId = new ObjectId(req.session.userId);
+        
+        // 1. User frisch aus der DB laden (damit wir auch NEUE Achievements sehen)
+        const user = await usersCollection.findOne({ _id: userId });
+        
+        // 2. Besitz zusammenführen (Normale + Gekaufte Badges)
+        const owned = [
+            ...(user.achievements || []), 
+            ...(user.badges || [])
+        ];
 
-    res.json({ catalog: [...exclusives, ...regular] });
+        // 3. Yakuza Exclusives definieren
+        const exclusives = [
+            { id: 'badge_yakuza', title: 'Yakuza', icon: '🐉', desc: 'Teil der Familie.', price: 5000000 },
+            { id: 'badge_hacker', title: 'Hacker', icon: '💻', desc: 'Systembrecher.', price: 10000000 },
+            { id: 'badge_rich', title: 'Tycoon', icon: '🎩', desc: 'Geld regiert.', price: 25000000 },
+            { id: 'badge_illuminati', title: 'Illuminati', icon: '👁️', desc: 'Allsehend.', price: 50000000 }
+        ];
+        
+        // 4. Normale Achievements aus der globalen Liste holen
+        // (ACHTUNG: Stelle sicher, dass ACHIEVEMENT_DEFINITIONS in server.js existiert!)
+        const regular = ACHIEVEMENT_DEFINITIONS.map(ach => ({
+            id: ach.id, 
+            title: ach.title, 
+            icon: ach.icon, 
+            desc: ach.desc,
+            price: ACHIEVEMENT_MARKET_PRICES[ach.id] || 15000000 // 15 Mio Standard
+        }));
+
+        // 5. Alles zurücksenden: Katalog UND was der User besitzt
+        res.json({ 
+            catalog: [...exclusives, ...regular],
+            owned: owned 
+        });
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Laden des Katalogs." });
+    }
 });
 
 // POST: Kaufen
