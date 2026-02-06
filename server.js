@@ -5481,6 +5481,8 @@ const ACHIEVEMENT_DEFINITIONS = [
         desc: 'Du siehst alles. Du weißt alles.', 
         check: () => false 
     },
+	{ id: 'badge_yakuza', icon: '🐉', title: 'Yakuza', desc: 'Teil der Familie. Gekauft im Untergrund.', 
+      check: () => false },
 ];
 
 // Hilfsfunktion: Automatische Prüfung (V3 - Extended Edition)
