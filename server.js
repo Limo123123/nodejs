@@ -1024,6 +1024,108 @@ MongoClient.connect(mongoUri)
         process.exit(1); 
     });
 
+// POST: Manuelle Steuereintreibung (Admin Only)
+app.post('/api/admin/system/force-tax', isAuthenticated, isAdmin, async (req, res) => {
+    console.log(`${LOG_PREFIX_SERVER} 👮 Admin ${req.session.username} erzwingt Steuer-Eintreibung...`);
+    
+    const TAX_THRESHOLD = 100000000; // 100 Millionen (Grenze)
+    const TAX_RATE = 0.005; // 0,5% Steuersatz
+
+    try {
+        // 1. Finde alle Reichen (Keine Admins, keine Infinity-User)
+        const richUsers = await usersCollection.find({
+            balance: { $gt: TAX_THRESHOLD },
+            isAdmin: { $ne: true },
+            infinityMoney: { $ne: true }
+        }).toArray();
+
+        if (richUsers.length === 0) {
+            return res.json({ success: false, message: "Keine steuerpflichtigen User gefunden." });
+        }
+
+        let totalTaxCollected = 0;
+        let shieldedUsers = 0;
+        let taxedUsersCount = 0;
+        
+        const bulkOps = [];
+        const inventoryOps = []; // Für verbrauchte Schilde
+
+        for (const user of richUsers) {
+            // A. Hat der User ein Schild?
+            const shield = await inventoriesCollection.findOne({ 
+                userId: user._id, 
+                productId: 'tax_shield', 
+                quantityOwned: { $gt: 0 } 
+            });
+
+            if (shield) {
+                shieldedUsers++;
+                // Schild verbrauchen (-1 quantity)
+                inventoryOps.push({
+                    updateOne: {
+                        filter: { _id: shield._id },
+                        update: { $inc: { quantityOwned: -1 } }
+                    }
+                });
+                continue; // Nächster User (keine Steuer)
+            }
+
+            // B. Steuer berechnen
+            const taxAmount = Math.floor(user.balance * TAX_RATE * 100) / 100;
+
+            if (taxAmount > 0) {
+                taxedUsersCount++;
+                totalTaxCollected += taxAmount;
+                
+                bulkOps.push({
+                    updateOne: {
+                        filter: { _id: user._id },
+                        update: { 
+                            $inc: { 
+                                balance: -taxAmount, 
+                                totalTaxesPaid: taxAmount 
+                            } 
+                        }
+                    }
+                });
+            }
+        }
+
+        // C. DB Updates ausführen
+        if (inventoryOps.length > 0) await inventoriesCollection.bulkWrite(inventoryOps);
+        if (bulkOps.length > 0) await usersCollection.bulkWrite(bulkOps);
+
+        // D. Geld in die Staatskasse
+        if (totalTaxCollected > 0) {
+            await addToStateTreasury(totalTaxCollected);
+            
+            // News generieren
+            await newsCollection.insertOne({
+                headline: "Sonder-Steuerprüfung!",
+                content: `Das Finanzamt hat soeben manuell zugegriffen! $${totalTaxCollected.toLocaleString()} wurden eingezogen. ${shieldedUsers} User waren geschützt.`,
+                author: "Finanzamt (Admin)",
+                category: "Wirtschaft",
+                createdAt: new Date(),
+                likes: 0
+            });
+        }
+
+        res.json({ 
+            success: true, 
+            message: `Steuer-Razzia beendet!`,
+            details: {
+                collected: totalTaxCollected,
+                taxedCount: taxedUsersCount,
+                shieldedCount: shieldedUsers
+            }
+        });
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Eintreiben." });
+    }
+});
+
 // === GRACEFUL SHUTDOWN (Für Docker) ===
 async function gracefulShutdown(signal) {
     console.log(`${LOG_PREFIX_SERVER} 🛑 ${signal} empfangen. Fahre sauber herunter...`);
