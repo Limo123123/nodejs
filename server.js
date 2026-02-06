@@ -8215,72 +8215,58 @@ app.get('/api/limterest/my-saved', isAuthenticated, async (req, res) => {
     }
 });
 
-// --- YAKUZA / BLACK MARKET API ---
+// =========================================================
+// === YAKUZA / BLACK MARKET ===
+// =========================================================
 
-// --- YAKUZA PREIS-LOGIK ---
+// Preise & Config
+const YAKUZA_SERVICE_PRICES = { fakeid: 500000, leak: 1000000 };
 
-// 1. Basis-Preise für die Standard-Services
-const YAKUZA_SERVICE_PRICES = {
-    fakeid: 500000,       // $500k
-    leak: 1000000         // $1 Mio
-};
-
-// 2. Preise für Achievements (Key = achievement.id)
-// Alles was hier NICHT steht, kostet pauschal 10 Mio.
+// Preisliste für Badges (alles andere ist 15 Mio Standard)
 const ACHIEVEMENT_MARKET_PRICES = {
-    // --- 🐣 BASIC (Billig) ---
-    newbie: 1000000, identity: 1000000, og: 5000000, 
-    
-    // --- 📅 ZEIT & STREAK (Sehr Teuer - Time is Money) ---
-    veteran: 50000000,       // 50 Mio (30 Tage Alter)
-    streak_week: 25000000,   // 25 Mio
-    streak_month: 250000000, // 250 Mio (30 Tage Streak ist harte Arbeit!)
-
-    // --- 🎮 SKILL GAMES (Teuer für Noobs) ---
-    flappy_noob: 5000000, flappy_ace: 50000000,
-    snake_eater: 50000000,
-
-    // --- 🐛 SPECIALS ---
-    badge_hunter: 1000000000, // 1 Milliarde (Bug Hunter ist extrem selten)
-    
-    // --- 🏛️ GRIND (Shop/Crime/Social) ---
-    hoarder: 10000000, museum: 50000000,
-    critic: 2000000, judge: 10000000, jury: 50000000,
-    inventor: 5000000, visionary: 25000000,
-    talkative: 2000000, influencer: 20000000, legend_spam: 100000000,
-    
-    // --- 💰 GELD (Redundant, aber kaufbar als Statussymbol) ---
-    // Wer schon 1 Mrd hat, braucht das Badge nicht kaufen, kriegt es eh. 
-    // Aber falls jemand es erzwingen will:
-    limo_bezos: 2000000000, // Kostet 2 Mrd
-    
-    // --- YAKUZA EXCLUSIVE (Deine alten Badges) ---
-    badge_yakuza: 5000000,
-    badge_hacker: 10000000,
-    badge_rich: 25000000,
-    badge_illuminati: 50000000
+    newbie: 1000000, identity: 1000000, og: 5000000,
+    veteran: 50000000, streak_week: 25000000, streak_month: 250000000,
+    flappy_noob: 5000000, flappy_ace: 50000000, snake_eater: 50000000,
+    badge_hunter: 1000000000, // 1 Mrd
+    hoarder: 15000000, museum: 75000000,
+    critic: 5000000, judge: 15000000, jury: 50000000,
+    inventor: 10000000, visionary: 30000000,
+    talkative: 5000000, influencer: 25000000, legend_spam: 150000000,
+    limo_bezos: 2000000000, // 2 Mrd
+    badge_yakuza: 5000000, badge_hacker: 10000000, badge_rich: 25000000, badge_illuminati: 50000000
 };
 
-app.post('/api/yakuza/buy', isAuthenticated, async (req, res) => {
-    const { service, target } = req.body; 
-    // 'service' ist z.B. 'fakeid', 'leak' ODER 'badge_veteran', 'badge_newbie' etc.
+// GET: Katalog laden
+app.get('/api/yakuza/catalog', isAuthenticated, async (req, res) => {
+    // Normal + Exclusive Badges
+    const exclusives = [
+        { id: 'badge_yakuza', title: 'Yakuza', icon: '🐉', desc: 'Teil der Familie.', price: 5000000 },
+        { id: 'badge_hacker', title: 'Hacker', icon: '💻', desc: 'Systembrecher.', price: 10000000 },
+        { id: 'badge_rich', title: 'Tycoon', icon: '🎩', desc: 'Geld regiert.', price: 25000000 },
+        { id: 'badge_illuminati', title: 'Illuminati', icon: '👁️', desc: 'Allsehend.', price: 50000000 }
+    ];
     
-    const userId = new ObjectId(req.session.userId);
-    
-    let price = 0;
-    let isBadge = false;
-    let badgeId = "";
+    // Wir nehmen die Definitionen aus deiner globalen Konstante ACHIEVEMENT_DEFINITIONS
+    // (Stelle sicher, dass diese Variable in server.js verfügbar ist)
+    const regular = ACHIEVEMENT_DEFINITIONS.map(ach => ({
+        id: ach.id, title: ach.title, icon: ach.icon, desc: ach.desc,
+        price: ACHIEVEMENT_MARKET_PRICES[ach.id] || 15000000 // 15 Mio Standard
+    }));
 
-    // --- PREIS ERMITTELN ---
+    res.json({ catalog: [...exclusives, ...regular] });
+});
+
+// POST: Kaufen
+app.post('/api/yakuza/buy', isAuthenticated, async (req, res) => {
+    const { service, target } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    let price = 0, isBadge = false, badgeId = "";
+
     if (YAKUZA_SERVICE_PRICES[service]) {
-        // Es ist ein Service (Fake ID / Leak)
         price = YAKUZA_SERVICE_PRICES[service];
     } else if (service.startsWith('badge_')) {
-        // Es ist ein Achievement
         isBadge = true;
-        badgeId = service.replace('badge_', ''); // z.B. "veteran" aus "badge_veteran"
-        
-        // Preis aus der Liste nehmen ODER Standard 15 Mio
+        badgeId = service.replace('badge_', '');
         price = ACHIEVEMENT_MARKET_PRICES[badgeId] || 15000000;
     } else {
         return res.status(400).json({ error: "Unbekannter Service." });
@@ -8288,124 +8274,43 @@ app.post('/api/yakuza/buy', isAuthenticated, async (req, res) => {
 
     try {
         const user = await usersCollection.findOne({ _id: userId });
-        if (!user) return res.status(404).json({ error: "User nicht gefunden." });
-        
-        // --- 1. GELD CHECK ---
-        if (user.balance < price) {
-            return res.status(400).json({ error: `Zu wenig Geld. Du benötigst $${price.toLocaleString()}.` });
-        }
+        if (user.balance < price) return res.status(400).json({ error: `Zu wenig Geld ($${price.toLocaleString()}).` });
 
-        // --- 2. LOGIK FÜR ACHIEVEMENTS ---
         if (isBadge) {
-            // Prüfen ob User das Badge schon hat
-            if (user.badges && user.badges.includes(badgeId)) {
-                return res.status(400).json({ error: "Dieses Achievement besitzt du bereits." });
+            if ((user.badges && user.badges.includes(badgeId)) || (user.achievements && user.achievements.includes(badgeId))) {
+                return res.status(400).json({ error: "Bereits im Besitz." });
             }
-            
-            // Geld abziehen und Badge hinzufügen
-            await usersCollection.updateOne({ _id: userId }, { 
-                $inc: { balance: -price },
-                $addToSet: { badges: badgeId }
-            });
-            
-            return res.json({ 
-                success: true, 
-                message: `Schwarzmarkt-Deal erfolgreich. Badge erhalten.`, 
-                newBalance: user.balance - price 
-            });
-        } 
-        
-        // --- 3. LOGIK FÜR FAKE ID ---
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -price }, $addToSet: { badges: badgeId } });
+            return res.json({ success: true, message: "Gekauft!", newBalance: user.balance - price });
+        }
+
         if (service === 'fakeid') {
-             await usersCollection.updateOne({ _id: userId }, { 
-                $inc: { balance: -price },
-                // Löscht alle Cooldowns aus der Datenbank
-                $unset: { 
-                    "cooldowns.robbery": "", 
-                    "cooldowns.heist": "", 
-                    "productSellCooldowns": "",
-                    "cooldowns.crime_daily": "" // Falls du Daily Crime hast
-                } 
+            await usersCollection.updateOne({ _id: userId }, { 
+                $inc: { balance: -price }, 
+                $unset: { "cooldowns.robbery": "", "cooldowns.heist": "", "productSellCooldowns": "", "cooldowns.crime_daily": "" }
             });
-            return res.json({ 
-                success: true, 
-                message: "Identität bereinigt. Fahndungslevel gelöscht.", 
-                newBalance: user.balance - price 
-            });
+            return res.json({ success: true, message: "Identität bereinigt.", newBalance: user.balance - price });
         }
-        
-        // --- 4. LOGIK FÜR DATENLECK (Doxing) ---
+
         if (service === 'leak') {
-            if (!target) return res.status(400).json({ error: "Ziel-User fehlt." });
-
-            const victim = await usersCollection.findOne(
-                { username: target }, 
-                { projection: { password: 0, sessions: 0, "2fa_secret": 0 } } // Sensibles ausblenden
-            );
-
-            if (!victim) {
-                // Keine Rückerstattung im Schwarzmarkt (optional: doch erstatten, wenn du nett bist)
-                return res.status(404).json({ error: "Zielperson nicht gefunden. Geld behalten." });
-            }
-
-            // Geld abziehen
+            if (!target) return res.status(400).json({ error: "Ziel fehlt." });
+            const v = await usersCollection.findOne({ username: target }, { projection: { password: 0, sessions: 0, "2fa_secret": 0 } });
+            if (!v) return res.status(404).json({ error: "User nicht gefunden." });
             await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -price } });
-
-            // Zusatzinfos laden (Inventar Count etc.)
-            const inventoryCount = await inventoriesCollection.countDocuments({ userId: victim._id });
-            // Seltene Items finden (Preis > 1000)
-            const rareItems = await inventoriesCollection.find({ userId: victim._id, "productDetails.price": { $gt: 1000 } }).toArray();
-
-            // Daten zusammenstellen
+            
+            const invCount = await inventoriesCollection.countDocuments({ userId: v._id });
+            const rareItems = await inventoriesCollection.find({ userId: v._id, "productDetails.price": { $gt: 1000 } }).toArray();
+            
             const leakData = {
-                _id: victim._id,
-                username: victim.username,
-                role: victim.isAdmin ? "ADMIN (Vorsicht!)" : "User",
-                balance: victim.balance,
-                tokens: victim.tokens || 0,
-                infinity: victim.infinityMoney || false,
-                inventorySize: inventoryCount,
-                rareItems: rareItems.map(i => i.productDetails.name), // Nur Namen senden
-                cooldowns: victim.cooldowns || {} // Wichtig für Angreifer
+                _id: v._id, username: v.username, role: v.isAdmin ? "ADMIN" : "User",
+                balance: v.balance, tokens: v.tokens || 0, infinity: v.infinityMoney || false,
+                inventorySize: invCount, rareItems: rareItems.map(i => i.productDetails.name),
+                cooldowns: v.cooldowns || {}
             };
-
-            return res.json({ 
-                success: true, 
-                message: "Daten erfolgreich extrahiert.", 
-                newBalance: user.balance - price, 
-                leak: leakData 
-            }); 
+            return res.json({ success: true, leak: leakData, newBalance: user.balance - price });
         }
 
-    } catch (e) {
-        console.error(e);
-        res.status(500).json({ error: "Kritischer Fehler im Untergrund-Netzwerk." });
-    }
-});
-
-app.get('/api/yakuza/catalog', isAuthenticated, async (req, res) => {
-    // Wir senden die Definitionen + Preise an das Frontend
-    // ACHTUNG: Du musst sicherstellen, dass ACHIEVEMENT_DEFINITIONS hier verfügbar ist (oder importiert wird)
-    
-    const catalog = ACHIEVEMENT_DEFINITIONS.map(ach => {
-        return {
-            id: ach.id,
-            title: ach.title,
-            icon: ach.icon,
-            desc: ach.desc,
-            price: ACHIEVEMENT_MARKET_PRICES[ach.id] || 10000000 // Fallback Preis
-        };
-    });
-    
-    // Yakuza Exclusives manuell hinzufügen, falls sie nicht in der normalen Liste sind
-    const exclusives = [
-        { id: 'badge_yakuza', title: 'Yakuza', icon: '🐉', desc: 'Teil der Familie.', price: 5000000 },
-        { id: 'badge_hacker', title: 'Hacker', icon: '💻', desc: 'Systembrecher.', price: 10000000 },
-        { id: 'badge_rich', title: 'Tycoon', icon: '🎩', desc: 'Geld regiert.', price: 25000000 },
-        { id: 'badge_illuminati', title: 'Illuminati', icon: '👁️', desc: 'Allsehend.', price: 50000000 }
-    ];
-
-    res.json({ catalog: [...exclusives, ...catalog] });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
 });
 
 app.use((req, res) => {
