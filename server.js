@@ -5466,12 +5466,6 @@ const ACHIEVEMENT_DEFINITIONS = [
       check: (u, s) => s.foodEaten >= 50 },
     { id: 'glutton', icon: '🐋', title: 'Vielfraß', desc: 'Iss 500 Gerichte. Die Stühle ächzen.', 
       check: (u, s) => s.foodEaten >= 500 },
-	
-	{ 
-        id: 'badge_yakuza', icon: '🐉', title: 'Yakuza', 
-        desc: 'Ein Freund der Familie. Gekauft im Untergrund.', 
-        check: () => false 
-    },
     { 
         id: 'badge_hacker', icon: '💻', title: 'Ghost Shell', 
         desc: 'Meister der digitalen Schatten.', 
