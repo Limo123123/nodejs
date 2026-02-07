@@ -6848,7 +6848,7 @@ app.get('/api/games/leaderboard/:gameId', async (req, res) => {
 // =========================================================
 // === TINDA (TINDER CLONE) BACKEND ===
 // =========================================================
-const OLLAMA_PI_URL = process.env.OLLAMA_URL || "http://192.168.178.170:11434/api/generate"; // IP deines 2. Pi anpassen!
+const OLLAMA_PI_URL = process.env.OLLAMA_URL || "http://192.168.178.137:11434/api/generate"; // IP deines 2. Pi anpassen!
 const OLLAMA_MODEL = "llama3";
 
 // 1. STACK LADEN (Mit verbesserter Anzeige für Kategorien & Bios)
