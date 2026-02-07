@@ -8309,31 +8309,24 @@ app.post('/api/yakuza/buy', isAuthenticated, async (req, res) => {
 
         // --- 3. LOGIK FÜR FAKE ID (Cooldown Reset) ---
         if (service === 'fakeid') {
-             console.log("--- DEBUGGER START ---");
-             console.log("User:", user.username);
              
-             // Wir geben ALLE Felder aus, die irgendwas mit Zeit oder Datum zu tun haben könnten
-             const keys = Object.keys(user);
-             console.log("Alle Felder im User-Objekt:", keys);
-             
-             // Spezifische Suche nach typischen Namen
-             console.log("Werte checken:");
-             console.log("lastRobbery:", user.lastRobbery);
-             console.log("last_robbery:", user.last_robbery);
-             console.log("robberyTime:", user.robberyTime);
-             console.log("lastHeist:", user.lastHeist);
-             console.log("crime:", user.crime);
-             console.log("stats:", user.stats);
-             
-             console.log("--- DEBUGGER ENDE ---");
+             await usersCollection.updateOne({ _id: userId }, { 
+                $inc: { balance: -price },
+                
+                // HIER IST DER FIX: Die korrekten Feldnamen aus deinem Log!
+                $unset: { 
+                    "lastRobberyAt": "",  // Weg mit dem Raub-Cooldown
+                    "lastHeistAt": "",    // Weg mit dem Heist-Cooldown
+                    "lastHackAt": "",     // Weg mit dem Hack-Cooldown
+                    "lastWorkedAt": "",   // Weg mit der Job-Sperre (Bonus)
+                    "lastDaily": ""       // Optional: Daily Reward Reset (falls du das willst)
+                } 
+            });
 
-             // ... Hier vorerst nichts löschen, nur Geld abziehen zum Testen ...
-             // await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -price } });
-
-             return res.json({ 
-                success: false, // Erstmal false, damit wir den Log sehen
-                message: "DEBUG-MODUS: Schau in deine Server-Konsole (Terminal), wie das Feld heißt!",
-                newBalance: user.balance 
+            return res.json({ 
+                success: true, 
+                message: "Identität bereinigt. Alle Fahndungs-Timer wurden geschreddert.", 
+                newBalance: user.balance - price 
             });
         }
 
