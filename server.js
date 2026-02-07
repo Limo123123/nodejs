@@ -8309,44 +8309,31 @@ app.post('/api/yakuza/buy', isAuthenticated, async (req, res) => {
 
         // --- 3. LOGIK FÜR FAKE ID (Cooldown Reset) ---
         if (service === 'fakeid') {
+             console.log("--- DEBUGGER START ---");
+             console.log("User:", user.username);
              
-             // Debugging: Zeig uns mal kurz in der Konsole, wie der User aussieht
-             console.log("FakeID gekauft von:", user.username);
-             console.log("Aktuelle Cooldowns davor:", user.cooldowns);
+             // Wir geben ALLE Felder aus, die irgendwas mit Zeit oder Datum zu tun haben könnten
+             const keys = Object.keys(user);
+             console.log("Alle Felder im User-Objekt:", keys);
+             
+             // Spezifische Suche nach typischen Namen
+             console.log("Werte checken:");
+             console.log("lastRobbery:", user.lastRobbery);
+             console.log("last_robbery:", user.last_robbery);
+             console.log("robberyTime:", user.robberyTime);
+             console.log("lastHeist:", user.lastHeist);
+             console.log("crime:", user.crime);
+             console.log("stats:", user.stats);
+             
+             console.log("--- DEBUGGER ENDE ---");
 
-             await usersCollection.updateOne({ _id: userId }, { 
-                $inc: { balance: -price },
-                
-                // HIER IST DER FIX: Wir löschen ALLES, was nach Cooldown aussieht
-                $unset: { 
-                    // Variante A: Alles im 'cooldowns' Objekt
-                    "cooldowns": "", 
-                    
-                    // Variante B: Einzelne Felder im 'cooldowns' Objekt (falls A nicht greift)
-                    "cooldowns.robbery": "", 
-                    "cooldowns.heist": "", 
-                    "cooldowns.crime": "",
-                    "cooldowns.work": "",
-                    "cooldowns.daily": "",
+             // ... Hier vorerst nichts löschen, nur Geld abziehen zum Testen ...
+             // await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -price } });
 
-                    // Variante C: Cooldowns direkt im User-Root (oft bei älteren Systemen)
-                    "lastRobbery": "",
-                    "lastHeist": "",
-                    "lastCrime": "",
-                    "robberyCooldown": "",
-                    "heistCooldown": "",
-                    
-                    // Variante D: Falls du Produkt-Verkauf Cooldowns hast
-                    "productSellCooldowns": ""
-                } 
-            });
-
-            console.log("Cooldowns sollten jetzt gelöscht sein.");
-
-            return res.json({ 
-                success: true, 
-                message: "Identität bereinigt. Alle Fahndungs-Timer wurden geschreddert.", 
-                newBalance: user.balance - price 
+             return res.json({ 
+                success: false, // Erstmal false, damit wir den Log sehen
+                message: "DEBUG-MODUS: Schau in deine Server-Konsole (Terminal), wie das Feld heißt!",
+                newBalance: user.balance 
             });
         }
 
