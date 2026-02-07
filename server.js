@@ -8307,12 +8307,47 @@ app.post('/api/yakuza/buy', isAuthenticated, async (req, res) => {
             return res.json({ success: true, message: "Gekauft!", newBalance: user.balance - price });
         }
 
+        // --- 3. LOGIK FÜR FAKE ID (Cooldown Reset) ---
         if (service === 'fakeid') {
-            await usersCollection.updateOne({ _id: userId }, { 
-                $inc: { balance: -price }, 
-                $unset: { "cooldowns.robbery": "", "cooldowns.heist": "", "productSellCooldowns": "", "cooldowns.crime_daily": "" }
+             
+             // Debugging: Zeig uns mal kurz in der Konsole, wie der User aussieht
+             console.log("FakeID gekauft von:", user.username);
+             console.log("Aktuelle Cooldowns davor:", user.cooldowns);
+
+             await usersCollection.updateOne({ _id: userId }, { 
+                $inc: { balance: -price },
+                
+                // HIER IST DER FIX: Wir löschen ALLES, was nach Cooldown aussieht
+                $unset: { 
+                    // Variante A: Alles im 'cooldowns' Objekt
+                    "cooldowns": "", 
+                    
+                    // Variante B: Einzelne Felder im 'cooldowns' Objekt (falls A nicht greift)
+                    "cooldowns.robbery": "", 
+                    "cooldowns.heist": "", 
+                    "cooldowns.crime": "",
+                    "cooldowns.work": "",
+                    "cooldowns.daily": "",
+
+                    // Variante C: Cooldowns direkt im User-Root (oft bei älteren Systemen)
+                    "lastRobbery": "",
+                    "lastHeist": "",
+                    "lastCrime": "",
+                    "robberyCooldown": "",
+                    "heistCooldown": "",
+                    
+                    // Variante D: Falls du Produkt-Verkauf Cooldowns hast
+                    "productSellCooldowns": ""
+                } 
             });
-            return res.json({ success: true, message: "Identität bereinigt.", newBalance: user.balance - price });
+
+            console.log("Cooldowns sollten jetzt gelöscht sein.");
+
+            return res.json({ 
+                success: true, 
+                message: "Identität bereinigt. Alle Fahndungs-Timer wurden geschreddert.", 
+                newBalance: user.balance - price 
+            });
         }
 
         if (service === 'leak') {
