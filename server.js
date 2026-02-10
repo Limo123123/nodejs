@@ -8352,6 +8352,182 @@ app.post('/api/yakuza/buy', isAuthenticated, async (req, res) => {
     } catch (e) { res.status(500).json({ error: "Fehler." }); }
 });
 
+// =========================================================
+// === ⚖️ LIMO COURT SYSTEM ===
+// =========================================================
+
+const COURT_FEE = 5000; // Kosten für eine Anklage
+const CASE_DURATION = 24 * 60 * 60 * 1000; // Ein Fall läuft 24 Stunden
+
+// 1. GET: Lade den aktuellen Fall und das Archiv
+app.get('/api/court/status', isAuthenticated, async (req, res) => {
+    try {
+        const userId = new ObjectId(req.session.userId);
+
+        // A) Suche den ältesten, noch offenen Fall (Active Case)
+        // Wir sortieren nach Erstellungsdatum, damit Fälle der Reihe nach abgearbeitet werden
+        const activeCase = await db.collection('courtCases').findOne(
+            { status: 'active' },
+            { sort: { createdAt: 1 } }
+        );
+
+        let caseData = null;
+
+        if (activeCase) {
+            // Berechne Statistiken für das Frontend
+            const gCount = (activeCase.votes_guilty || []).length;
+            const iCount = (activeCase.votes_innocent || []).length;
+            const total = gCount + iCount;
+            
+            // Prüfen, ob der User schon abgestimmt hat
+            let myVote = null;
+            if (activeCase.votes_guilty?.map(id => id.toString()).includes(userId.toString())) myVote = 'guilty';
+            if (activeCase.votes_innocent?.map(id => id.toString()).includes(userId.toString())) myVote = 'innocent';
+
+            // Zeit prüfen (Ist der Fall abgelaufen?)
+            const now = new Date();
+            const expiresAt = new Date(activeCase.createdAt.getTime() + CASE_DURATION);
+            
+            if (now > expiresAt) {
+                // FALL ABGELAUFEN -> URTEIL FÄLLEN!
+                const verdict = gCount > iCount ? 'guilty' : 'innocent';
+                
+                // Status ändern
+                await db.collection('courtCases').updateOne(
+                    { _id: activeCase._id },
+                    { $set: { status: 'closed', verdict: verdict, closedAt: now } }
+                );
+
+                // Wenn Schuldig: Strafe verhängen (Beispiel: 10% vom Geld weg)
+                if (verdict === 'guilty') {
+                     await usersCollection.updateOne(
+                        { username: activeCase.accusedName },
+                        { $mul: { balance: 0.9 } } // 10% Strafe
+                    );
+                }
+                
+                // Rekursiv neu laden, um den nächsten Fall zu zeigen (oder null)
+                return res.redirect('/api/court/status'); 
+            }
+
+            caseData = {
+                id: activeCase._id,
+                accused: activeCase.accusedName,
+                accusedAvatar: `https://ui-avatars.com/api/?name=${activeCase.accusedName}&background=333&color=fff`,
+                plaintiff: activeCase.plaintiffName,
+                plaintiffAvatar: `https://ui-avatars.com/api/?name=${activeCase.plaintiffName}&background=111&color=fff`,
+                crime: activeCase.crime,
+                description: activeCase.description,
+                stats: {
+                    guilty: gCount,
+                    innocent: iCount,
+                    total: total,
+                    guiltyPerc: total > 0 ? Math.round((gCount / total) * 100) : 50,
+                    innocentPerc: total > 0 ? Math.round((iCount / total) * 100) : 50
+                },
+                myVote: myVote
+            };
+        }
+
+        // B) Lade die letzten 5 geschlossenen Fälle für das Archiv
+        const archive = await db.collection('courtCases')
+            .find({ status: 'closed' })
+            .sort({ closedAt: -1 })
+            .limit(5)
+            .toArray();
+
+        res.json({ 
+            activeCase: caseData,
+            archive: archive.map(c => ({
+                id: c._id,
+                title: `${c.accusedName} vs. ${c.plaintiffName}`,
+                crime: c.crime,
+                verdict: c.verdict // 'guilty' oder 'innocent'
+            }))
+        });
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Fehler im Gerichtssystem." });
+    }
+});
+
+// 2. POST: Einen neuen Fall einreichen
+app.post('/api/court/file', isAuthenticated, async (req, res) => {
+    try {
+        const { accused, crime, description } = req.body;
+        const userId = new ObjectId(req.session.userId);
+        const user = await usersCollection.findOne({ _id: userId });
+
+        // Gebühr checken
+        if (user.balance < COURT_FEE) {
+            return res.status(400).json({ error: `Anklage kostet $${COURT_FEE}. Du bist zu arm für Gerechtigkeit.` });
+        }
+
+        // Angeklagten suchen
+        const target = await usersCollection.findOne({ username: { $regex: new RegExp(`^${accused}$`, 'i') } });
+        if (!target) return res.status(404).json({ error: "Dieser User existiert nicht." });
+        if (target._id.toString() === userId.toString()) return res.status(400).json({ error: "Du kannst dich nicht selbst verklagen." });
+
+        // Geld abziehen
+        await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -COURT_FEE } });
+
+        // Fall erstellen
+        const newCase = {
+            accusedId: target._id,
+            accusedName: target.username,
+            plaintiffId: userId,
+            plaintiffName: user.username,
+            crime: crime,
+            description: description,
+            status: 'active',
+            createdAt: new Date(),
+            votes_guilty: [],   // Array von UserIDs
+            votes_innocent: []  // Array von UserIDs
+        };
+
+        await db.collection('courtCases').insertOne(newCase);
+
+        res.json({ success: true, message: "Anklage eingereicht. Der Fall liegt nun dem Gericht vor." });
+
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Einreichen." });
+    }
+});
+
+// 3. POST: Abstimmen
+app.post('/api/court/vote', isAuthenticated, async (req, res) => {
+    try {
+        const { caseId, verdict } = req.body; // verdict: 'guilty' oder 'innocent'
+        const userId = new ObjectId(req.session.userId);
+
+        if (!['guilty', 'innocent'].includes(verdict)) return res.status(400).json({ error: "Ungültiges Urteil." });
+
+        const courtCase = await db.collection('courtCases').findOne({ _id: new ObjectId(caseId) });
+        if (!courtCase || courtCase.status !== 'active') return res.status(404).json({ error: "Fall nicht gefunden oder geschlossen." });
+
+        // Checken ob User schon in IRGENDEINEM Array ist
+        const alreadyVoted = 
+            (courtCase.votes_guilty || []).some(id => id.toString() === userId.toString()) ||
+            (courtCase.votes_innocent || []).some(id => id.toString() === userId.toString());
+
+        if (alreadyVoted) return res.status(400).json({ error: "Du hast bereits abgestimmt." });
+
+        // Vote hinzufügen
+        const field = verdict === 'guilty' ? 'votes_guilty' : 'votes_innocent';
+        await db.collection('courtCases').updateOne(
+            { _id: new ObjectId(caseId) },
+            { $push: { [field]: userId } }
+        );
+
+        res.json({ success: true, message: "Stimme gezählt." });
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Wahlbetrug verhindert." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
