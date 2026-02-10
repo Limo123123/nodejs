@@ -8353,19 +8353,19 @@ app.post('/api/yakuza/buy', isAuthenticated, async (req, res) => {
 });
 
 // =========================================================
-// === ⚖️ LIMO COURT SYSTEM ===
+// === ⚖️ LIMO COURT SYSTEM (UPDATED) ===
 // =========================================================
 
-const COURT_FEE = 5000; // Kosten für eine Anklage
-const CASE_DURATION = 24 * 60 * 60 * 1000; // Ein Fall läuft 24 Stunden
+const COURT_FEE = 5000; 
+const BASE_DURATION = 24 * 60 * 60 * 1000; // 24 Stunden Standard
+const MAX_DURATION = 120 * 60 * 60 * 1000; // 5 Tage Maximum (Hard Limit)
+const MIN_VOTES = 2;                       // Mindestens 5 Stimmen für reguläres Ende
 
-// 1. GET: Lade den aktuellen Fall und das Archiv
 app.get('/api/court/status', isAuthenticated, async (req, res) => {
     try {
         const userId = new ObjectId(req.session.userId);
 
-        // A) Suche den ältesten, noch offenen Fall (Active Case)
-        // Wir sortieren nach Erstellungsdatum, damit Fälle der Reihe nach abgearbeitet werden
+        // Suche aktiven Fall
         const activeCase = await db.collection('courtCases').findOne(
             { status: 'active' },
             { sort: { createdAt: 1 } }
@@ -8374,40 +8374,56 @@ app.get('/api/court/status', isAuthenticated, async (req, res) => {
         let caseData = null;
 
         if (activeCase) {
-            // Berechne Statistiken für das Frontend
             const gCount = (activeCase.votes_guilty || []).length;
             const iCount = (activeCase.votes_innocent || []).length;
             const total = gCount + iCount;
             
-            // Prüfen, ob der User schon abgestimmt hat
+            // Check Vote Status User
             let myVote = null;
             if (activeCase.votes_guilty?.map(id => id.toString()).includes(userId.toString())) myVote = 'guilty';
             if (activeCase.votes_innocent?.map(id => id.toString()).includes(userId.toString())) myVote = 'innocent';
 
-            // Zeit prüfen (Ist der Fall abgelaufen?)
+            // --- ZEIT & ENDE LOGIK ---
             const now = new Date();
-            const expiresAt = new Date(activeCase.createdAt.getTime() + CASE_DURATION);
+            const created = new Date(activeCase.createdAt);
             
-            if (now > expiresAt) {
-                // FALL ABGELAUFEN -> URTEIL FÄLLEN!
-                const verdict = gCount > iCount ? 'guilty' : 'innocent';
-                
-                // Status ändern
-                await db.collection('courtCases').updateOne(
-                    { _id: activeCase._id },
-                    { $set: { status: 'closed', verdict: verdict, closedAt: now } }
-                );
+            // Wann wäre das reguläre Ende?
+            let endsAt = new Date(created.getTime() + BASE_DURATION);
+            const hardLimit = new Date(created.getTime() + MAX_DURATION);
+            
+            let isOvertime = false;
 
-                // Wenn Schuldig: Strafe verhängen (Beispiel: 10% vom Geld weg)
-                if (verdict === 'guilty') {
-                     await usersCollection.updateOne(
-                        { username: activeCase.accusedName },
-                        { $mul: { balance: 0.9 } } // 10% Strafe
+            // Ist die reguläre Zeit abgelaufen?
+            if (now > endsAt) {
+                // Haben wir GENUG Stimmen ODER ist das Hard Limit erreicht?
+                if (total >= MIN_VOTES || now > hardLimit) {
+                    
+                    // === FALL SCHLIESSEN ===
+                    const verdict = gCount > iCount ? 'guilty' : 'innocent';
+                    // Bei Gleichstand im Hard Limit: Freispruch (In dubio pro reo)
+                    if(gCount === iCount) verdict = 'innocent'; 
+
+                    await db.collection('courtCases').updateOne(
+                        { _id: activeCase._id },
+                        { $set: { status: 'closed', verdict: verdict, closedAt: now } }
                     );
+
+                    // Strafe vollstrecken
+                    if (verdict === 'guilty') {
+                         await usersCollection.updateOne(
+                            { username: activeCase.accusedName },
+                            { $mul: { balance: 0.9 } } // 10% Strafe
+                        );
+                    }
+                    
+                    return res.redirect('/api/court/status'); // Reload für nächsten Fall
+
+                } else {
+                    // === VERLÄNGERUNG (OVERTIME) ===
+                    // Zu wenig Stimmen -> Wir verlängern bis zum Hard Limit
+                    isOvertime = true;
+                    endsAt = hardLimit; // Neues Ende anzeigen
                 }
-                
-                // Rekursiv neu laden, um den nächsten Fall zu zeigen (oder null)
-                return res.redirect('/api/court/status'); 
             }
 
             caseData = {
@@ -8425,11 +8441,14 @@ app.get('/api/court/status', isAuthenticated, async (req, res) => {
                     guiltyPerc: total > 0 ? Math.round((gCount / total) * 100) : 50,
                     innocentPerc: total > 0 ? Math.round((iCount / total) * 100) : 50
                 },
-                myVote: myVote
+                myVote: myVote,
+                endsAt: endsAt.toISOString(), // Für den Countdown
+                isOvertime: isOvertime,       // Flag für UI Warnung
+                votesNeeded: Math.max(0, MIN_VOTES - total) // Wie viele fehlen noch?
             };
         }
 
-        // B) Lade die letzten 5 geschlossenen Fälle für das Archiv
+        // Archiv laden
         const archive = await db.collection('courtCases')
             .find({ status: 'closed' })
             .sort({ closedAt: -1 })
@@ -8442,7 +8461,7 @@ app.get('/api/court/status', isAuthenticated, async (req, res) => {
                 id: c._id,
                 title: `${c.accusedName} vs. ${c.plaintiffName}`,
                 crime: c.crime,
-                verdict: c.verdict // 'guilty' oder 'innocent'
+                verdict: c.verdict
             }))
         });
 
