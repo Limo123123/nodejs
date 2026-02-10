@@ -8359,7 +8359,7 @@ app.post('/api/yakuza/buy', isAuthenticated, async (req, res) => {
 const COURT_FEE = 5000; 
 const BASE_DURATION = 24 * 60 * 60 * 1000; // 24 Stunden Standard
 const MAX_DURATION = 120 * 60 * 60 * 1000; // 5 Tage Maximum (Hard Limit)
-const MIN_VOTES = 2;                       // Mindestens 5 Stimmen für reguläres Ende
+const MIN_VOTES = 3;                       // Mindestens 3 Stimmen für reguläres Ende
 
 app.get('/api/court/status', isAuthenticated, async (req, res) => {
     try {
