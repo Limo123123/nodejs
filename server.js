@@ -8585,7 +8585,6 @@ app.get('/api/gangs/dashboard', isAuthenticated, async (req, res) => {
 
         // D) Zonen Status (Territory Control)
         const zonesRaw = await db.collection('zones').find({}).toArray();
-		console.log("DEBUG ZONES:", zonesRaw);
         const zonesData = []; // Array für Frontend
         
         for (const [key, val] of Object.entries(ZONES_CONFIG)) {
@@ -9056,6 +9055,49 @@ app.post('/api/gangs/rent-zone', isAuthenticated, async (req, res) => {
         res.status(500).json({ error: "Fehler bei der Landnahme." }); 
     }
 });
+
+const PAYDAY_INTERVAL = 10 * 60 * 1000; // Alle 10 Minuten
+
+// Einnahmen pro Intervall (10 Min)
+const ZONE_INCOME = {
+    'arcade': 50000,   // $50k alle 10 Min ($300k/h)
+    'casino': 150000,  // $150k alle 10 Min ($900k/h)
+    'bank': 500000     // $500k alle 10 Min ($3M/h)
+};
+
+setInterval(async () => {
+    try {
+        console.log("🔄 Payday: Verteile Gebiets-Einnahmen...");
+        const now = new Date();
+
+        // 1. Suche alle aktiven Zonen (wo die Zeit noch nicht abgelaufen ist)
+        const activeZones = await db.collection('zones').find({ expiresAt: { $gt: now } }).toArray();
+
+        if (activeZones.length === 0) return;
+
+        for (const zone of activeZones) {
+            const income = ZONE_INCOME[zone._id] || 10000; // Fallback
+            
+            // 2. Geld an die Gang überweisen
+            await db.collection('gangs').updateOne(
+                { _id: zone.ownerGangId },
+                { 
+                    $inc: { balance: income },
+                    // Optional: Nachricht in den Gang-Chat
+                    $push: { 
+                        privateChat: { 
+                            sender: "SYSTEM", 
+                            msg: `💰 Einnahmen aus ${zone.ownerName}: +$${income.toLocaleString()}`, 
+                            time: new Date() 
+                        } 
+                    }
+                }
+            );
+        }
+    } catch (e) {
+        console.error("Payday Fehler:", e);
+    }
+}, PAYDAY_INTERVAL);
 
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
