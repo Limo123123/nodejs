@@ -8553,24 +8553,29 @@ app.post('/api/court/vote', isAuthenticated, async (req, res) => {
 
 const GANG_CREATE_COST = 5000000; // $5 Mio.
 const MAX_MEMBERS = 10; // Erstmal klein anfangen
+const ZONES_CONFIG = {
+    'arcade': { name: "Pixel Arcade", cost: 5000000, img: "🕹️" },
+    'casino': { name: "Royal Casino", cost: 15000000, img: "🎰" },
+    'bank': { name: "Central Bank", cost: 50000000, img: "🏦" }
+};
 
-// 1. GET: Gang Dashboard Daten laden (MIT USER BALANCE FIX)
+// 1. GET: Gang Dashboard Daten laden (KOMPLETT)
 app.get('/api/gangs/dashboard', isAuthenticated, async (req, res) => {
     try {
         const userId = new ObjectId(req.session.userId);
         const user = await usersCollection.findOne({ _id: userId });
 
-        // A) Ist der User schon in einer Gang?
+        // A) User & Gang Status
         const myGang = await db.collection('gangs').findOne({ members: userId });
 
-        // B) Lade den öffentlichen Chat (letzte 50 Nachrichten)
+        // B) Public Chat (Global)
         const publicChat = await db.collection('publicGangChat')
             .find({})
             .sort({ createdAt: -1 })
             .limit(50)
             .toArray();
 
-        // C) Lade Top 10 Gangs für die Rangliste
+        // C) Top Gangs (für Rangliste)
         const topGangs = await db.collection('gangs')
             .find({})
             .project({ name: 1, tag: 1, balance: 1, memberCount: { $size: "$members" } })
@@ -8578,41 +8583,59 @@ app.get('/api/gangs/dashboard', isAuthenticated, async (req, res) => {
             .limit(10)
             .toArray();
 
+        // D) Zonen Status (Territory Control)
+        const zonesRaw = await db.collection('zones').find({}).toArray();
+        const zonesData = []; // Array für Frontend
+        
+        for (const [key, val] of Object.entries(ZONES_CONFIG)) {
+            const dbZone = zonesRaw.find(z => z._id === key);
+            // Ist die Zone aktuell besetzt? (Zeit noch nicht abgelaufen)
+            const isTaken = dbZone && new Date(dbZone.expiresAt) > new Date();
+            
+            zonesData.push({
+                id: key,
+                name: val.name,
+                cost: val.cost,
+                icon: val.img,
+                isTaken: isTaken,
+                ownerTag: isTaken ? dbZone.ownerTag : null,
+                ownerName: isTaken ? dbZone.ownerName : null,
+                expiresAt: isTaken ? dbZone.expiresAt : null
+            });
+        }
+
+        // --- ANTWORT BAUEN ---
+
+        const responseData = {
+            inGang: !!myGang, // true/false
+            userBalance: user.balance, // WICHTIG: Dein Geld
+            createCost: 5000000,
+            publicChat: publicChat.reverse(),
+            topGangs: topGangs,
+            zones: zonesData // Die Gebiete
+        };
+
         if (myGang) {
-            // --- USER IST IN EINER GANG ---
+            // Wenn in Gang: Details laden
             const memberDetails = await usersCollection.find(
                 { _id: { $in: myGang.members } },
                 { projection: { username: 1, balance: 1, _id: 1 } }
             ).toArray();
 
-            const privateChat = myGang.privateChat || [];
-
-            return res.json({
-                inGang: true,
-                userBalance: user.balance, // <--- WICHTIG: Dein Geld mitsenden!
-                gang: {
-                    id: myGang._id,
-                    name: myGang.name,
-                    tag: myGang.tag,
-                    balance: myGang.balance,
-                    isLeader: myGang.leaderId.toString() === userId.toString(),
-                    members: memberDetails,
-                    privateChat: privateChat,
-                    upgrades: myGang.upgrades || {} // <--- Auch wichtig für den Shop
-                },
-                publicChat: publicChat.reverse(),
-                topGangs: topGangs
-            });
-        } else {
-            // --- USER IST KEIN GANG-MITGLIED ---
-            return res.json({
-                inGang: false,
-                userBalance: user.balance, // <--- WICHTIG: Auch hier dein Geld mitsenden!
-                createCost: GANG_CREATE_COST,
-                publicChat: publicChat.reverse(),
-                topGangs: topGangs
-            });
+            responseData.gang = {
+                id: myGang._id,
+                name: myGang.name,
+                tag: myGang.tag,
+                balance: myGang.balance,
+                isLeader: myGang.leaderId.toString() === userId.toString(),
+                members: memberDetails,
+                privateChat: myGang.privateChat || [],
+                upgrades: myGang.upgrades || {} // Für den Shop ("Besitz")
+            };
         }
+
+        res.json(responseData);
+
     } catch (e) {
         console.error(e);
         res.status(500).json({ error: "Gang Server Fehler." });
@@ -8664,7 +8687,6 @@ app.post('/api/gangs/create', isAuthenticated, async (req, res) => {
 });
 
 // 3. POST: Gang beitreten (Einfachste Version: Offen für alle)
-// Später könnten wir Einladungen hinzufügen
 app.post('/api/gangs/join', isAuthenticated, async (req, res) => {
     try {
         const { gangId } = req.body;
@@ -8971,6 +8993,66 @@ app.post('/api/gangs/attack', isAuthenticated, async (req, res) => {
     } catch (e) { 
         console.error(e);
         res.status(500).json({ error: "Kriegs-Server offline." }); 
+    }
+});
+
+app.post('/api/gangs/rent-zone', isAuthenticated, async (req, res) => {
+    try {
+        const { zoneId } = req.body;
+        const userId = new ObjectId(req.session.userId);
+        
+        if (!ZONES_CONFIG[zoneId]) return res.status(400).json({ error: "Zone existiert nicht." });
+        const cost = ZONES_CONFIG[zoneId].cost;
+
+        const myGang = await db.collection('gangs').findOne({ leaderId: userId });
+        if (!myGang) return res.status(403).json({ error: "Nur der Leader kann Gebiete mieten." });
+
+        // Check Geld
+        if (myGang.balance < cost) return res.status(400).json({ error: "Kriegskasse zu leer." });
+
+        // Check Status der Zone
+        const currentZone = await db.collection('zones').findOne({ _id: zoneId });
+        const now = new Date();
+
+        // Ist sie noch besetzt?
+        if (currentZone && currentZone.expiresAt > now) {
+            // Optional: Wenn es die EIGENE Gang ist, verlängern wir einfach?
+            if (currentZone.ownerGangId.toString() === myGang._id.toString()) {
+                // Verlängerung erlauben
+            } else {
+                const left = Math.ceil((currentZone.expiresAt - now) / 60000);
+                return res.status(400).json({ error: `Gebiet ist besetzt von [${currentZone.ownerTag}]! Frei in ${left} Min.` });
+            }
+        }
+
+        // KAUFEN / MIETEN
+        await db.collection('gangs').updateOne({ _id: myGang._id }, { $inc: { balance: -cost } });
+        
+        const expires = new Date(now.getTime() + (24 * 60 * 60 * 1000)); // +24h
+
+        await db.collection('zones').updateOne(
+            { _id: zoneId },
+            { 
+                $set: { 
+                    ownerGangId: myGang._id, 
+                    ownerName: myGang.name,
+                    ownerTag: myGang.tag,
+                    rentedAt: now,
+                    expiresAt: expires
+                } 
+            },
+            { upsert: true }
+        );
+
+        // Chat & Log
+        const msg = `Wir haben ${ZONES_CONFIG[zoneId].name} für 24h eingenommen!`;
+        await db.collection('gangs').updateOne({ _id: myGang._id }, { $push: { privateChat: { sender: "SYSTEM", msg: msg, time: new Date() } } });
+
+        res.json({ success: true, message: `Gebiet gesichert! Kosten: $${cost.toLocaleString()}` });
+
+    } catch (e) { 
+        console.error(e);
+        res.status(500).json({ error: "Fehler bei der Landnahme." }); 
     }
 });
 
