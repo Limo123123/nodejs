@@ -8554,7 +8554,7 @@ app.post('/api/court/vote', isAuthenticated, async (req, res) => {
 const GANG_CREATE_COST = 5000000; // $5 Mio.
 const MAX_MEMBERS = 10; // Erstmal klein anfangen
 
-// 1. GET: Gang Dashboard Daten laden
+// 1. GET: Gang Dashboard Daten laden (MIT USER BALANCE FIX)
 app.get('/api/gangs/dashboard', isAuthenticated, async (req, res) => {
     try {
         const userId = new ObjectId(req.session.userId);
@@ -8580,35 +8580,34 @@ app.get('/api/gangs/dashboard', isAuthenticated, async (req, res) => {
 
         if (myGang) {
             // --- USER IST IN EINER GANG ---
-            // Lade Namen der Mitglieder
             const memberDetails = await usersCollection.find(
                 { _id: { $in: myGang.members } },
                 { projection: { username: 1, balance: 1, _id: 1 } }
             ).toArray();
 
-            // Private Chat laden
             const privateChat = myGang.privateChat || [];
 
             return res.json({
                 inGang: true,
+                userBalance: user.balance, // <--- WICHTIG: Dein Geld mitsenden!
                 gang: {
                     id: myGang._id,
                     name: myGang.name,
                     tag: myGang.tag,
                     balance: myGang.balance,
-					userBalance: user.balance,
                     isLeader: myGang.leaderId.toString() === userId.toString(),
                     members: memberDetails,
-                    privateChat: privateChat
+                    privateChat: privateChat,
+                    upgrades: myGang.upgrades || {} // <--- Auch wichtig für den Shop
                 },
-                publicChat: publicChat.reverse(), // Damit neueste unten sind im Frontend
+                publicChat: publicChat.reverse(),
                 topGangs: topGangs
             });
         } else {
             // --- USER IST KEIN GANG-MITGLIED ---
             return res.json({
                 inGang: false,
-				userBalance: user.balance,
+                userBalance: user.balance, // <--- WICHTIG: Auch hier dein Geld mitsenden!
                 createCost: GANG_CREATE_COST,
                 publicChat: publicChat.reverse(),
                 topGangs: topGangs
