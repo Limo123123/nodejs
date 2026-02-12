@@ -8596,6 +8596,7 @@ app.get('/api/gangs/dashboard', isAuthenticated, async (req, res) => {
                     name: myGang.name,
                     tag: myGang.tag,
                     balance: myGang.balance,
+					userBalance: user.balance,
                     isLeader: myGang.leaderId.toString() === userId.toString(),
                     members: memberDetails,
                     privateChat: privateChat
@@ -8607,6 +8608,7 @@ app.get('/api/gangs/dashboard', isAuthenticated, async (req, res) => {
             // --- USER IST KEIN GANG-MITGLIED ---
             return res.json({
                 inGang: false,
+				userBalance: user.balance,
                 createCost: GANG_CREATE_COST,
                 publicChat: publicChat.reverse(),
                 topGangs: topGangs
@@ -8798,6 +8800,178 @@ app.post('/api/gangs/leave', isAuthenticated, async (req, res) => {
 
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Verlassen." });
+    }
+});
+
+// Leader: Mitglied kicken
+app.post('/api/gangs/kick', isAuthenticated, async (req, res) => {
+    try {
+        const { targetId } = req.body;
+        const userId = new ObjectId(req.session.userId);
+        
+        const myGang = await db.collection('gangs').findOne({ leaderId: userId });
+        if (!myGang) return res.status(403).json({ error: "Nur der Leader kann kicken." });
+        
+        if (targetId === userId.toString()) return res.status(400).json({ error: "Du kannst dich nicht selbst kicken." });
+
+        // Entfernen
+        await db.collection('gangs').updateOne(
+            { _id: myGang._id },
+            { $pull: { members: new ObjectId(targetId) } }
+        );
+
+        res.json({ success: true, message: "Mitglied entfernt." });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// Leader: Leadership übertragen
+app.post('/api/gangs/promote', isAuthenticated, async (req, res) => {
+    try {
+        const { targetId } = req.body;
+        const userId = new ObjectId(req.session.userId);
+
+        const myGang = await db.collection('gangs').findOne({ leaderId: userId });
+        if (!myGang) return res.status(403).json({ error: "Nur der Leader kann befördern." });
+
+        // Check ob Target in der Gang ist
+        if (!myGang.members.find(m => m.toString() === targetId)) return res.status(400).json({ error: "User nicht in der Gang." });
+
+        // Update Leader
+        await db.collection('gangs').updateOne(
+            { _id: myGang._id },
+            { $set: { leaderId: new ObjectId(targetId) } }
+        );
+
+        res.json({ success: true, message: "Führung übertragen." });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// --- B) IMPERIUM (SHOP) ---
+
+const UPGRADES = {
+    'bunker': { name: "Bunker", cost: 10000000, desc: "Schützt 50% des Geldes bei Niederlagen." },
+    'lawyer': { name: "Anwalt", cost: 25000000, desc: "Erhöht Verteidigungschance um 20%." },
+    'weapons': { name: "Waffenlager", cost: 50000000, desc: "Erhöht Angriffskraft massiv." }
+};
+
+app.post('/api/gangs/upgrade', isAuthenticated, async (req, res) => {
+    try {
+        const { type } = req.body; // 'bunker', 'lawyer', 'weapons'
+        const userId = new ObjectId(req.session.userId);
+        const upgrade = UPGRADES[type];
+
+        if (!upgrade) return res.status(400).json({ error: "Upgrade existiert nicht." });
+
+        const myGang = await db.collection('gangs').findOne({ leaderId: userId });
+        if (!myGang) return res.status(403).json({ error: "Nur der Leader kauft ein." });
+
+        // Check Geld
+        if (myGang.balance < upgrade.cost) return res.status(400).json({ error: "Gang-Kasse zu leer." });
+
+        // Check ob schon gekauft (wir speichern Upgrades als Array oder Object)
+        if (myGang.upgrades && myGang.upgrades[type]) return res.status(400).json({ error: "Schon im Besitz." });
+
+        // Kaufen
+        await db.collection('gangs').updateOne(
+            { _id: myGang._id },
+            { 
+                $inc: { balance: -upgrade.cost },
+                $set: { [`upgrades.${type}`]: true }
+            }
+        );
+
+        // Chat Nachricht
+        await db.collection('gangs').updateOne({ _id: myGang._id }, { 
+            $push: { privateChat: { sender: "SYSTEM", msg: `${upgrade.name} wurde gekauft!`, time: new Date() } } 
+        });
+
+        res.json({ success: true, message: `${upgrade.name} installiert.` });
+
+    } catch (e) { res.status(500).json({ error: "Kauf gescheitert." }); }
+});
+
+// --- C) KRIEG (ATTACK) ---
+
+app.post('/api/gangs/attack', isAuthenticated, async (req, res) => {
+    try {
+        const { targetGangId } = req.body;
+        const userId = new ObjectId(req.session.userId);
+
+        const myGang = await db.collection('gangs').findOne({ members: userId }); // Jeder Member darf angreifen? Oder nur Leader? Hier: Jeder.
+        if (!myGang) return res.status(400).json({ error: "Du hast keine Gang." });
+
+        const enemyGang = await db.collection('gangs').findOne({ _id: new ObjectId(targetGangId) });
+        if (!enemyGang) return res.status(404).json({ error: "Gegner nicht gefunden." });
+
+        if (myGang._id.toString() === enemyGang._id.toString()) return res.status(400).json({ error: "Friendly Fire ist aus." });
+
+        // Cooldown Check (1 Stunde pro Gang)
+        const now = new Date();
+        if (myGang.lastAttack && (now - new Date(myGang.lastAttack)) < 3600000) {
+            const minutesLeft = Math.ceil((3600000 - (now - new Date(myGang.lastAttack))) / 60000);
+            return res.status(400).json({ error: `Waffen müssen abkühlen: ${minutesLeft} Min.` });
+        }
+
+        // BERECHNUNG DES KAMPFES
+        // Basis Chance 50%
+        let winChance = 0.5;
+
+        // +5% pro Member mehr als der Gegner
+        const memberDiff = myGang.members.length - enemyGang.members.length;
+        winChance += (memberDiff * 0.05);
+
+        // Upgrades einbeziehen
+        if (myGang.upgrades?.weapons) winChance += 0.2; // +20% durch Waffen
+        if (enemyGang.upgrades?.lawyer) winChance -= 0.2; // -20% durch gegnerischen Anwalt
+
+        // Cap (Min 10%, Max 90%)
+        if (winChance < 0.1) winChance = 0.1;
+        if (winChance > 0.9) winChance = 0.9;
+
+        const roll = Math.random();
+        const isWin = roll < winChance;
+
+        // Resultat
+        if (isWin) {
+            // Beute berechnen (5% vom Gegner-Geld)
+            let loot = Math.floor(enemyGang.balance * 0.05);
+            
+            // Bunker Schutz?
+            if (enemyGang.upgrades?.bunker) {
+                loot = Math.floor(loot * 0.5); // Bunker halbiert Verlust
+            }
+
+            if (loot < 100) loot = 0; // Kleinkram lohnt nicht
+
+            // Transaktion
+            await db.collection('gangs').updateOne({ _id: enemyGang._id }, { $inc: { balance: -loot } });
+            await db.collection('gangs').updateOne({ _id: myGang._id }, { $inc: { balance: loot }, $set: { lastAttack: new Date() } });
+
+            // Nachrichten
+            const msgWin = `SIEG gegen [${enemyGang.tag}]! Beute: $${loot.toLocaleString()}`;
+            const msgLoss = `ALARM: [${myGang.tag}] hat uns angegriffen und $${loot.toLocaleString()} gestohlen!`;
+
+            await db.collection('gangs').updateOne({ _id: myGang._id }, { $push: { privateChat: { sender: "WAR-BOT", msg: msgWin, time: new Date() } } });
+            await db.collection('gangs').updateOne({ _id: enemyGang._id }, { $push: { privateChat: { sender: "WAR-BOT", msg: msgLoss, time: new Date() } } });
+
+            res.json({ success: true, result: "WIN", loot: loot, message: `Sieg! $${loot.toLocaleString()} erbeutet.` });
+
+        } else {
+            // Niederlage (Keine Strafe, nur Cooldown und Schande)
+            await db.collection('gangs').updateOne({ _id: myGang._id }, { $set: { lastAttack: new Date() } });
+
+            const msgFail = `NIEDERLAGE beim Angriff auf [${enemyGang.tag}]. Rückzug!`;
+            const msgDefend = `ANGRIFF ABGEWEHRT: [${myGang.tag}] hat es versucht und versagt.`;
+
+            await db.collection('gangs').updateOne({ _id: myGang._id }, { $push: { privateChat: { sender: "WAR-BOT", msg: msgFail, time: new Date() } } });
+            await db.collection('gangs').updateOne({ _id: enemyGang._id }, { $push: { privateChat: { sender: "WAR-BOT", msg: msgDefend, time: new Date() } } });
+
+            res.json({ success: true, result: "LOSE", message: "Angriff gescheitert. Der Gegner war zu stark." });
+        }
+
+    } catch (e) { 
+        console.error(e);
+        res.status(500).json({ error: "Kriegs-Server offline." }); 
     }
 });
 
