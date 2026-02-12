@@ -8547,6 +8547,260 @@ app.post('/api/court/vote', isAuthenticated, async (req, res) => {
     }
 });
 
+// =========================================================
+// === 🏴‍☠️ GANG SYSTEM BACKEND ===
+// =========================================================
+
+const GANG_CREATE_COST = 5000000; // $5 Mio.
+const MAX_MEMBERS = 10; // Erstmal klein anfangen
+
+// 1. GET: Gang Dashboard Daten laden
+app.get('/api/gangs/dashboard', isAuthenticated, async (req, res) => {
+    try {
+        const userId = new ObjectId(req.session.userId);
+        const user = await usersCollection.findOne({ _id: userId });
+
+        // A) Ist der User schon in einer Gang?
+        const myGang = await db.collection('gangs').findOne({ members: userId });
+
+        // B) Lade den öffentlichen Chat (letzte 50 Nachrichten)
+        const publicChat = await db.collection('publicGangChat')
+            .find({})
+            .sort({ createdAt: -1 })
+            .limit(50)
+            .toArray();
+
+        // C) Lade Top 10 Gangs für die Rangliste
+        const topGangs = await db.collection('gangs')
+            .find({})
+            .project({ name: 1, tag: 1, balance: 1, memberCount: { $size: "$members" } })
+            .sort({ balance: -1 })
+            .limit(10)
+            .toArray();
+
+        if (myGang) {
+            // --- USER IST IN EINER GANG ---
+            // Lade Namen der Mitglieder
+            const memberDetails = await usersCollection.find(
+                { _id: { $in: myGang.members } },
+                { projection: { username: 1, balance: 1, _id: 1 } }
+            ).toArray();
+
+            // Private Chat laden
+            const privateChat = myGang.privateChat || [];
+
+            return res.json({
+                inGang: true,
+                gang: {
+                    id: myGang._id,
+                    name: myGang.name,
+                    tag: myGang.tag,
+                    balance: myGang.balance,
+                    isLeader: myGang.leaderId.toString() === userId.toString(),
+                    members: memberDetails,
+                    privateChat: privateChat
+                },
+                publicChat: publicChat.reverse(), // Damit neueste unten sind im Frontend
+                topGangs: topGangs
+            });
+        } else {
+            // --- USER IST KEIN GANG-MITGLIED ---
+            return res.json({
+                inGang: false,
+                createCost: GANG_CREATE_COST,
+                publicChat: publicChat.reverse(),
+                topGangs: topGangs
+            });
+        }
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Gang Server Fehler." });
+    }
+});
+
+// 2. POST: Neue Gang gründen
+app.post('/api/gangs/create', isAuthenticated, async (req, res) => {
+    try {
+        const { name, tag } = req.body;
+        const userId = new ObjectId(req.session.userId);
+        const user = await usersCollection.findOne({ _id: userId });
+
+        // Validierung
+        if (!name || name.length < 3 || name.length > 20) return res.status(400).json({ error: "Name ungültig (3-20 Zeichen)." });
+        if (!tag || tag.length < 2 || tag.length > 4) return res.status(400).json({ error: "Tag ungültig (2-4 Zeichen)." });
+        
+        // Hat er genug Geld?
+        if (user.balance < GANG_CREATE_COST) return res.status(400).json({ error: `Du brauchst $${GANG_CREATE_COST.toLocaleString()}!` });
+
+        // Ist er schon in einer Gang?
+        const existingMember = await db.collection('gangs').findOne({ members: userId });
+        if (existingMember) return res.status(400).json({ error: "Du bist schon in einer Gang! Erst verlassen." });
+
+        // Gibt es den Namen schon?
+        const nameTaken = await db.collection('gangs').findOne({ $or: [{ name: name }, { tag: tag }] });
+        if (nameTaken) return res.status(400).json({ error: "Name oder Tag schon vergeben." });
+
+        // ALLES OK -> GANG ERSTELLEN
+        await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -GANG_CREATE_COST } });
+
+        const newGang = {
+            name: name,
+            tag: tag.toUpperCase(),
+            leaderId: userId,
+            members: [userId],
+            balance: 0,
+            privateChat: [],
+            createdAt: new Date()
+        };
+
+        await db.collection('gangs').insertOne(newGang);
+
+        res.json({ success: true, message: `Gang '${name}' gegründet!` });
+
+    } catch (e) {
+        res.status(500).json({ error: "Gründung fehlgeschlagen." });
+    }
+});
+
+// 3. POST: Gang beitreten (Einfachste Version: Offen für alle)
+// Später könnten wir Einladungen hinzufügen
+app.post('/api/gangs/join', isAuthenticated, async (req, res) => {
+    try {
+        const { gangId } = req.body;
+        const userId = new ObjectId(req.session.userId);
+
+        const gang = await db.collection('gangs').findOne({ _id: new ObjectId(gangId) });
+        if (!gang) return res.status(404).json({ error: "Gang nicht gefunden." });
+
+        // Checks
+        const alreadyInGang = await db.collection('gangs').findOne({ members: userId });
+        if (alreadyInGang) return res.status(400).json({ error: "Du bist schon in einer Gang." });
+        
+        if (gang.members.length >= MAX_MEMBERS) return res.status(400).json({ error: "Gang ist voll." });
+
+        // Join
+        await db.collection('gangs').updateOne(
+            { _id: new ObjectId(gangId) },
+            { $push: { members: userId } }
+        );
+
+        // Systemnachricht im Gang Chat
+        const sysMsg = { sender: "SYSTEM", msg: "Ein neuer Rekrut ist beigetreten.", time: new Date() };
+        await db.collection('gangs').updateOne({ _id: new ObjectId(gangId) }, { $push: { privateChat: sysMsg } });
+
+        res.json({ success: true, message: `Willkommen bei ${gang.name}!` });
+
+    } catch (e) {
+        res.status(500).json({ error: "Beitritt fehlgeschlagen." });
+    }
+});
+
+// 4. POST: Geld einzahlen (Die "Bank" Funktion)
+app.post('/api/gangs/deposit', isAuthenticated, async (req, res) => {
+    try {
+        const { amount } = req.body;
+        const val = parseInt(amount);
+        if (isNaN(val) || val <= 0) return res.status(400).json({ error: "Ungültiger Betrag." });
+
+        const userId = new ObjectId(req.session.userId);
+        const user = await usersCollection.findOne({ _id: userId });
+
+        if (user.balance < val) return res.status(400).json({ error: "Zu wenig Geld." });
+
+        // Ist User in einer Gang?
+        const myGang = await db.collection('gangs').findOne({ members: userId });
+        if (!myGang) return res.status(400).json({ error: "Keine Gang." });
+
+        // Transaktion
+        await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -val } });
+        await db.collection('gangs').updateOne(
+            { _id: myGang._id }, 
+            { $inc: { balance: val } }
+        );
+
+        res.json({ success: true, newBalance: user.balance - val, gangBalance: myGang.balance + val });
+
+    } catch (e) {
+        res.status(500).json({ error: "Einzahlung fehlgeschlagen." });
+    }
+});
+
+// 5. POST: Chatten (Öffentlich & Privat)
+app.post('/api/gangs/chat', isAuthenticated, async (req, res) => {
+    try {
+        const { message, type } = req.body; // type: 'public' oder 'private'
+        if (!message || message.trim().length === 0) return res.status(400).json({ error: "Leere Nachricht." });
+
+        const userId = new ObjectId(req.session.userId);
+        const user = await usersCollection.findOne({ _id: userId });
+        const myGang = await db.collection('gangs').findOne({ members: userId });
+
+        const msgObj = {
+            sender: user.username,
+            tag: myGang ? myGang.tag : "", // Tag nur anzeigen, wenn in Gang
+            msg: message.substring(0, 200), // Max Länge
+            time: new Date()
+        };
+
+        if (type === 'private') {
+            if (!myGang) return res.status(400).json({ error: "Du hast keine Gang für privaten Chat." });
+            
+            // In das Gang-Dokument pushen (Array Limiting auf 50 Nachrichten)
+            await db.collection('gangs').updateOne(
+                { _id: myGang._id },
+                { 
+                    $push: { 
+                        privateChat: { 
+                            $each: [msgObj], 
+                            $slice: -50 // Nur die letzten 50 behalten
+                        } 
+                    } 
+                }
+            );
+
+        } else {
+            // Öffentlich: Jeder darf schreiben (auch ohne Gang, für Trash Talk)
+            await db.collection('publicGangChat').insertOne(msgObj);
+            
+            // Optional: Alte Nachrichten löschen (Cleanup)
+            // await db.collection('publicGangChat').deleteMany({ createdAt: { $lt: ... } }) 
+        }
+
+        res.json({ success: true });
+
+    } catch (e) {
+        res.status(500).json({ error: "Chat Fehler." });
+    }
+});
+
+// 6. POST: Gang verlassen
+app.post('/api/gangs/leave', isAuthenticated, async (req, res) => {
+    try {
+        const userId = new ObjectId(req.session.userId);
+        const myGang = await db.collection('gangs').findOne({ members: userId });
+
+        if (!myGang) return res.status(400).json({ error: "Du bist in keiner Gang." });
+
+        // Wenn Leader geht: Gang auflösen? Oder Leader weitergeben?
+        // Einfache Version: Gang wird gelöscht, wenn Leader geht (Geld geht verloren!) -> Hardcore!
+        if (myGang.leaderId.toString() === userId.toString()) {
+            await db.collection('gangs').deleteOne({ _id: myGang._id });
+            return res.json({ success: true, message: "Gang aufgelöst (du warst der Leader)." });
+        }
+
+        // Normales Mitglied geht
+        await db.collection('gangs').updateOne(
+            { _id: myGang._id },
+            { $pull: { members: userId } }
+        );
+
+        res.json({ success: true, message: "Gang verlassen." });
+
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Verlassen." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
