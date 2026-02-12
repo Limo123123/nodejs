@@ -8585,6 +8585,7 @@ app.get('/api/gangs/dashboard', isAuthenticated, async (req, res) => {
 
         // D) Zonen Status (Territory Control)
         const zonesRaw = await db.collection('zones').find({}).toArray();
+		console.log("DEBUG ZONES:", zonesRaw);
         const zonesData = []; // Array für Frontend
         
         for (const [key, val] of Object.entries(ZONES_CONFIG)) {
