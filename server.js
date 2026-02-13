@@ -5672,7 +5672,7 @@ const GITHUB_CACHE_DURATION = 60 * 60 * 1000; // 1 Stunde in Millisekunden
 app.get('/api/system/stats', async (req, res) => {
     
     const GITHUB_USER = "limo123123"; 
-    const FRONTEND_REPOS = ["limazon", "teacher-grades", "whatslim"]; 
+    const FRONTEND_REPOS = ["limazon"]; 
 
     try {
         // 1. DATENBANK STATS (Echtzeit)
