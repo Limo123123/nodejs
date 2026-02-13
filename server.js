@@ -4188,31 +4188,40 @@ app.get('/api/stonks/portfolio', isAuthenticated, async (req, res) => {
     }
 });
 
-// 1. Aktien mit Historie abrufen (Das fehlte für die Graphen!)
+// GET /api/stocks -> Mit Suche und Limitierung für 4000+ Items
 app.get('/api/stocks', async (req, res) => {
     try {
-        // Wir holen nur Produkte, die KEINE Token-Karten sind
+        const { search, limit } = req.query;
+        
+        // 1. Filter bauen
+        const query = { isTokenCard: { $ne: true } };
+        
+        // Wenn gesucht wird:
+        if (search && search.trim().length > 0) {
+            query.name = { $regex: search.trim(), $options: 'i' }; // Case-insensitive Suche
+        }
+
+        // 2. Limit setzen (Standard: 50 Items, um den Browser nicht zu töten)
+        const maxItems = parseInt(limit) || 50;
+
         const stocks = await productsCollection.find(
-            { isTokenCard: { $ne: true } },
+            query,
             { 
                 projection: { 
-                    id: 1, 
-                    name: 1, 
-                    currentPrice: 1, 
-                    price: 1, 
-                    basePrice: 1, 
-                    // WICHTIG: Wir holen hier die History für die Charts!
-                    priceHistory: { $slice: -20 }, 
+                    id: 1, name: 1, currentPrice: 1, price: 1, basePrice: 1, 
+                    priceHistory: { $slice: -20 }, // Nur letzte 20 Punkte
                     image_url: 1 
                 } 
             }
-        ).toArray();
+        )
+        .sort({ id: 1 }) // Oder nach Volatilität sortieren?
+        .limit(maxItems)
+        .toArray();
 
-        // Formatierung für das Frontend
+        // 3. Formatieren
         const formatted = stocks.map(s => {
             const price = s.currentPrice || parseFloat((s.price || "0").replace(/[^0-9.]/g, '')) || 0;
             
-            // Berechnung der Änderung für die Anzeige (Grün/Rot)
             let change = 0;
             if (s.priceHistory && s.priceHistory.length >= 2) {
                 const last = s.priceHistory[s.priceHistory.length - 1].price;
@@ -4223,10 +4232,10 @@ app.get('/api/stocks', async (req, res) => {
             return {
                 id: s.id,
                 name: s.name,
-                symbol: s.name.substring(0, 3).toUpperCase(), 
+                symbol: (s.name.substring(0, 3) + String(s.id).slice(-2)).toUpperCase(), 
                 price: price,
                 changePercent: change,
-                history: (s.priceHistory || []).map(h => h.price), // Daten für Chart.js
+                history: (s.priceHistory || []).map(h => h.price),
                 image: s.image_url
             };
         });
@@ -4234,7 +4243,7 @@ app.get('/api/stocks', async (req, res) => {
         res.json(formatted);
     } catch (e) {
         console.error("Stonks Error:", e);
-        res.status(500).json({ error: "Börse ist offline." });
+        res.status(500).json({ error: "Börse ist überlastet." });
     }
 });
 
