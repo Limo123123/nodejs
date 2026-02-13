@@ -3965,7 +3965,7 @@ const checkTradeCooldown = async (user) => {
 // ==========================================
 // 1. AKTIEN KAUFEN (FIX: portfoliosCollection)
 // ==========================================
-app.post('/api/stonks/buy', isAuthenticated, async (req, res) => {
+app.post('/pi/stonks/buy', isAuthenticated, async (req, res) => {
     const { productId, quantity } = req.body;
     const userIdStr = req.session.userId;
     const qty = parseInt(quantity);
@@ -4185,6 +4185,113 @@ app.get('/api/stonks/portfolio', isAuthenticated, async (req, res) => {
     } catch (err) {
         console.error(`${LOG_PREFIX_SERVER} Fehler beim Abrufen des Portfolios für User ${req.session.username}:`, err);
         res.status(500).json({ error: 'Serverfehler beim Laden des Portfolios.' });
+    }
+});
+
+// 1. Aktien mit Historie abrufen (Das fehlte für die Graphen!)
+app.get('/api/stocks', async (req, res) => {
+    try {
+        // Wir holen nur Produkte, die KEINE Token-Karten sind
+        const stocks = await productsCollection.find(
+            { isTokenCard: { $ne: true } },
+            { 
+                projection: { 
+                    id: 1, 
+                    name: 1, 
+                    currentPrice: 1, 
+                    price: 1, 
+                    basePrice: 1, 
+                    // WICHTIG: Wir holen hier die History für die Charts!
+                    priceHistory: { $slice: -20 }, 
+                    image_url: 1 
+                } 
+            }
+        ).toArray();
+
+        // Formatierung für das Frontend
+        const formatted = stocks.map(s => {
+            const price = s.currentPrice || parseFloat((s.price || "0").replace(/[^0-9.]/g, '')) || 0;
+            
+            // Berechnung der Änderung für die Anzeige (Grün/Rot)
+            let change = 0;
+            if (s.priceHistory && s.priceHistory.length >= 2) {
+                const last = s.priceHistory[s.priceHistory.length - 1].price;
+                const prev = s.priceHistory[s.priceHistory.length - 2].price;
+                if (prev > 0) change = ((last - prev) / prev) * 100;
+            }
+
+            return {
+                id: s.id,
+                name: s.name,
+                symbol: s.name.substring(0, 3).toUpperCase(), 
+                price: price,
+                changePercent: change,
+                history: (s.priceHistory || []).map(h => h.price), // Daten für Chart.js
+                image: s.image_url
+            };
+        });
+
+        res.json(formatted);
+    } catch (e) {
+        console.error("Stonks Error:", e);
+        res.status(500).json({ error: "Börse ist offline." });
+    }
+});
+
+// 2. Kombiniertes Portfolio (Alles auf einen Blick)
+app.get('/api/finance/portfolio/full', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        
+        // Aktien laden
+        const stockPortfolio = await portfoliosCollection.aggregate([
+            { $match: { userId: userId, quantityShares: { $gt: 0 } } },
+            { $lookup: { from: productsCollectionName, localField: 'productId', foreignField: 'id', as: 'details' } },
+            { $unwind: "$details" },
+            { $project: {
+                id: "$productId",
+                name: "$details.name",
+                quantity: "$quantityShares",
+                currentPrice: { $ifNull: ["$details.currentPrice", 0] },
+                buyPrice: "$averageBuyPrice",
+                image: "$details.image_url"
+            }}
+        ]).toArray();
+
+        // Krypto laden (Aus dem globalen CRYPTO_MARKET Objekt in server.js)
+        const cryptoWallet = user.cryptoWallet || {};
+        const cryptoList = [];
+        
+        if (typeof CRYPTO_MARKET !== 'undefined') {
+            for (const [symbol, amount] of Object.entries(cryptoWallet)) {
+                if (amount > 0 && CRYPTO_MARKET[symbol]) {
+                    cryptoList.push({
+                        id: symbol,
+                        name: CRYPTO_MARKET[symbol].name,
+                        quantity: amount,
+                        currentPrice: CRYPTO_MARKET[symbol].price,
+                        type: 'crypto'
+                    });
+                }
+            }
+        }
+
+        // Gesamtwert berechnen
+        let totalNetWorth = user.balance || 0;
+        stockPortfolio.forEach(s => { totalNetWorth += s.quantity * s.currentPrice; });
+        cryptoList.forEach(c => { totalNetWorth += c.quantity * c.currentPrice; });
+
+        res.json({
+            balance: user.balance,
+            netWorth: totalNetWorth,
+            stocks: stockPortfolio,
+            crypto: cryptoList
+        });
+
+    } catch (e) {
+        console.error("Portfolio Error:", e);
+        res.status(500).json({ error: "Fehler." });
     }
 });
 
