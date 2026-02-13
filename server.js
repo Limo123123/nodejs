@@ -7895,23 +7895,37 @@ app.post('/api/admin/chat/send', isAuthenticated, isAdmin, async (req, res) => {
 });
 
 // =========================================================
-// === RESTAURANT CONFIG ===
+// === 🍔 RESTAURANT MENU CONFIG ===
 // =========================================================
 const RESTAURANT_MENU = [
-    // Hauptgerichte
-    { id: 'fries', name: 'Pommes Frites', price: 150.00, energy: 10, type: 'main', icon: '🍟', desc: 'Salzig und fettig.' },
-    { id: 'burger', name: 'Cheeseburger', price: 450.00, energy: 40, type: 'main', icon: '🍔', desc: 'Der Klassiker.' },
-    { id: 'pizza', name: 'Pizza Salami', price: 600.00, energy: 60, type: 'main', icon: '🍕', desc: 'Heiß und fettig!' },
-    { id: 'steak', name: 'Gold Steak', price: 250000.00, energy: 100, type: 'main', icon: '🥩', desc: 'Gönn dir was.' },
-    // Getränke
-    { id: 'coke', name: 'Limo Cola', price: 200.00, energy: 15, type: 'drink', icon: '🥤', desc: 'Zucker pur.' },
-    { id: 'coffee', name: 'Schwarzer Kaffee', price: 100.00, energy: 20, type: 'drink', icon: '☕', desc: 'Macht wach.' },
-    // Beilagen (Günstig, wenig Energie, aber lecker)
-    { id: 'dip_ketchup', name: 'Ketchup', price: 20.00, energy: 1, type: 'side', icon: '🍅', desc: 'Rot und süß.' },
-    { id: 'dip_mayo', name: 'Mayo', price: 2.00, energy: 1, type: 'side', icon: '🥚', desc: 'Weiß und cremig.' },
-    { id: 'nuggets', name: '4er Nuggets', price: 120.00, energy: 8, type: 'side', icon: '🍗', desc: 'Knusprig.' },
-    { id: 'onion_rings', name: 'Zwiebelringe', price: 100.00, energy: 6, type: 'side', icon: '🧅', desc: 'Für den Atem.' },
-    { id: 'icecream', name: 'Eisbecher', price: 250.00, energy: 15, type: 'side', icon: '🍨', desc: 'Nachtisch muss sein.' }
+    // --- 🍔 BURGER ---
+    { id: 'bg_basic', name: 'Hamburger', price: 350.00, energy: 30, type: 'burger', icon: '🍔', desc: 'Klassisch mit Gurke.' },
+    { id: 'bg_cheese', name: 'Cheeseburger', price: 450.00, energy: 40, type: 'burger', icon: '🧀', desc: 'Mit doppelt Käse.' },
+    { id: 'bg_bacon', name: 'Bacon BBQ', price: 650.00, energy: 60, type: 'burger', icon: '🥓', desc: 'Rauchig und deftig.' },
+    { id: 'bg_chicken', name: 'Chicken Burger', price: 500.00, energy: 45, type: 'burger', icon: '🐔', desc: 'Knuspriges Hähnchen.' },
+    { id: 'bg_xxl', name: 'Monster Burger', price: 1200.00, energy: 100, type: 'burger', icon: '🦖', desc: '1kg Fleisch. Füllt komplett auf.' },
+
+    // --- 🍕 PIZZA ---
+    { id: 'pz_marg', name: 'Pizza Margherita', price: 550.00, energy: 50, type: 'pizza', icon: '🍅', desc: 'Der italienische Klassiker.' },
+    { id: 'pz_sal', name: 'Pizza Salami', price: 650.00, energy: 60, type: 'pizza', icon: '🍕', desc: 'Heiß und fettig!' },
+    { id: 'pz_diav', name: 'Pizza Diavolo', price: 750.00, energy: 70, type: 'pizza', icon: '🌶️', desc: 'Scharf! Bringt dich zum Schwitzen.' },
+    { id: 'pz_haw', name: 'Pizza Hawaii', price: 600.00, energy: 55, type: 'pizza', icon: '🍍', desc: 'Ananas gehört drauf. Punkt.' },
+
+    // --- 🍟 BEILAGEN ---
+    { id: 'sd_fries', name: 'Pommes Frites', price: 150.00, energy: 15, type: 'side', icon: '🍟', desc: 'Salzig und goldgelb.' },
+    { id: 'sd_nuggets', name: '6er Nuggets', price: 250.00, energy: 20, type: 'side', icon: '🍗', desc: 'Mit Süß-Sauer Sauce.' },
+    { id: 'sd_rings', name: 'Zwiebelringe', price: 200.00, energy: 18, type: 'side', icon: '🧅', desc: 'Frittierte Ringe.' },
+    { id: 'sd_salad', name: 'Ceasar Salad', price: 400.00, energy: 25, type: 'side', icon: '🥗', desc: 'Für das Gewissen.' },
+
+    // --- 🥤 DRINKS ---
+    { id: 'dr_coke', name: 'Limo Cola', price: 120.00, energy: 10, type: 'drink', icon: '🥤', desc: 'Zucker pur.' },
+    { id: 'dr_energy', name: 'Energy Drink', price: 250.00, energy: 35, type: 'drink', icon: '⚡', desc: 'Herzrasen inklusive.' },
+    { id: 'dr_coffee', name: 'Schwarzer Kaffee', price: 100.00, energy: 15, type: 'drink', icon: '☕', desc: 'Macht wach.' },
+    { id: 'dr_water', name: 'Wasser', price: 50.00, energy: 5, type: 'drink', icon: '💧', desc: 'Langweilig aber gesund.' },
+
+    // --- 💎 LUXUS ---
+    { id: 'lux_steak', name: 'Gold Steak', price: 250000.00, energy: 100, type: 'luxury', icon: '🥩', desc: 'Mit 24k Blattgold überzogen.' },
+    { id: 'lux_caviar', name: 'Kaviar Dose', price: 50000.00, energy: 100, type: 'luxury', icon: '🐟', desc: 'Schmeckt nach Geld.' }
 ];
 
 // =========================================================
