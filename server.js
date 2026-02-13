@@ -9228,10 +9228,10 @@ setInterval(async () => {
 
 // 1. Die Coins Konfiguration (Startwerte)
 let CRYPTO_MARKET = {
-    'limo': { name: "Limo Coin", symbol: "LIMO", price: 1.00, volatility: 0.02 }, // Stabil
-    'bitcoin': { name: "Bit-Limo", symbol: "BTC", price: 45000.00, volatility: 0.05 }, // Teuer
-    'doge': { name: "Doge Limo", symbol: "DOGE", price: 0.15, volatility: 0.10 }, // Meme / Schwankt stark
-    'void': { name: "Dark Void", symbol: "VOID", price: 50.00, volatility: 0.25 } // Illegal / Sehr Riskant
+    'limo': { name: "Limo Coin", symbol: "LIMO", price: 1.00, volatility: 0.02, history: [] }, 
+    'bitcoin': { name: "Bit-Limo", symbol: "BTC", price: 45000.00, volatility: 0.05, history: [] }, 
+    'doge': { name: "Doge Limo", symbol: "DOGE", price: 0.15, volatility: 0.10, history: [] }, 
+    'void': { name: "Dark Void", symbol: "VOID", price: 50.00, volatility: 0.25, history: [] } 
 };
 
 // 2. Markt-Simulation (Preise ändern sich alle 30 Sekunden)
@@ -9246,6 +9246,15 @@ setInterval(() => {
         
         CRYPTO_MARKET[key].price = parseFloat(newPrice.toFixed(2));
         CRYPTO_MARKET[key].lastChange = parseFloat((change * 100).toFixed(2)); // Für Anzeige (+5%)
+
+        // NEU: Historie speichern für die Charts!
+        if (!CRYPTO_MARKET[key].history) CRYPTO_MARKET[key].history = [];
+        CRYPTO_MARKET[key].history.push(newPrice);
+        
+        // Nur die letzten 20 Punkte behalten (spart Speicher)
+        if (CRYPTO_MARKET[key].history.length > 20) {
+            CRYPTO_MARKET[key].history.shift();
+        }
     }
 }, 30000);
 
