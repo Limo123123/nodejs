@@ -9226,12 +9226,12 @@ setInterval(async () => {
 // === 📈 LIMO EXCHANGE (CRYPTO & FINANCE) ===
 // =========================================================
 
-// 1. Die Coins Konfiguration (Startwerte)
+// 1. Die Coins Konfiguration
 let CRYPTO_MARKET = {
-    'limo': { name: "Limo Coin", symbol: "LIMO", price: 1.00, volatility: 0.02, history: [] }, 
-    'bitcoin': { name: "Bit-Limo", symbol: "BTC", price: 45000.00, volatility: 0.05, history: [] }, 
-    'doge': { name: "Doge Limo", symbol: "DOGE", price: 0.15, volatility: 0.10, history: [] }, 
-    'void': { name: "Dark Void", symbol: "VOID", price: 50.00, volatility: 0.25, history: [] } 
+    'limo': { name: "Limo Coin", symbol: "LIMO", price: 1.00, volatility: 0.02, history: [], lastChange: 0 }, 
+    'bitcoin': { name: "Bit-Limo", symbol: "BTC", price: 45000.00, volatility: 0.05, history: [], lastChange: 0 }, 
+    'doge': { name: "Doge Limo", symbol: "DOGE", price: 0.15, volatility: 0.10, history: [], lastChange: 0 }, 
+    'void': { name: "Dark Void", symbol: "VOID", price: 50.00, volatility: 0.25, history: [], lastChange: 0 } 
 };
 
 // 2. Markt-Simulation (Preise ändern sich alle 30 Sekunden)
