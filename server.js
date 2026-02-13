@@ -9099,6 +9099,91 @@ setInterval(async () => {
     }
 }, PAYDAY_INTERVAL);
 
+// =========================================================
+// === 📈 LIMO EXCHANGE (CRYPTO & FINANCE) ===
+// =========================================================
+
+// 1. Die Coins Konfiguration (Startwerte)
+let CRYPTO_MARKET = {
+    'limo': { name: "Limo Coin", symbol: "LIMO", price: 1.00, volatility: 0.02 }, // Stabil
+    'bitcoin': { name: "Bit-Limo", symbol: "BTC", price: 45000.00, volatility: 0.05 }, // Teuer
+    'doge': { name: "Doge Limo", symbol: "DOGE", price: 0.15, volatility: 0.10 }, // Meme / Schwankt stark
+    'void': { name: "Dark Void", symbol: "VOID", price: 50.00, volatility: 0.25 } // Illegal / Sehr Riskant
+};
+
+// 2. Markt-Simulation (Preise ändern sich alle 30 Sekunden)
+setInterval(() => {
+    for (let key in CRYPTO_MARKET) {
+        const coin = CRYPTO_MARKET[key];
+        const change = (Math.random() - 0.5) * coin.volatility; // +/- % Änderung
+        let newPrice = coin.price * (1 + change);
+        
+        // Preis darf nicht 0 werden
+        if (newPrice < 0.01) newPrice = 0.01;
+        
+        CRYPTO_MARKET[key].price = parseFloat(newPrice.toFixed(2));
+        CRYPTO_MARKET[key].lastChange = parseFloat((change * 100).toFixed(2)); // Für Anzeige (+5%)
+    }
+}, 30000);
+
+// 3. API: Markt-Daten abrufen (Coins + Portfolio)
+app.get('/api/finance/market', isAuthenticated, async (req, res) => {
+    try {
+        const userId = new ObjectId(req.session.userId);
+        const user = await usersCollection.findOne({ _id: userId });
+
+        // Wir senden den Marktstatus und das Portfolio des Users
+        res.json({
+            balance: user.balance,
+            crypto: CRYPTO_MARKET,
+            portfolio: user.cryptoWallet || {} // { 'limo': 100, 'void': 5 }
+        });
+    } catch (e) { res.status(500).json({ error: "Markt offline." }); }
+});
+
+// 4. API: Krypto Handeln (Kaufen/Verkaufen)
+app.post('/api/finance/trade', isAuthenticated, async (req, res) => {
+    try {
+        const { coinId, amount, type } = req.body; // type: 'buy' oder 'sell'
+        const qty = parseFloat(amount); // Menge an Coins
+        
+        if (!CRYPTO_MARKET[coinId]) return res.status(400).json({ error: "Coin existiert nicht." });
+        if (qty <= 0) return res.status(400).json({ error: "Ungültige Menge." });
+
+        const userId = new ObjectId(req.session.userId);
+        const user = await usersCollection.findOne({ _id: userId });
+        const price = CRYPTO_MARKET[coinId].price;
+        const totalCost = price * qty;
+
+        if (type === 'buy') {
+            if (user.balance < totalCost) return res.status(400).json({ error: `Zu wenig Geld! Kosten: $${totalCost.toFixed(2)}` });
+
+            await usersCollection.updateOne(
+                { _id: userId },
+                { 
+                    $inc: { balance: -totalCost, [`cryptoWallet.${coinId}`]: qty },
+                    $push: { notifications: `📈 KAUF: ${qty} ${CRYPTO_MARKET[coinId].symbol} für $${totalCost.toFixed(0)}` }
+                }
+            );
+
+        } else if (type === 'sell') {
+            const userHoldings = user.cryptoWallet ? (user.cryptoWallet[coinId] || 0) : 0;
+            if (userHoldings < qty) return res.status(400).json({ error: "Nicht genug Coins." });
+
+            await usersCollection.updateOne(
+                { _id: userId },
+                { 
+                    $inc: { balance: totalCost, [`cryptoWallet.${coinId}`]: -qty },
+                    $push: { notifications: `📉 VERKAUF: ${qty} ${CRYPTO_MARKET[coinId].symbol} für $${totalCost.toFixed(0)}` }
+                }
+            );
+        }
+
+        res.json({ success: true, message: "Transaktion erfolgreich!" });
+
+    } catch (e) { res.status(500).json({ error: "Handel fehlgeschlagen." }); }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
