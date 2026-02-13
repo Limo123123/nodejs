@@ -4738,25 +4738,39 @@ app.get('/api/bank/transactions', isAuthenticated, async (req, res) => {
 
 // 2. Überweisung tätigen (Geld oder Tokens) - MIT SICHERHEITS-UPDATES
 app.post('/api/bank/transfer', isAuthenticated, async (req, res) => {
-    const { recipientName, amount, type, reason } = req.body; 
+    const { recipientName, amount, type, reason, highLimitMode } = req.body; 
     const senderId = new ObjectId(req.session.userId);
     const senderName = req.session.username;
 
-    const MAX_MONEY_TRANSFER = 1000000; 
-    const MAX_TOKEN_TRANSFER = 1000;    
+    // Standard Limits
+    const MAX_MONEY_TRANSFER = 1000000;  
+    const MAX_TOKEN_TRANSFER = 1000;     
+    
+    // High-Limit Modus (Kostet 1% Gebühr)
+    // Javascript Safe Max ist ca. 9 Billiarden. Mehr geht technisch nicht präzise ohne BigInt Umbau.
+    const ULTRA_LIMIT = Number.MAX_SAFE_INTEGER; 
 
     if (!recipientName || !amount || amount <= 0) return res.status(400).json({ error: "Ungültige Daten." });
     if (recipientName.toLowerCase() === senderName.toLowerCase()) return res.status(400).json({ error: "Keine Überweisung an sich selbst." });
 
+    // Betrag säubern
     const cleanAmount = type === 'token' ? Math.floor(amount) : roundMoney(parseFloat(amount));
-    if (type !== 'token' && cleanAmount > MAX_MONEY_TRANSFER) return res.status(400).json({ error: "Betrag zu hoch." });
-    if (type === 'token' && cleanAmount > MAX_TOKEN_TRANSFER) return res.status(400).json({ error: "Zu viele Tokens." });
+
+    // Limit Check
+    if (!highLimitMode) {
+        // Normaler Modus: Strenge Limits, keine Gebühr
+        if (type !== 'token' && cleanAmount > MAX_MONEY_TRANSFER) return res.status(400).json({ error: `Limit überschritten! Max $${MAX_MONEY_TRANSFER.toLocaleString()} (oder aktiviere High-Limit).` });
+        if (type === 'token' && cleanAmount > MAX_TOKEN_TRANSFER) return res.status(400).json({ error: `Limit überschritten! Max ${MAX_TOKEN_TRANSFER} Tokens (oder aktiviere High-Limit).` });
+    } else {
+        // High Limit Modus: Fast kein Limit, aber Gebühr
+        if (cleanAmount > ULTRA_LIMIT) return res.status(400).json({ error: "Betrag übersteigt die mathematischen Grenzen des Bank-Computers." });
+    }
 
     const session = client.startSession();
 
     try {
         await session.withTransaction(async () => {
-            // 1. Sender laden für Status-Checks (Infinity/Admin)
+            // 1. Sender laden
             const sender = await usersCollection.findOne({ _id: senderId }, { session });
             if (sender.infinityMoney && !sender.isAdmin) throw new Error("Infinity-Money User dürfen nicht überweisen.");
 
@@ -4764,22 +4778,35 @@ app.post('/api/bank/transfer', isAuthenticated, async (req, res) => {
             const recipient = await usersCollection.findOne({ username: { $regex: new RegExp(`^${recipientName}$`, 'i') } }, { session });
             if (!recipient) throw new Error("Empfänger nicht gefunden.");
 
-            // 3. Sender belasten (ATOMAR & SICHER)
+            // 3. Gebühr berechnen
+            let fee = 0;
+            if (highLimitMode) {
+                // 1% Gebühr
+                fee = type === 'token' ? Math.floor(cleanAmount * 0.01) : roundMoney(cleanAmount * 0.01);
+                // Mindestgebühr 1 (bei Tokens) oder 0.01 (bei Geld)
+                if (type === 'token' && fee < 1) fee = 1;
+                if (type !== 'token' && fee < 0.01) fee = 0.01;
+            }
+
+            const totalDeduction = cleanAmount; // Der Sender zahlt den vollen Betrag
+            const amountReceived = cleanAmount - fee; // Der Empfänger kriegt den Rest
+
+            if (amountReceived <= 0) throw new Error("Der Betrag ist zu klein für die Gebühren.");
+
+            // 4. Sender belasten
             const updateFilter = { _id: senderId };
             const updateAction = {};
 
             if (type === 'token') {
-                updateFilter.tokens = { $gte: cleanAmount }; // Bedingung: Genug Tokens
-                updateAction.$inc = { tokens: -cleanAmount };
+                updateFilter.tokens = { $gte: totalDeduction };
+                updateAction.$inc = { tokens: -totalDeduction };
             } else {
-                // Bei Geld: Wenn Admin/Infinity -> kein Abzug nötig, sonst Bedingung prüfen
                 if (!sender.isAdmin && !sender.infinityMoney) {
-                    updateFilter.balance = { $gte: cleanAmount }; // Bedingung: Genug Geld
-                    updateAction.$inc = { balance: -cleanAmount };
+                    updateFilter.balance = { $gte: totalDeduction };
+                    updateAction.$inc = { balance: -totalDeduction };
                 }
             }
 
-            // Nur ausführen, wenn Geld abgezogen werden muss oder Admin
             if (updateAction.$inc) {
                 const senderResult = await usersCollection.updateOne(updateFilter, updateAction, { session });
                 if (senderResult.modifiedCount === 0) {
@@ -4787,28 +4814,38 @@ app.post('/api/bank/transfer', isAuthenticated, async (req, res) => {
                 }
             }
 
-            // 4. Empfänger gutschreiben
+            // 5. Empfänger gutschreiben (Abzüglich Gebühr)
             const targetField = type === 'token' ? 'tokens' : 'balance';
             await usersCollection.updateOne(
                 { _id: recipient._id },
-                { $inc: { [targetField]: cleanAmount } },
+                { $inc: { [targetField]: amountReceived } },
                 { session }
             );
 
-            // 5. Loggen (innerhalb der Transaktion)
+            // 6. Gebühr in die Staatskasse (nur bei Geld)
+            if (fee > 0 && type !== 'token') {
+                await systemSettingsCollection.updateOne(
+                    { id: 'state_treasury' },
+                    { $inc: { balance: fee } },
+                    { upsert: true, session }
+                );
+            }
+
+            // 7. Loggen
             await bankTransactionsCollection.insertOne({
                 fromId: senderId,
                 fromName: senderName,
                 toId: recipient._id,
                 toName: recipient.username,
-                amount: cleanAmount,
+                amount: cleanAmount, // Gesendeter Betrag
+                fee: fee,            // Protokollierte Gebühr
+                netAmount: amountReceived, // Was ankam
                 type: type,
-                reason: reason || "Überweisung",
+                reason: reason || (highLimitMode ? "High-Limit Überweisung" : "Überweisung"),
                 timestamp: new Date()
             }, { session });
         });
 
-        // Response mit neuem Kontostand
         const updatedUser = await usersCollection.findOne({ _id: senderId });
         res.json({ message: "Überweisung erfolgreich!", newBalance: updatedUser.balance });
 
