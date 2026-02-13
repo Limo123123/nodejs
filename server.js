@@ -6845,7 +6845,7 @@ app.post('/api/admin/engine', isAuthenticated, isAdmin, async (req, res) => {
 // =========================================================
 
 // HIER IST DER FIX: Wir erlauben jetzt 'snake'
-const ALLOWED_GAMES = ['flappy', 'snake']; 
+const ALLOWED_GAMES = ['flappy', 'snake', 'slots', 'memory'];
 
 // 1. Status abrufen
 app.get('/api/games/status', isAuthenticated, async (req, res) => {
