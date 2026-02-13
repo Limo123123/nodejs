@@ -4193,32 +4193,35 @@ app.get('/api/stocks', async (req, res) => {
     try {
         const { search, limit } = req.query;
         
-        // 1. Filter bauen
+        // 1. LIMIT ERZWINGEN (Maximal 50, wenn nichts angegeben ist)
+        // Das verhindert, dass 4000 Items geladen werden!
+        const maxItems = parseInt(limit) || 50; 
+
+        // 2. Filter bauen
         const query = { isTokenCard: { $ne: true } };
         
-        // Wenn gesucht wird:
+        // Nur filtern, wenn wirklich gesucht wird
         if (search && search.trim().length > 0) {
-            query.name = { $regex: search.trim(), $options: 'i' }; // Case-insensitive Suche
+            query.name = { $regex: search.trim(), $options: 'i' };
         }
 
-        // 2. Limit setzen (Standard: 50 Items, um den Browser nicht zu töten)
-        const maxItems = parseInt(limit) || 50;
-
+        // 3. Datenbankabfrage mit LIMIT
         const stocks = await productsCollection.find(
             query,
             { 
                 projection: { 
                     id: 1, name: 1, currentPrice: 1, price: 1, basePrice: 1, 
-                    priceHistory: { $slice: -20 }, // Nur letzte 20 Punkte
+                    // History: Nur die allerletzten 10 Punkte holen (Spart extrem Speicher)
+                    priceHistory: { $slice: -10 }, 
                     image_url: 1 
                 } 
             }
         )
-        .sort({ id: 1 }) // Oder nach Volatilität sortieren?
-        .limit(maxItems)
+        .sort({ id: 1 }) 
+        .limit(maxItems) // <--- HIER IST DIE BREMSE
         .toArray();
 
-        // 3. Formatieren
+        // 4. Formatierung (Fehlertolerant)
         const formatted = stocks.map(s => {
             const price = s.currentPrice || parseFloat((s.price || "0").replace(/[^0-9.]/g, '')) || 0;
             
@@ -4229,13 +4232,16 @@ app.get('/api/stocks', async (req, res) => {
                 if (prev > 0) change = ((last - prev) / prev) * 100;
             }
 
+            // History sicherstellen
+            const historyData = Array.isArray(s.priceHistory) ? s.priceHistory.map(h => h.price) : [];
+
             return {
                 id: s.id,
                 name: s.name,
                 symbol: (s.name.substring(0, 3) + String(s.id).slice(-2)).toUpperCase(), 
                 price: price,
                 changePercent: change,
-                history: (s.priceHistory || []).map(h => h.price),
+                history: historyData,
                 image: s.image_url
             };
         });
@@ -4243,7 +4249,8 @@ app.get('/api/stocks', async (req, res) => {
         res.json(formatted);
     } catch (e) {
         console.error("Stonks Error:", e);
-        res.status(500).json({ error: "Börse ist überlastet." });
+        // Sende leeres Array statt Fehler, damit Frontend nicht crasht
+        res.json([]); 
     }
 });
 
