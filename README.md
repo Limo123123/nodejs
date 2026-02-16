@@ -1,7 +1,15 @@
-This API Is Hosted under:
+# 🚀 Limazon Backend - Setup & Run Guide
 
-https://nodejs-ykji.onrender.com/api/
+Diese Anleitung beschreibt, wie du das Node.js Backend lokal oder für die Entwicklung startest.
 
-**It can take some time to start up**
+## 📋 1. Voraussetzungen
+* **Node.js** (v18 oder neuer empfohlen)
+* **MongoDB** (Lokal installiert oder ein Cloud-Cluster)
+* **Ollama** (optional, auf einem erreichbaren Rechner für die Tinda KI-Features)
+* **Gemini** (optional, benötigt einen API Key für die LNN KI-Features
 
-The LimoLights are an Part of this API and of the limo-games website
+## 📦 2. Installation
+Öffne das Terminal im Projektverzeichnis und installiere die benötigten Abhängigkeiten. Oder führe diesen Befehl aus
+
+```bash
+npm install express cors mongodb bcrypt express-session connect-mongo uuid axios helmet compression dotenv
