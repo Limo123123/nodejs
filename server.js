@@ -9842,6 +9842,43 @@ app.delete('/api/teachermon/trades/:tradeId', isAuthenticated, async (req, res) 
     }
 });
 
+// C2. 10x Karten-Pack kaufen
+app.post('/api/teachermon/pack/buy-multi', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    const PACK_PRICE = 250;
+    const MULTIPLIER = 10;
+    const TOTAL_COST = PACK_PRICE * MULTIPLIER;
+
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        if (user.balance < TOTAL_COST) return res.status(400).json({ error: `10 Packs kosten $${TOTAL_COST}.` });
+
+        await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -TOTAL_COST } });
+
+        const pulledCards = [];
+        const bulkOps = [];
+
+        // 30 Karten generieren (10 Packs a 3 Karten)
+        for (let i = 0; i < (3 * MULTIPLIER); i++) {
+            const card = await drawRandomCard();
+            pulledCards.push(card);
+            bulkOps.push({
+                updateOne: {
+                    filter: { userId: userId, cardId: card.id },
+                    update: { $inc: { quantity: 1 } },
+                    upsert: true
+                }
+            });
+        }
+
+        if (bulkOps.length > 0) await teachermonInvCollection.bulkWrite(bulkOps);
+
+        res.json({ message: "10 Packs geöffnet!", cards: pulledCards, newBalance: user.balance - TOTAL_COST });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Massen-Öffnen." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
