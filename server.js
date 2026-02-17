@@ -152,6 +152,8 @@ let bugReportsCollection;
 let systemSettingsCollection;
 let restaurantOrdersCollection;
 let limterestCollection;
+let teachermonCardsCollection;
+let teachermonInvCollection;
 
 // ==============================================================================
 // === NEU: AUTOMATISIERTE SICHERHEITS- & REPARATURFUNKTIONEN ====================
@@ -788,6 +790,8 @@ MongoClient.connect(mongoUri)
 		tindaSwipesCollection = db.collection('tindaSwipes'); 
 		restaurantOrdersCollection = db.collection('restaurantOrders');
 		limterestCollection = db.collection(limterestCollectionName);
+		teachermonCardsCollection = db.collection('teachermonCards');
+		teachermonInvCollection = db.collection('teachermonInventories');
 
         authCodesCollection = db.collection(authCodesCollectionName);
     
@@ -837,6 +841,7 @@ MongoClient.connect(mongoUri)
             await tokenCodesCollection.createIndex({ generatedForUserId: 1, isRedeemed: 1 });
 			await highscoresCollection.createIndex({ game: 1, score: -1 });
 			await limterestCollection.createIndex({ tags: 1 });
+			await teachermonInvCollection.createIndex({ userId: 1, cardId: 1 }, { unique: true });
             
             if (tokenTransactionsCollection) {
                 await tokenTransactionsCollection.createIndex({ userId: 1 });
@@ -9364,6 +9369,195 @@ app.post('/api/finance/trade', isAuthenticated, async (req, res) => {
         res.json({ success: true, message: "Transaktion erfolgreich!" });
 
     } catch (e) { res.status(500).json({ error: "Handel fehlgeschlagen." }); }
+});
+
+// =========================================================
+// === 🃏 TEACHERMON (KARTENSPIEL API) ===
+// =========================================================
+const LOG_PREFIX_TEACHERMON = "[Teachermon]";
+
+// 1. Seltenheits-Stufen & Drop-Raten
+const TEACHERMON_RARITIES = {
+    common: { name: 'Common', color: 'brown', dropRate: 0.60, sellPrice: 10 },
+    rare: { name: 'Rare', color: 'blue', dropRate: 0.25, sellPrice: 50 },
+    premium: { name: 'Premium', color: 'yellow', dropRate: 0.10, sellPrice: 200 },
+    episch: { name: 'Episch', color: 'green', dropRate: 0.04, sellPrice: 1000 },
+    legendaer: { name: 'Legendär', color: 'purple', dropRate: 0.01, sellPrice: 5000 }
+};
+
+// 2. Initiales Seeding (Beispiel-Lehrer anlegen, falls DB leer ist)
+async function seedTeachermonCards() {
+    const count = await teachermonCardsCollection.countDocuments();
+    if (count === 0) {
+        const dummyCards = [
+            { id: 't_001', name: "Herr Müller", rarity: "common", kalterKaffee: 3, skills: "Tafel wischen", gequaelt: 15, intelligenz: 60, img: "👨‍🏫" },
+            { id: 't_002', name: "Frau Schmidt", rarity: "rare", kalterKaffee: 5, skills: "Überraschungstest", gequaelt: 40, intelligenz: 80, img: "👩‍🏫" },
+            { id: 't_003', name: "Direktor Weber", rarity: "legendaer", kalterKaffee: 10, skills: "Schulverweis (Glitzer-Attacke)", gequaelt: 999, intelligenz: 150, img: "🧙‍♂️" }
+            // Hier kannst du später weitere hinzufügen!
+        ];
+        await teachermonCardsCollection.insertMany(dummyCards);
+        console.log(`${LOG_PREFIX_TEACHERMON} 🃏 3 Basis-Lehrer-Karten generiert.`);
+    }
+}
+seedTeachermonCards(); // Direkt beim Serverstart ausführen
+
+// Hilfsfunktion: Karte ziehen basierend auf Wahrscheinlichkeit
+async function drawRandomCard() {
+    const rand = Math.random();
+    let cumulative = 0;
+    let selectedRarity = "common";
+
+    for (const [key, val] of Object.entries(TEACHERMON_RARITIES)) {
+        cumulative += val.dropRate;
+        if (rand <= cumulative) {
+            selectedRarity = key;
+            break;
+        }
+    }
+
+    // Hole alle Karten dieser Seltenheit
+    const cardsOfRarity = await teachermonCardsCollection.find({ rarity: selectedRarity }).toArray();
+    
+    // Falls keine Karte dieser Seltenheit existiert (z.B. weil du noch keine Epischen erstellt hast), Fallback auf Common
+    if (cardsOfRarity.length === 0) {
+        const fallbackCards = await teachermonCardsCollection.find({ rarity: "common" }).toArray();
+        return fallbackCards[Math.floor(Math.random() * fallbackCards.length)];
+    }
+
+    return cardsOfRarity[Math.floor(Math.random() * cardsOfRarity.length)];
+}
+
+// --- API ENDPUNKTE ---
+
+// A. Sammelheft & Inventar abrufen
+app.get('/api/teachermon/album', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        // Alle Karten aus der Datenbank holen
+        const allCards = await teachermonCardsCollection.find({}).toArray();
+        
+        // Inventar des Users holen
+        const userInventory = await teachermonInvCollection.find({ userId: userId }).toArray();
+        const userInvMap = new Map(userInventory.map(item => [item.cardId, item]));
+
+        // Sammelheft aufbauen (Zeigt an, welche man hat und wie viele Doppelte)
+        const album = allCards.map(card => {
+            const invItem = userInvMap.get(card.id);
+            return {
+                ...card,
+                owned: !!invItem, // Hat er die Karte? (Sammelheft)
+                duplicates: invItem ? (invItem.quantity - 1) : 0 // Alles über 1 ist doppelt
+            };
+        });
+
+        res.json({ album });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden des Sammelhefts." });
+    }
+});
+
+// B. Karten-Pack öffnen (Kaufen)
+app.post('/api/teachermon/pack/buy', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    const PACK_PRICE = 250; // Preis für ein Pack anpassen!
+
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        if (user.balance < PACK_PRICE) {
+            return res.status(400).json({ error: `Ein Pack kostet $${PACK_PRICE}. Du bist zu arm!` });
+        }
+
+        // Geld abziehen
+        await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -PACK_PRICE } });
+
+        // 3 Karten pro Pack generieren
+        const pulledCards = [];
+        for (let i = 0; i < 3; i++) {
+            const card = await drawRandomCard();
+            pulledCards.push(card);
+
+            // Ins Inventar einfügen (oder Anzahl erhöhen)
+            await teachermonInvCollection.updateOne(
+                { userId: userId, cardId: card.id },
+                { $inc: { quantity: 1 } },
+                { upsert: true }
+            );
+        }
+
+        res.json({ 
+            message: "Pack geöffnet!", 
+            cards: pulledCards,
+            newBalance: user.balance - PACK_PRICE
+        });
+
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Öffnen des Packs." });
+    }
+});
+
+// C. Daily Card Pack (Kostenlos)
+app.post('/api/teachermon/pack/daily', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        const now = new Date();
+        const lastDaily = user.lastTeachermonDaily ? new Date(user.lastTeachermonDaily) : new Date(0);
+
+        // Prüfen, ob heute schon geöffnet
+        if (now.getDate() === lastDaily.getDate() && now.getMonth() === lastDaily.getMonth() && now.getFullYear() === lastDaily.getFullYear()) {
+            return res.status(400).json({ error: "Du hast dein Daily Pack heute schon geöffnet. Komm morgen wieder!" });
+        }
+
+        // 1 kostenlose Karte ziehen
+        const card = await drawRandomCard();
+
+        await teachermonInvCollection.updateOne(
+            { userId: userId, cardId: card.id },
+            { $inc: { quantity: 1 } },
+            { upsert: true }
+        );
+
+        // Daily-Zeitstempel aktualisieren
+        await usersCollection.updateOne({ _id: userId }, { $set: { lastTeachermonDaily: now } });
+
+        res.json({ message: "Daily Pack geöffnet!", card: card });
+
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Daily Pack." });
+    }
+});
+
+// D. Doppelte Karten verkaufen
+app.post('/api/teachermon/sell', isAuthenticated, async (req, res) => {
+    const { cardId } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const invItem = await teachermonInvCollection.findOne({ userId: userId, cardId: cardId });
+        
+        // Man kann nur verkaufen, wenn man MEHR ALS 1 davon hat (das erste Exemplar klebt im Sammelheft!)
+        if (!invItem || invItem.quantity <= 1) {
+            return res.status(400).json({ error: "Du hast keine doppelten Exemplare dieser Karte im Inventar." });
+        }
+
+        const card = await teachermonCardsCollection.findOne({ id: cardId });
+        if (!card) return res.status(404).json({ error: "Karte existiert nicht mehr." });
+
+        const sellPrice = TEACHERMON_RARITIES[card.rarity].sellPrice;
+
+        // Menge im Inventar verringern und Geld gutschreiben
+        await teachermonInvCollection.updateOne({ _id: invItem._id }, { $inc: { quantity: -1 } });
+        await usersCollection.updateOne({ _id: userId }, { $inc: { balance: sellPrice } });
+
+        res.json({ 
+            message: `Doppelte Karte für $${sellPrice} verkauft!`, 
+            earned: sellPrice 
+        });
+
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Verkauf." });
+    }
 });
 
 app.use((req, res) => {
