@@ -4,6 +4,9 @@ const fs = require('fs');
 const dotenv = require('dotenv');
 const os = require('os');
 const helmet = require('helmet');
+const multer = require('multer');
+const sharp = require('sharp');
+const { createProxyMiddleware } = require('http-proxy-middleware');
 
 // Lade Umgebungsvariablen aus secret.env (wenn vorhanden)
 const pathToSecretEnv = '/etc/secrets/secret.env'; // Für Render
@@ -155,6 +158,74 @@ let limterestCollection;
 let teachermonCardsCollection;
 let teachermonInvCollection;
 let teachermonTradesCollection;
+
+// =========================================================
+// === CDN & BILDER UPLOAD SYSTEM ===
+// =========================================================
+
+// Ordner für das Shared Volume erstellen, falls nicht existent
+const CDN_DIR = path.resolve(__dirname, 'cdn-data');
+if (!fs.existsSync(CDN_DIR)) fs.mkdirSync(CDN_DIR);
+
+// Multer Setup: Bilder im Arbeitsspeicher behalten, um sie direkt zu komprimieren
+const storage = multer.memoryStorage();
+const upload = multer({ 
+    storage: storage,
+    limits: { fileSize: 10 * 1024 * 1024 } // Max 10MB vor der Kompression
+});
+
+// Proxy: Alles was auf /cdn/ geht, leiten wir intern an den Nginx Container weiter
+app.use('/cdn', createProxyMiddleware({ 
+    target: 'http://limazon-cdn:80', // Name des Containers in der docker-compose
+    changeOrigin: true,
+    pathRewrite: { '^/cdn': '' }, // Entfernt /cdn aus dem Pfad für Nginx
+}));
+
+// API: Bild Hochladen & Komprimieren (WebP)
+app.post('/api/cdn/upload', isAuthenticated, upload.single('image'), async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'Kein Bild empfangen.' });
+
+    try {
+        // Generiere einzigartigen Namen
+        const filename = `img_${Date.now()}_${Math.floor(Math.random() * 1000)}.webp`;
+        const filepath = path.join(CDN_DIR, filename);
+
+        // Bild mit Sharp extrem komprimieren und als WebP speichern
+        await sharp(req.file.buffer)
+            .resize({ width: 800, withoutEnlargement: true }) // Max 800px Breite
+            .webp({ quality: 75 }) // Hohe Kompression (Winzige Dateigröße!)
+            .toFile(filepath);
+
+        // URL zurückgeben
+        const fileUrl = `https://api.limazon.v6.rocks/cdn/${filename}`;
+        
+        console.log(`${LOG_PREFIX_SERVER} 🖼️ Neues Bild hochgeladen: ${filename}`);
+        res.json({ message: 'Upload erfolgreich!', url: fileUrl, filename: filename });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Bild-Upload:`, err);
+        res.status(500).json({ error: 'Bildverarbeitung fehlgeschlagen.' });
+    }
+});
+
+// API: Alle meine Bilder anzeigen (Galerie)
+app.get('/api/cdn/list', isAuthenticated, (req, res) => {
+    fs.readdir(CDN_DIR, (err, files) => {
+        if (err) return res.status(500).json({ error: "Konnte Dateien nicht lesen." });
+        
+        const baseUrl = `https://api.limazon.v6.rocks/cdn/`;
+        // Nur .webp Dateien nehmen und URLs zusammenbauen
+        const images = files.filter(f => f.endsWith('.webp')).map(f => ({
+            filename: f,
+            url: baseUrl + f,
+            // (Optional könnte man noch auslesen, von wem das Bild ist, 
+            // aber für den Start zeigen wir einfach alle Server-Bilder an)
+        }));
+        
+        // Da Nginx sehr schnell ist, können wir ruhig alle listen (oder auf 50 limitieren)
+        res.json({ images: images.reverse().slice(0, 100) });
+    });
+});
 
 // ==============================================================================
 // === NEU: AUTOMATISIERTE SICHERHEITS- & REPARATURFUNKTIONEN ====================
