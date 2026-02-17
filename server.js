@@ -154,6 +154,7 @@ let restaurantOrdersCollection;
 let limterestCollection;
 let teachermonCardsCollection;
 let teachermonInvCollection;
+let teachermonTradesCollection;
 
 // ==============================================================================
 // === NEU: AUTOMATISIERTE SICHERHEITS- & REPARATURFUNKTIONEN ====================
@@ -792,6 +793,7 @@ MongoClient.connect(mongoUri)
 		limterestCollection = db.collection(limterestCollectionName);
 		teachermonCardsCollection = db.collection('teachermonCards');
 		teachermonInvCollection = db.collection('teachermonInventories');
+		teachermonTradesCollection = db.collection('teachermonTrades');
 
         authCodesCollection = db.collection(authCodesCollectionName);
     
@@ -9558,6 +9560,156 @@ app.post('/api/teachermon/sell', isAuthenticated, async (req, res) => {
 
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Verkauf." });
+    }
+});
+
+// E. Admin: Neue Karte hinzufügen
+app.post('/api/teachermon/admin/cards', isAuthenticated, isAdmin, async (req, res) => {
+    const { name, rarity, kalterKaffee, skills, gequaelt, intelligenz, img } = req.body;
+    
+    if (!name || !rarity || !img) return res.status(400).json({ error: "Name, Rarität und Bild/Emoji fehlen." });
+    
+    try {
+        const newId = 't_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
+        const newCard = {
+            id: newId,
+            name: name.trim(),
+            rarity,
+            kalterKaffee: parseInt(kalterKaffee) || 0,
+            skills: skills.trim() || "-",
+            gequaelt: parseInt(gequaelt) || 0,
+            intelligenz: parseInt(intelligenz) || 0,
+            img: img.trim()
+        };
+
+        await teachermonCardsCollection.insertOne(newCard);
+        res.status(201).json({ message: "Neue Karte erfolgreich zum Spiel hinzugefügt!", card: newCard });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Erstellen der Karte." });
+    }
+});
+
+// F. Tauschbörse: Alle aktiven Angebote laden
+app.get('/api/teachermon/trades', isAuthenticated, async (req, res) => {
+    try {
+        const trades = await teachermonTradesCollection.find({}).sort({ createdAt: -1 }).toArray();
+        // Wir brauchen die Kartendetails, um sie schön anzuzeigen
+        const cards = await teachermonCardsCollection.find({}).toArray();
+        const cardMap = new Map(cards.map(c => [c.id, c]));
+
+        const populatedTrades = trades.map(t => ({
+            ...t,
+            offerCard: cardMap.get(t.offerCardId),
+            wantCard: cardMap.get(t.wantCardId)
+        })).filter(t => t.offerCard && t.wantCard); // Nur gültige Trades
+
+        res.json({ trades: populatedTrades });
+    } catch (e) { res.status(500).json({ error: "Fehler beim Laden der Tauschbörse." }); }
+});
+
+// G. Tauschbörse: Angebot erstellen
+app.post('/api/teachermon/trades/create', isAuthenticated, async (req, res) => {
+    const { offerCardId, wantCardId } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (offerCardId === wantCardId) return res.status(400).json({ error: "Macht keinen Sinn." });
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            // Hat er die Karte überhaupt doppelt? (Eine muss im Album bleiben!)
+            const invItem = await teachermonInvCollection.findOne({ userId, cardId: offerCardId }, { session });
+            if (!invItem || invItem.quantity <= 1) {
+                throw new Error("Du musst die Karte doppelt haben, um sie anzubieten.");
+            }
+
+            // Karte aus dem Inventar nehmen (Escrow)
+            await teachermonInvCollection.updateOne(
+                { _id: invItem._id },
+                { $inc: { quantity: -1 } },
+                { session }
+            );
+
+            // Trade eintragen
+            await teachermonTradesCollection.insertOne({
+                offererId: userId,
+                offererUsername: req.session.username,
+                offerCardId,
+                wantCardId,
+                createdAt: new Date()
+            }, { session });
+        });
+        res.json({ message: "Angebot erstellt! Die Karte ist nun im Handels-Tresor." });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// H. Tauschbörse: Angebot annehmen
+app.post('/api/teachermon/trades/accept/:tradeId', isAuthenticated, async (req, res) => {
+    const tradeId = new ObjectId(req.params.tradeId);
+    const acceptorId = new ObjectId(req.session.userId);
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const trade = await teachermonTradesCollection.findOne({ _id: tradeId }, { session });
+            if (!trade) throw new Error("Angebot existiert nicht mehr.");
+            if (trade.offererId.equals(acceptorId)) throw new Error("Du kannst dein eigenes Angebot nicht annehmen.");
+
+            // Hat der Annehmende die gesuchte Karte doppelt?
+            const acceptorItem = await teachermonInvCollection.findOne({ userId: acceptorId, cardId: trade.wantCardId }, { session });
+            if (!acceptorItem || acceptorItem.quantity <= 1) {
+                throw new Error("Du hast die verlangte Karte nicht doppelt!");
+            }
+
+            // 1. Dem Annehmenden die Want-Karte abziehen
+            await teachermonInvCollection.updateOne({ _id: acceptorItem._id }, { $inc: { quantity: -1 } }, { session });
+            // 2. Dem Annehmenden die Offer-Karte geben
+            await teachermonInvCollection.updateOne({ userId: acceptorId, cardId: trade.offerCardId }, { $inc: { quantity: 1 } }, { upsert: true, session });
+            // 3. Dem Ersteller die Want-Karte geben (Offer-Karte wurde ja bei Erstellung schon abgezogen)
+            await teachermonInvCollection.updateOne({ userId: trade.offererId, cardId: trade.wantCardId }, { $inc: { quantity: 1 } }, { upsert: true, session });
+            
+            // 4. Trade löschen
+            await teachermonTradesCollection.deleteOne({ _id: trade._id }, { session });
+        });
+        res.json({ message: "Tausch erfolgreich! Schau in dein Inventar." });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// I. Tauschbörse: Angebot abbrechen
+app.delete('/api/teachermon/trades/:tradeId', isAuthenticated, async (req, res) => {
+    const tradeId = new ObjectId(req.params.tradeId);
+    const userId = new ObjectId(req.session.userId);
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const trade = await teachermonTradesCollection.findOne({ _id: tradeId }, { session });
+            if (!trade) throw new Error("Angebot nicht gefunden.");
+            
+            // Nur der Ersteller (oder Admin) darf abbrechen
+            const user = await usersCollection.findOne({_id: userId}, {session});
+            if (!trade.offererId.equals(userId) && !user.isAdmin) {
+                throw new Error("Nicht deine Rechte.");
+            }
+
+            // Karte zurückgeben
+            await teachermonInvCollection.updateOne({ userId: trade.offererId, cardId: trade.offerCardId }, { $inc: { quantity: 1 } }, { session });
+            // Trade löschen
+            await teachermonTradesCollection.deleteOne({ _id: trade._id }, { session });
+        });
+        res.json({ message: "Angebot abgebrochen. Karte ist wieder im Inventar." });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
     }
 });
 
