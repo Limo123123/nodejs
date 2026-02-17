@@ -886,6 +886,8 @@ MongoClient.connect(mongoUri)
 			);
 
 			console.log(`${LOG_PREFIX_SERVER} ♻️ Auto-Delete (TTL) Indizes geprüft.`);
+			
+			await seedTeachermonCards();
 
             console.log(`${LOG_PREFIX_SERVER} ✅ Alle Indizes erfolgreich geprüft/erstellt.`);
         } catch (indexErr) { 
@@ -9399,7 +9401,6 @@ async function seedTeachermonCards() {
         console.log(`${LOG_PREFIX_TEACHERMON} 🃏 3 Basis-Lehrer-Karten generiert.`);
     }
 }
-seedTeachermonCards(); // Direkt beim Serverstart ausführen
 
 // Hilfsfunktion: Karte ziehen basierend auf Wahrscheinlichkeit
 async function drawRandomCard() {
