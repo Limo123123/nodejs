@@ -1527,8 +1527,8 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
 
     // --- Performance & Security Limits ---
-    const MAX_ITEMS_PER_TYPE = 50; 
-    const MAX_CART_SIZE = 200;      
+    const MAX_ITEMS_PER_TYPE = 1000; 
+    const MAX_CART_SIZE = 500;
 
     if (!Array.isArray(cart) || cart.length === 0) return res.status(400).json({ error: 'Warenkorb leer/ungültig.' });
 
