@@ -9602,7 +9602,7 @@ app.post('/api/teachermon/pack/daily', isAuthenticated, async (req, res) => {
     }
 });
 
-// D. Doppelte Karten verkaufen
+// D. Doppelte Karten verkaufen (ALLE einer bestimmten Karte)
 app.post('/api/teachermon/sell', isAuthenticated, async (req, res) => {
     const { cardId } = req.body;
     const userId = new ObjectId(req.session.userId);
@@ -9610,7 +9610,6 @@ app.post('/api/teachermon/sell', isAuthenticated, async (req, res) => {
     try {
         const invItem = await teachermonInvCollection.findOne({ userId: userId, cardId: cardId });
         
-        // Man kann nur verkaufen, wenn man MEHR ALS 1 davon hat (das erste Exemplar klebt im Sammelheft!)
         if (!invItem || invItem.quantity <= 1) {
             return res.status(400).json({ error: "Du hast keine doppelten Exemplare dieser Karte im Inventar." });
         }
@@ -9618,19 +9617,78 @@ app.post('/api/teachermon/sell', isAuthenticated, async (req, res) => {
         const card = await teachermonCardsCollection.findOne({ id: cardId });
         if (!card) return res.status(404).json({ error: "Karte existiert nicht mehr." });
 
-        const sellPrice = TEACHERMON_RARITIES[card.rarity].sellPrice;
+        // Wir berechnen den Überschuss (alles über 1)
+        const excess = invItem.quantity - 1;
+        const totalSellPrice = TEACHERMON_RARITIES[card.rarity].sellPrice * excess;
 
-        // Menge im Inventar verringern und Geld gutschreiben
-        await teachermonInvCollection.updateOne({ _id: invItem._id }, { $inc: { quantity: -1 } });
-        await usersCollection.updateOne({ _id: userId }, { $inc: { balance: sellPrice } });
+        // Menge im Inventar auf 1 setzen (1 bleibt im Album) und Geld gutschreiben
+        await teachermonInvCollection.updateOne({ _id: invItem._id }, { $set: { quantity: 1 } });
+        await usersCollection.updateOne({ _id: userId }, { $inc: { balance: totalSellPrice } });
 
         res.json({ 
-            message: `Doppelte Karte für $${sellPrice} verkauft!`, 
-            earned: sellPrice 
+            message: `${excess}x Karte für insgesamt $${totalSellPrice} verkauft!`, 
+            earned: totalSellPrice 
         });
 
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Verkauf." });
+    }
+});
+
+// D2. MASSEN-VERKAUF: Alle doppelten Karten im gesamten Inventar verkaufen
+app.post('/api/teachermon/sell-all', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    
+    try {
+        // Hole alle Karten, die man mehr als 1x hat
+        const dupes = await teachermonInvCollection.find({ userId: userId, quantity: { $gt: 1 } }).toArray();
+        
+        if (dupes.length === 0) {
+            return res.status(400).json({ error: "Du hast aktuell keine doppelten Karten." });
+        }
+
+        // Wir brauchen die Kartendetails für den Preis
+        const cardIds = dupes.map(d => d.cardId);
+        const cards = await teachermonCardsCollection.find({ id: { $in: cardIds } }).toArray();
+        const cardMap = new Map(cards.map(c => [c.id, c]));
+
+        let totalEarned = 0;
+        let totalSold = 0;
+        const bulkOps = [];
+
+        for (const item of dupes) {
+            const card = cardMap.get(item.cardId);
+            if (card) {
+                const excess = item.quantity - 1;
+                const pricePerCard = TEACHERMON_RARITIES[card.rarity].sellPrice;
+                
+                totalEarned += (excess * pricePerCard);
+                totalSold += excess;
+
+                // Bulk Operation vorbereiten (setze quantity auf 1)
+                bulkOps.push({
+                    updateOne: {
+                        filter: { _id: item._id },
+                        update: { $set: { quantity: 1 } }
+                    }
+                });
+            }
+        }
+
+        // Führe alle Updates auf einmal aus (Performance!)
+        if (bulkOps.length > 0) {
+            await teachermonInvCollection.bulkWrite(bulkOps);
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: totalEarned } });
+        }
+
+        res.json({ 
+            message: `Massenverkauf! ${totalSold} doppelte Karten für $${totalEarned} verkauft!`, 
+            earned: totalEarned 
+        });
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Massenverkauf." });
     }
 });
 
