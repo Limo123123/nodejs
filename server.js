@@ -228,6 +228,33 @@ app.get('/api/cdn/list', isAuthenticated, (req, res) => {
     });
 });
 
+// API: Bild löschen (Nur für Admins)
+app.delete('/api/cdn/delete/:filename', isAuthenticated, isAdmin, (req, res) => {
+    const filename = req.params.filename;
+    
+    // 1. Sicherheits-Check: Path Traversal verhindern (damit niemand "/../../etc/passwd" löscht)
+    if (!filename || filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
+        return res.status(400).json({ error: 'Ungültiger Dateiname.' });
+    }
+
+    const filepath = path.join(CDN_DIR, filename);
+
+    // 2. Datei löschen
+    fs.unlink(filepath, (err) => {
+        if (err) {
+            // Wenn die Datei schon weg ist, ist das auch okay
+            if (err.code === 'ENOENT') {
+                return res.status(404).json({ error: 'Datei nicht gefunden.' });
+            }
+            console.error(`${LOG_PREFIX_SERVER} Fehler beim Löschen von ${filename}:`, err);
+            return res.status(500).json({ error: 'Fehler beim Löschen der Datei.' });
+        }
+        
+        console.log(`${LOG_PREFIX_SERVER} 🗑️ Bild gelöscht: ${filename} von Admin ${req.session.username}`);
+        res.json({ message: 'Bild erfolgreich gelöscht.' });
+    });
+});
+
 // ==============================================================================
 // === NEU: AUTOMATISIERTE SICHERHEITS- & REPARATURFUNKTIONEN ====================
 // ==============================================================================
