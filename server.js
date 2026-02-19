@@ -8982,7 +8982,8 @@ app.post('/api/court/file', isAuthenticated, async (req, res) => {
             status: 'active',
             createdAt: new Date(),
             votes_guilty: [],   // Array von UserIDs
-            votes_innocent: []  // Array von UserIDs
+            votes_innocent: [], // Array von UserIDs
+            voted_devices: []   // NEU: Speichert die Geräte-Fingerabdrücke
         };
 
         await db.collection('courtCases').insertOne(newCase);
@@ -8997,33 +8998,84 @@ app.post('/api/court/file', isAuthenticated, async (req, res) => {
 // 3. POST: Abstimmen
 app.post('/api/court/vote', isAuthenticated, async (req, res) => {
     try {
-        const { caseId, verdict } = req.body; // verdict: 'guilty' oder 'innocent'
+        const { caseId, verdict } = req.body;
         const userId = new ObjectId(req.session.userId);
-
+        
         if (!['guilty', 'innocent'].includes(verdict)) return res.status(400).json({ error: "Ungültiges Urteil." });
+
+        // --- 🛡️ DEVICE FINGERPRINT LOGIK (Das Cookie auslesen) ---
+        let deviceId = null;
+        if (req.headers.cookie) {
+            // Zerteilt den Cookie-String in ein nutzbares Objekt
+            const cookies = req.headers.cookie.split(';').reduce((acc, cookie) => {
+                const [key, value] = cookie.split('=').map(c => c.trim());
+                acc[key] = value;
+                return acc;
+            }, {});
+            deviceId = cookies['limo_device_id'];
+        }
+        
+        // Wenn das Gerät noch kein Cookie hat, generieren wir ein neues und heften es an den Browser
+        if (!deviceId) {
+            deviceId = uuidv4();
+            res.cookie('limo_device_id', deviceId, { 
+                maxAge: 365 * 24 * 60 * 60 * 1000, // 1 Jahr gültig!
+                httpOnly: true, // Kann nicht von bösartigen Scripts ausgelesen werden
+                secure: process.env.NODE_ENV === 'production',
+                sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax'
+            });
+        }
+        // -----------------------------------------------------------
+
+        const user = await usersCollection.findOne({ _id: userId });
+        
+        // 🛡️ ANTI-SMURF 1: Account-Alter (24h)
+        const accountAgeMs = Date.now() - new Date(user._id.getTimestamp()).getTime();
+        const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+        
+        if (accountAgeMs < ONE_DAY_MS && !user.isAdmin) {
+            return res.status(403).json({ error: "Dein Account muss mindestens 24 Stunden alt sein, um abzustimmen." });
+        }
+
+        // 🛡️ ANTI-SMURF 2: "Skin in the Game" (Aktivitätsprüfung)
+        if (user.balance < 1000 && !user.job && !user.isAdmin) {
+            return res.status(403).json({ error: "Du musst aktiv am Leben in Limazon teilnehmen (z.B. einen Job haben oder $1000 besitzen), um bei Gericht zugelassen zu werden." });
+        }
 
         const courtCase = await db.collection('courtCases').findOne({ _id: new ObjectId(caseId) });
         if (!courtCase || courtCase.status !== 'active') return res.status(404).json({ error: "Fall nicht gefunden oder geschlossen." });
 
-        // Checken ob User schon in IRGENDEINEM Array ist
+        // 🛡️ ANTI-SMURF 3: GERÄTE SPERRE (Max 1 Stimme pro Gerät!)
+        const votedDevices = courtCase.voted_devices || [];
+        
+        if (votedDevices.includes(deviceId) && !user.isAdmin) {
+            return res.status(403).json({ error: "Von diesem Gerät wurde bereits abgestimmt! Das Wechseln des Accounts ist verboten." });
+        }
+
+        // Hat DIESER User (ID) schon abgestimmt?
         const alreadyVoted = 
             (courtCase.votes_guilty || []).some(id => id.toString() === userId.toString()) ||
             (courtCase.votes_innocent || []).some(id => id.toString() === userId.toString());
 
         if (alreadyVoted) return res.status(400).json({ error: "Du hast bereits abgestimmt." });
 
-        // Vote hinzufügen
+        // Vote & Device ID in die Datenbank eintragen
         const field = verdict === 'guilty' ? 'votes_guilty' : 'votes_innocent';
         await db.collection('courtCases').updateOne(
             { _id: new ObjectId(caseId) },
-            { $push: { [field]: userId } }
+            { 
+                $push: { 
+                    [field]: userId,
+                    voted_devices: deviceId // Das Gerät wird für diesen Fall gesperrt
+                } 
+            }
         );
 
-        res.json({ success: true, message: "Stimme gezählt." });
+        res.json({ success: true, message: "Deine Stimme wurde vom Gericht notiert." });
 
     } catch (e) {
         console.error(e);
-        res.status(500).json({ error: "Wahlbetrug verhindert." });
+        res.status(500).json({ error: "Systemfehler bei der Stimmabgabe." });
     }
 });
 
