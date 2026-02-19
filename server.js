@@ -9879,6 +9879,75 @@ app.post('/api/teachermon/pack/buy-multi', isAuthenticated, async (req, res) => 
     }
 });
 
+// J. Admin: Karte löschen & Spieler entschädigen
+app.delete('/api/teachermon/admin/cards/:id', isAuthenticated, isAdmin, async (req, res) => {
+    const cardIdStr = req.params.id;
+    const session = client.startSession();
+    
+    try {
+        await session.withTransaction(async () => {
+            const card = await teachermonCardsCollection.findOne({ id: cardIdStr }, { session });
+            if (!card) throw new Error("Karte nicht gefunden.");
+
+            // Verkaufspreis ermitteln (Fallback 10)
+            const sellPrice = TEACHERMON_RARITIES[card.rarity] ? TEACHERMON_RARITIES[card.rarity].sellPrice : 10;
+
+            // 1. Alle Inventar-Einträge finden
+            const owners = await teachermonInvCollection.find({ cardId: cardIdStr }, { session }).toArray();
+
+            // 2. Erstatte jedem Spieler das Geld (Menge * Preis)
+            const bulkUserUpdates = [];
+            for (const owner of owners) {
+                const refundAmount = owner.quantity * sellPrice;
+                bulkUserUpdates.push({
+                    updateOne: {
+                        filter: { _id: owner.userId },
+                        update: { $inc: { balance: refundAmount } }
+                    }
+                });
+            }
+            if (bulkUserUpdates.length > 0) {
+                await usersCollection.bulkWrite(bulkUserUpdates, { session });
+            }
+
+            // 3. Karte aus allen Inventaren löschen
+            await teachermonInvCollection.deleteMany({ cardId: cardIdStr }, { session });
+
+            // 4. Laufende Trades abbrechen & bereinigen
+            const affectedTrades = await teachermonTradesCollection.find({ 
+                $or: [{ offerCardId: cardIdStr }, { wantCardId: cardIdStr }] 
+            }, { session }).toArray();
+
+            for (const trade of affectedTrades) {
+                if (trade.offerCardId === cardIdStr) {
+                    // Die verpfändete Karte wird gelöscht -> User bekommt stattdessen Geld zurück
+                    await usersCollection.updateOne({ _id: trade.offererId }, { $inc: { balance: sellPrice } }, { session });
+                } else {
+                    // Die *gesuchte* Karte wird gelöscht -> Trade ungültig, User bekommt seine alte Karte zurück
+                    await teachermonInvCollection.updateOne(
+                        { userId: trade.offererId, cardId: trade.offerCardId }, 
+                        { $inc: { quantity: 1 } }, 
+                        { upsert: true, session }
+                    );
+                }
+            }
+            // Trades endgültig löschen
+            await teachermonTradesCollection.deleteMany({
+                $or: [{ offerCardId: cardIdStr }, { wantCardId: cardIdStr }] 
+            }, { session });
+
+            // 5. Die Karte selbst löschen
+            await teachermonCardsCollection.deleteOne({ id: cardIdStr }, { session });
+        });
+
+        res.json({ message: "Karte vernichtet! Alle Besitzer wurden finanziell entschädigt." });
+    } catch (e) {
+        res.status(500).json({ error: e.message || "Fehler beim Löschen." });
+    } finally {
+        await session.endSession();
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
