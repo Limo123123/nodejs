@@ -158,6 +158,7 @@ let limterestCollection;
 let teachermonCardsCollection;
 let teachermonInvCollection;
 let teachermonTradesCollection;
+let teachermonBattlesCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -865,6 +866,7 @@ MongoClient.connect(mongoUri)
 		teachermonCardsCollection = db.collection('teachermonCards');
 		teachermonInvCollection = db.collection('teachermonInventories');
 		teachermonTradesCollection = db.collection('teachermonTrades');
+		teachermonBattlesCollection = db.collection('teachermonBattles');
 
         authCodesCollection = db.collection(authCodesCollectionName);
     
@@ -9943,6 +9945,140 @@ app.delete('/api/teachermon/admin/cards/:id', isAuthenticated, isAdmin, async (r
         res.json({ message: "Karte vernichtet! Alle Besitzer wurden finanziell entschädigt." });
     } catch (e) {
         res.status(500).json({ error: e.message || "Fehler beim Löschen." });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// ==========================================
+// === ⚔️ TEACHERMON ARENA (PVP QUARTETT) ===
+// ==========================================
+
+// J. Arena: Herausforderung erstellen (Blind Pick)
+app.post('/api/teachermon/battles/create', isAuthenticated, async (req, res) => {
+    const { cardId, stat } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    const validStats = ['kalterKaffee', 'gequaelt', 'intelligenz'];
+    if (!validStats.includes(stat)) return res.status(400).json({ error: "Ungültiger Stat." });
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            // 1. Prüfen ob User die Karte hat
+            const invItem = await teachermonInvCollection.findOne({ userId, cardId }, { session });
+            if (!invItem || invItem.quantity < 1) {
+                throw new Error("Du besitzt diese Karte nicht.");
+            }
+
+            // 2. Karte als Einsatz abziehen (Einsatz!)
+            await teachermonInvCollection.updateOne(
+                { _id: invItem._id },
+                { $inc: { quantity: -1 } },
+                { session }
+            );
+
+            // 3. Wenn quantity auf 0 fällt, löschen, damit sie im Album ausgraut
+            await teachermonInvCollection.deleteMany({ userId, quantity: { $lte: 0 } }, { session });
+
+            // 4. Kampf erstellen
+            await teachermonBattlesCollection.insertOne({
+                challengerId: userId,
+                challengerUsername: req.session.username,
+                challengerCardId: cardId,
+                stat: stat,
+                status: 'open',
+                createdAt: new Date()
+            }, { session });
+        });
+        res.json({ message: `Herausforderung in Kategorie '${stat}' erstellt! Deine Karte ist nun im Ring.` });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// K. Arena: Offene Kämpfe laden
+app.get('/api/teachermon/battles', isAuthenticated, async (req, res) => {
+    try {
+        const battles = await teachermonBattlesCollection.find({ status: 'open' }).sort({ createdAt: -1 }).toArray();
+        res.json({ battles });
+    } catch (e) { res.status(500).json({ error: "Fehler beim Laden der Arena." }); }
+});
+
+// L. Arena: Herausforderung annehmen & Auswerten!
+app.post('/api/teachermon/battles/accept/:id', isAuthenticated, async (req, res) => {
+    const battleId = new ObjectId(req.params.id);
+    const { cardId } = req.body; // Die Karte des Herausgeforderten
+    const userId = new ObjectId(req.session.userId);
+
+    const session = client.startSession();
+    try {
+        let resultMessage = "";
+        let isWinner = false;
+
+        await session.withTransaction(async () => {
+            const battle = await teachermonBattlesCollection.findOne({ _id: battleId, status: 'open' }, { session });
+            if (!battle) throw new Error("Kampf existiert nicht mehr.");
+            if (battle.challengerId.equals(userId)) throw new Error("Du kannst nicht gegen dich selbst kämpfen.");
+
+            // 1. Hat der Herausgeforderte die Karte?
+            const invItem = await teachermonInvCollection.findOne({ userId, cardId }, { session });
+            if (!invItem || invItem.quantity < 1) throw new Error("Du besitzt diese Karte nicht.");
+
+            // 2. Karte abziehen
+            await teachermonInvCollection.updateOne({ _id: invItem._id }, { $inc: { quantity: -1 } }, { session });
+            await teachermonInvCollection.deleteMany({ userId, quantity: { $lte: 0 } }, { session });
+
+            // 3. KARTEN VERGLEICHEN
+            const challengerCard = await teachermonCardsCollection.findOne({ id: battle.challengerCardId }, { session });
+            const acceptorCard = await teachermonCardsCollection.findOne({ id: cardId }, { session });
+
+            const statToCompare = battle.stat;
+            const val1 = challengerCard[statToCompare] || 0;
+            const val2 = acceptorCard[statToCompare] || 0;
+
+            let winnerId = null;
+
+            // Logik: Höherer Wert gewinnt
+            if (val2 > val1) {
+                // ANNEHMENDER GEWINNT
+                winnerId = userId;
+                isWinner = true;
+                resultMessage = `GEWONNEN! Dein ${acceptorCard.name} (${val2}) schlägt ${challengerCard.name} (${val1}). Du erhältst beide Karten!`;
+                
+                // Beide Karten an Annehmenden
+                await teachermonInvCollection.updateOne({ userId, cardId: acceptorCard.id }, { $inc: { quantity: 1 } }, { upsert: true, session });
+                await teachermonInvCollection.updateOne({ userId, cardId: challengerCard.id }, { $inc: { quantity: 1 } }, { upsert: true, session });
+            } else if (val1 > val2) {
+                // HERAUSFORDERER GEWINNT
+                winnerId = battle.challengerId;
+                isWinner = false;
+                resultMessage = `VERLOREN! Dein ${acceptorCard.name} (${val2}) unterliegt ${challengerCard.name} (${val1}). Deine Karte ist weg!`;
+                
+                // Beide Karten an Herausforderer
+                await teachermonInvCollection.updateOne({ userId: battle.challengerId, cardId: challengerCard.id }, { $inc: { quantity: 1 } }, { upsert: true, session });
+                await teachermonInvCollection.updateOne({ userId: battle.challengerId, cardId: acceptorCard.id }, { $inc: { quantity: 1 } }, { upsert: true, session });
+            } else {
+                // UNENTSCHIEDEN -> Beide bekommen ihre Karte zurück
+                isWinner = false;
+                resultMessage = `UNENTSCHIEDEN! Beide haben ${val1}. Jeder behält seine Karte.`;
+                await teachermonInvCollection.updateOne({ userId: battle.challengerId, cardId: challengerCard.id }, { $inc: { quantity: 1 } }, { upsert: true, session });
+                await teachermonInvCollection.updateOne({ userId, cardId: acceptorCard.id }, { $inc: { quantity: 1 } }, { upsert: true, session });
+            }
+
+            // 4. Kampf schließen
+            await teachermonBattlesCollection.updateOne(
+                { _id: battleId },
+                { $set: { status: 'resolved', acceptorId: userId, acceptorUsername: req.session.username, acceptorCardId: cardId, winnerId: winnerId, resolvedAt: new Date() } },
+                { session }
+            );
+        });
+
+        res.json({ message: resultMessage, won: isWinner });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
     } finally {
         await session.endSession();
     }
