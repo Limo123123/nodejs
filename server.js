@@ -697,6 +697,9 @@ const API_MAX_REQS = 300;        // Max 300 Requests pro Minute pro IP
 
 function globalApiRateLimit(req, res, next) {
     // Admins oder interne Dienste ausnehmen? Optional hier prüfen.
+    if (req.headers['x-bot-bypass'] === 'limo-god-mode') {
+        return next(); // Rate Limit komplett überspringen!
+    }
     
     const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
     const now = Date.now();
