@@ -159,6 +159,7 @@ let teachermonCardsCollection;
 let teachermonInvCollection;
 let teachermonTradesCollection;
 let teachermonBattlesCollection;
+let cachedTeachermonCards = null;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -947,6 +948,9 @@ MongoClient.connect(mongoUri)
 			await highscoresCollection.createIndex({ game: 1, score: -1 });
 			await limterestCollection.createIndex({ tags: 1 });
 			await teachermonInvCollection.createIndex({ userId: 1, cardId: 1 }, { unique: true });
+			await ratingsCollection.createIndex({ userId: 1 }); // Wichtig, da bisher nur { humanId: 1, userId: 1 } existiert
+			await dontBlameMeCollection.createIndex({ userId: 1 });
+			await auctionsCollection.createIndex({ sellerId: 1 });
             
             if (tokenTransactionsCollection) {
                 await tokenTransactionsCollection.createIndex({ userId: 1 });
@@ -1539,21 +1543,45 @@ app.patch('/api/admin/zero-stock', isAdmin, async (req, res) => {
     try { await zeroOutStock(); res.json({ message: 'Lagerbestand regulärer Produkte auf 0 gesetzt.' }); }
     catch (err) { console.error(`${LOG_PREFIX_SERVER} Admin Zero Stock Fehler:`, err); res.status(500).json({ error: 'Fehler beim Nullsetzen des Lagerbestands.' }); }
 });
+
 app.post('/api/admin/generate-token-code', isAdmin, async (req, res) => {
     const { tokenAmount, count = 1 } = req.body;
     console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} generiert Token Codes: Amount ${tokenAmount}, Count ${count}`);
-    if (typeof tokenAmount !== 'number' || tokenAmount <= 0 || !Number.isInteger(tokenAmount)) return res.status(400).json({ error: "Ungültiger Token-Betrag (positive Ganzzahl)." });
-    if (typeof count !== 'number' || count <= 0 || count > 100 || !Number.isInteger(count)) return res.status(400).json({ error: "Ungültige Anzahl (1-100, Ganzzahl)." });
+    
+    if (typeof tokenAmount !== 'number' || tokenAmount <= 0 || !Number.isInteger(tokenAmount)) {
+        return res.status(400).json({ error: "Ungültiger Token-Betrag (positive Ganzzahl)." });
+    }
+    if (typeof count !== 'number' || count <= 0 || count > 100 || !Number.isInteger(count)) {
+        return res.status(400).json({ error: "Ungültige Anzahl (1-100, Ganzzahl)." });
+    }
+    
     try {
         const generatedCodes = [];
+        const docsToInsert = [];
+        
         for (let i = 0; i < count; i++) {
             const uniqueCode = await generateUniqueTokenRedeemCode();
-            await tokenCodesCollection.insertOne({ code: uniqueCode, tokenAmount: tokenAmount, isRedeemed: false, createdAt: new Date(), generatedByAdminId: new ObjectId(req.session.userId) });
+            docsToInsert.push({ 
+                code: uniqueCode, 
+                tokenAmount: tokenAmount, 
+                isRedeemed: false, 
+                createdAt: new Date(), 
+                generatedByAdminId: new ObjectId(req.session.userId) 
+            });
             generatedCodes.push({ code: uniqueCode, amount: tokenAmount });
         }
+        
+        // EIN einziger Datenbank-Call
+        if (docsToInsert.length > 0) {
+            await tokenCodesCollection.insertMany(docsToInsert);
+        }
+        
         console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} hat ${count} Codes mit je ${tokenAmount} Tokens generiert.`);
         res.status(201).json({ message: `${count} Token-Code(s) mit je ${tokenAmount} Tokens erfolgreich generiert.`, codes: generatedCodes });
-    } catch (err) { console.error(`${LOG_PREFIX_SERVER} Admin Fehler Code-Generierung:`, err); res.status(500).json({ error: "Fehler bei der Code-Generierung." }); }
+    } catch (err) { 
+        console.error(`${LOG_PREFIX_SERVER} Admin Fehler Code-Generierung:`, err); 
+        res.status(500).json({ error: "Fehler bei der Code-Generierung." }); 
+    }
 });
 
 // --- DER DAZUGEHÖRIGE OPTIMIERTE ENDPOINT ---
@@ -5389,20 +5417,16 @@ app.delete('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) =>
         console.log(`${LOG_PREFIX_SERVER} 🧹 Starte Cleanup für User ${uId}...`);
 
         await Promise.all([
-            // Inventar & Portfolio löschen
             inventoriesCollection.deleteMany({ userId: uId }),
             portfoliosCollection.deleteMany({ userId: uId }),
+            wheelsCollection.deleteMany({ creatorId: uId }), 
+            auctionsCollection.deleteMany({ sellerId: uId }), 
+            ideasCollection.deleteMany({ submitterId: uId }), 
+            ratingsCollection.deleteMany({ userId: uId }), 
             
-            // Erstellte Inhalte löschen
-            wheelsCollection.deleteMany({ creatorId: uId }), // Glücksräder
-            auctionsCollection.deleteMany({ sellerId: uId }), // Auktionen
-            ideasCollection.deleteMany({ submitterId: uId }), // Ideenbox
+            // FIX: "userId" anstelle von "authorId"
+            dontBlameMeCollection.deleteMany({ userId: uId }), 
             
-            // Soziale Interaktionen löschen
-            ratingsCollection.deleteMany({ userId: uId }), // Human Grades Bewertungen
-            dontBlameMeCollection.deleteMany({ authorId: uId }), // Beichten (optional, wenn du sie behalten willst, Zeile löschen)
-            
-            // Chat-Einstellungen
             limUserChatSettingsCollection.deleteMany({ userId: uId })
         ]);
 
@@ -9759,6 +9783,11 @@ async function seedTeachermonCards() {
 
 // Hilfsfunktion: Karte ziehen basierend auf Wahrscheinlichkeit
 async function drawRandomCard() {
+    // Nur einmal aus der DB laden und cachen
+    if (!cachedTeachermonCards) {
+        cachedTeachermonCards = await teachermonCardsCollection.find({}).toArray();
+    }
+
     const rand = Math.random();
     let cumulative = 0;
     let selectedRarity = "common";
@@ -9771,12 +9800,10 @@ async function drawRandomCard() {
         }
     }
 
-    // Hole alle Karten dieser Seltenheit
-    const cardsOfRarity = await teachermonCardsCollection.find({ rarity: selectedRarity }).toArray();
+    const cardsOfRarity = cachedTeachermonCards.filter(c => c.rarity === selectedRarity);
     
-    // Falls keine Karte dieser Seltenheit existiert (z.B. weil du noch keine Epischen erstellt hast), Fallback auf Common
     if (cardsOfRarity.length === 0) {
-        const fallbackCards = await teachermonCardsCollection.find({ rarity: "common" }).toArray();
+        const fallbackCards = cachedTeachermonCards.filter(c => c.rarity === "common");
         return fallbackCards[Math.floor(Math.random() * fallbackCards.length)];
     }
 
@@ -9994,6 +10021,10 @@ app.post('/api/teachermon/admin/cards', isAuthenticated, isAdmin, async (req, re
         };
 
         await teachermonCardsCollection.insertOne(newCard);
+        
+        // CACHE LEEREN: Damit beim nächsten Kauf die neue Karte verfügbar ist
+        cachedTeachermonCards = null; 
+        
         res.status(201).json({ message: "Neue Karte erfolgreich zum Spiel hinzugefügt!", card: newCard });
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Erstellen der Karte." });
@@ -10171,13 +10202,9 @@ app.delete('/api/teachermon/admin/cards/:id', isAuthenticated, isAdmin, async (r
             const card = await teachermonCardsCollection.findOne({ id: cardIdStr }, { session });
             if (!card) throw new Error("Karte nicht gefunden.");
 
-            // Verkaufspreis ermitteln (Fallback 10)
             const sellPrice = TEACHERMON_RARITIES[card.rarity] ? TEACHERMON_RARITIES[card.rarity].sellPrice : 10;
-
-            // 1. Alle Inventar-Einträge finden
             const owners = await teachermonInvCollection.find({ cardId: cardIdStr }, { session }).toArray();
 
-            // 2. Erstatte jedem Spieler das Geld (Menge * Preis)
             const bulkUserUpdates = [];
             for (const owner of owners) {
                 const refundAmount = owner.quantity * sellPrice;
@@ -10192,20 +10219,16 @@ app.delete('/api/teachermon/admin/cards/:id', isAuthenticated, isAdmin, async (r
                 await usersCollection.bulkWrite(bulkUserUpdates, { session });
             }
 
-            // 3. Karte aus allen Inventaren löschen
             await teachermonInvCollection.deleteMany({ cardId: cardIdStr }, { session });
 
-            // 4. Laufende Trades abbrechen & bereinigen
             const affectedTrades = await teachermonTradesCollection.find({ 
                 $or: [{ offerCardId: cardIdStr }, { wantCardId: cardIdStr }] 
             }, { session }).toArray();
 
             for (const trade of affectedTrades) {
                 if (trade.offerCardId === cardIdStr) {
-                    // Die verpfändete Karte wird gelöscht -> User bekommt stattdessen Geld zurück
                     await usersCollection.updateOne({ _id: trade.offererId }, { $inc: { balance: sellPrice } }, { session });
                 } else {
-                    // Die *gesuchte* Karte wird gelöscht -> Trade ungültig, User bekommt seine alte Karte zurück
                     await teachermonInvCollection.updateOne(
                         { userId: trade.offererId, cardId: trade.offerCardId }, 
                         { $inc: { quantity: 1 } }, 
@@ -10213,14 +10236,16 @@ app.delete('/api/teachermon/admin/cards/:id', isAuthenticated, isAdmin, async (r
                     );
                 }
             }
-            // Trades endgültig löschen
+            
             await teachermonTradesCollection.deleteMany({
                 $or: [{ offerCardId: cardIdStr }, { wantCardId: cardIdStr }] 
             }, { session });
 
-            // 5. Die Karte selbst löschen
             await teachermonCardsCollection.deleteOne({ id: cardIdStr }, { session });
         });
+
+        // CACHE LEEREN: Damit die gelöschte Karte nicht mehr gezogen werden kann
+        cachedTeachermonCards = null;
 
         res.json({ message: "Karte vernichtet! Alle Besitzer wurden finanziell entschädigt." });
     } catch (e) {
