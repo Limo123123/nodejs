@@ -7,6 +7,7 @@ const helmet = require('helmet');
 const multer = require('multer');
 const sharp = require('sharp');
 const { createProxyMiddleware } = require('http-proxy-middleware');
+const { createClient } = require('redis');
 
 // Lade Umgebungsvariablen aus secret.env (wenn vorhanden)
 const pathToSecretEnv = '/etc/secrets/secret.env'; // Für Render
@@ -69,7 +70,7 @@ const frontendDevUrlHttps = 'https://wl.limazon.v6.rocks';
 const PRICE_UPDATE_INTERVAL_MS = 5 * 60 * 1000; // 5 Minuten
 const PRICE_VOLATILITY_FACTOR = 0.005; // Wie stark Preise reagieren
 const MINIMUM_PRODUCT_PRICE = 1.00; // Minimaler Preis für ein Produkt
-const compression = require('compression'); 
+const compression = require('compression');
 const CACHE_DIR = path.resolve(__dirname, 'cache');
 const PRODUCTS_CACHE_FILE = path.resolve(CACHE_DIR, 'products_cache.json');
 let globalProductCache = [];
@@ -86,11 +87,11 @@ if (!mongoUri) { console.error(`${LOG_PREFIX_SERVER} !!! FEHLER: Keine MongoDB U
 
 // --- Middleware ---
 const allowedOrigins = [
-    frontendDevUrlHttp, 
+    frontendDevUrlHttp,
     frontendDevUrlHttps,
-	'https://raspberrypi.tail75d81e.ts.net:8443',
-	'https://api.limazon.v6.rocks',
-	'https://limohub.app',
+    'https://raspberrypi.tail75d81e.ts.net:8443',
+    'https://api.limazon.v6.rocks',
+    'https://limohub.app',
 ];
 if (frontendProdUrl) { allowedOrigins.push(frontendProdUrl); }
 console.log(`${LOG_PREFIX_SERVER} Erlaubte CORS Origins:`, allowedOrigins);
@@ -98,9 +99,9 @@ console.log(`${LOG_PREFIX_SERVER} Erlaubte CORS Origins:`, allowedOrigins);
 app.use(cors({
     origin: function (origin, callback) {
         // Prüfen, ob die Origin in der statischen Liste ist ODER dem dynamischen Muster entspricht
-        const isAllowed = !origin || 
-                          allowedOrigins.includes(origin) || 
-                          (origin && origin.endsWith('.scf.usercontent.goog'));
+        const isAllowed = !origin ||
+            allowedOrigins.includes(origin) ||
+            (origin && origin.endsWith('.scf.usercontent.goog'));
 
         if (isAllowed) {
             callback(null, true); // Anfrage erlauben
@@ -171,13 +172,13 @@ if (!fs.existsSync(CDN_DIR)) fs.mkdirSync(CDN_DIR);
 
 // Multer Setup: Bilder im Arbeitsspeicher behalten, um sie direkt zu komprimieren
 const storage = multer.memoryStorage();
-const upload = multer({ 
+const upload = multer({
     storage: storage,
     limits: { fileSize: 10 * 1024 * 1024 } // Max 10MB vor der Kompression
 });
 
 // Proxy: Alles was auf /cdn/ geht, leiten wir intern an den Nginx Container weiter
-app.use('/cdn', createProxyMiddleware({ 
+app.use('/cdn', createProxyMiddleware({
     target: 'http://limazon-cdn:80', // Name des Containers in der docker-compose
     changeOrigin: true,
     pathRewrite: { '^/cdn': '' }, // Entfernt /cdn aus dem Pfad für Nginx
@@ -200,7 +201,7 @@ app.post('/api/cdn/upload', isAuthenticated, upload.single('image'), async (req,
 
         // URL zurückgeben
         const fileUrl = `https://api.limazon.v6.rocks/cdn/${filename}`;
-        
+
         console.log(`${LOG_PREFIX_SERVER} 🖼️ Neues Bild hochgeladen: ${filename}`);
         res.json({ message: 'Upload erfolgreich!', url: fileUrl, filename: filename });
 
@@ -214,7 +215,7 @@ app.post('/api/cdn/upload', isAuthenticated, upload.single('image'), async (req,
 app.get('/api/cdn/list', isAuthenticated, (req, res) => {
     fs.readdir(CDN_DIR, (err, files) => {
         if (err) return res.status(500).json({ error: "Konnte Dateien nicht lesen." });
-        
+
         const baseUrl = `https://api.limazon.v6.rocks/cdn/`;
         // Nur .webp Dateien nehmen und URLs zusammenbauen
         const images = files.filter(f => f.endsWith('.webp')).map(f => ({
@@ -223,7 +224,7 @@ app.get('/api/cdn/list', isAuthenticated, (req, res) => {
             // (Optional könnte man noch auslesen, von wem das Bild ist, 
             // aber für den Start zeigen wir einfach alle Server-Bilder an)
         }));
-        
+
         // Da Nginx sehr schnell ist, können wir ruhig alle listen (oder auf 50 limitieren)
         res.json({ images: images.reverse().slice(0, 100) });
     });
@@ -232,7 +233,7 @@ app.get('/api/cdn/list', isAuthenticated, (req, res) => {
 // API: Bild löschen (Nur für Admins)
 app.delete('/api/cdn/delete/:filename', isAuthenticated, isAdmin, (req, res) => {
     const filename = req.params.filename;
-    
+
     // 1. Sicherheits-Check: Path Traversal verhindern (damit niemand "/../../etc/passwd" löscht)
     if (!filename || filename.includes('/') || filename.includes('\\') || filename.includes('..')) {
         return res.status(400).json({ error: 'Ungültiger Dateiname.' });
@@ -250,7 +251,7 @@ app.delete('/api/cdn/delete/:filename', isAuthenticated, isAdmin, (req, res) => 
             console.error(`${LOG_PREFIX_SERVER} Fehler beim Löschen von ${filename}:`, err);
             return res.status(500).json({ error: 'Fehler beim Löschen der Datei.' });
         }
-        
+
         console.log(`${LOG_PREFIX_SERVER} 🗑️ Bild gelöscht: ${filename} von Admin ${req.session.username}`);
         res.json({ message: 'Bild erfolgreich gelöscht.' });
     });
@@ -344,7 +345,7 @@ async function convertProductsToStocks() {
 async function normalizeExtremeBalances() {
     try {
         // Das harte Limit, das du wolltest (100 Billionen)
-        const SAFE_MAX = 100000000000000; 
+        const SAFE_MAX = 100000000000000;
 
         console.log(`${LOG_PREFIX_SECURITY} Prüfe auf Werte über ${SAFE_MAX} (oder 'Infinity')...`);
 
@@ -368,12 +369,12 @@ async function normalizeExtremeBalances() {
 
         const bulkOps = usersToFix.map(user => {
             const updates = {};
-            
+
             // Prüfe Geld
             if (user.balance > SAFE_MAX || user.balance === Infinity) {
                 updates.balance = SAFE_MAX;
             }
-            
+
             // Prüfe Tokens
             if (user.tokens > SAFE_MAX || user.tokens === Infinity) {
                 updates.tokens = SAFE_MAX;
@@ -389,7 +390,7 @@ async function normalizeExtremeBalances() {
 
         const result = await usersCollection.bulkWrite(bulkOps);
         console.log(`${LOG_PREFIX_SECURITY} ✅ Normalisierung abgeschlossen. ${result.modifiedCount} User korrigiert.`);
-        
+
         return { message: `${result.modifiedCount} Kontostände/Tokens wurden auf das Limit gesetzt.`, modifiedCount: result.modifiedCount };
 
     } catch (err) {
@@ -692,7 +693,7 @@ function generateFastTokenCode() {
 // =========================================================
 // === GLOBAL API RATE LIMITER (RAM BASED) ===
 // =========================================================
-const apiRequestCounts = new Map(); 
+const apiRequestCounts = new Map();
 const API_WINDOW_MS = 60 * 1000; // 1 Minute Zeitfenster
 const API_MAX_REQS = 300;        // Max 300 Requests pro Minute pro IP
 
@@ -701,7 +702,7 @@ function globalApiRateLimit(req, res, next) {
     if (req.headers['x-bot-bypass'] === 'limo-god-mode') {
         return next(); // Rate Limit komplett überspringen!
     }
-    
+
     const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
     const now = Date.now();
 
@@ -722,7 +723,7 @@ function globalApiRateLimit(req, res, next) {
 
     if (data.count >= API_MAX_REQS) {
         // Limit erreicht
-        return res.status(429).json({ 
+        return res.status(429).json({
             error: "Zu viele Anfragen. Bitte warte einen Moment.",
             retryAfterSeconds: Math.ceil((data.resetTime - now) / 1000)
         });
@@ -744,11 +745,11 @@ function globalApiRateLimit(req, res, next) {
 // =========================================================
 
 // NEU: Der fertig berechnete JSON-String für ultimativen Speed
-let globalProductCacheString = '{"products":[]}'; 
+let globalProductCacheString = '{"products":[]}';
 
 async function initCacheSystem() {
     console.log(`${LOG_PREFIX_SERVER} 🚀 Initialisiere Cache System...`);
-    
+
     // 1. Cache Ordner erstellen
     if (!fs.existsSync(CACHE_DIR)) {
         fs.mkdirSync(CACHE_DIR);
@@ -775,8 +776,8 @@ async function refreshProductCache() {
     try {
         // Hole ALLE Produkte aus der DB (ohne History für Speed)
         // Sortieren nach ID sorgt für konsistente Reihenfolge
-        const prods = await productsCollection.find({}, { 
-            projection: { priceHistory: 0 } 
+        const prods = await productsCollection.find({}, {
+            projection: { priceHistory: 0 }
         }).sort({ id: 1 }).toArray();
 
         // Datenbereinigung & Preis-Logik (wie gehabt)
@@ -802,9 +803,9 @@ async function refreshProductCache() {
             // Rest
             s.stock = (typeof p.stock === 'number' && p.stock >= 0) ? p.stock : 0;
             s.default_stock = (typeof p.default_stock === 'number' && p.default_stock >= 0) ? p.default_stock : (p.isTokenCard ? 99999 : 20);
-            
+
             // _id entfernen spart Speicher und Bandbreite beim Senden
-            delete s._id; 
+            delete s._id;
             return s;
         });
 
@@ -821,7 +822,7 @@ async function refreshProductCache() {
         });
 
         // Trigger für Smart Polling (Frontend merkt: "Ah, neue Daten!")
-        updateDataVersion('products'); 
+        updateDataVersion('products');
 
         // console.log(`${LOG_PREFIX_SERVER} ♻️ Produkt-Cache aktualisiert (${sanitized.length} Items).`);
         return sanitized;
@@ -865,7 +866,7 @@ MongoClient.connect(mongoUri)
     .then(async mongoClient => {
         client = mongoClient; // Client global speichern für Transaktionen
         db = client.db(mongoDbName);
-        
+
         // --- 1. Collections Initialisieren ---
         productsCollection = db.collection(productsCollectionName);
         usersCollection = db.collection(usersCollectionName);
@@ -884,23 +885,23 @@ MongoClient.connect(mongoUri)
         ideasCollection = db.collection('ideas');
         newsCollection = db.collection('news');
         robberyLogsCollection = db.collection('robberyLogs');
-		highscoresCollection = db.collection('highscores');
-		bugReportsCollection = db.collection('bugReports');
-		systemSettingsCollection = db.collection('systemSettings');
+        highscoresCollection = db.collection('highscores');
+        bugReportsCollection = db.collection('bugReports');
+        systemSettingsCollection = db.collection('systemSettings');
         humansCollection = db.collection('humans');
         ratingsCollection = db.collection('ratings');
-        criteriaCollection = db.collection('criteria');  
+        criteriaCollection = db.collection('criteria');
         categoriesCollection = db.collection('categories');
-		tindaSwipesCollection = db.collection('tindaSwipes'); 
-		restaurantOrdersCollection = db.collection('restaurantOrders');
-		limterestCollection = db.collection(limterestCollectionName);
-		teachermonCardsCollection = db.collection('teachermonCards');
-		teachermonInvCollection = db.collection('teachermonInventories');
-		teachermonTradesCollection = db.collection('teachermonTrades');
-		teachermonBattlesCollection = db.collection('teachermonBattles');
+        tindaSwipesCollection = db.collection('tindaSwipes');
+        restaurantOrdersCollection = db.collection('restaurantOrders');
+        limterestCollection = db.collection(limterestCollectionName);
+        teachermonCardsCollection = db.collection('teachermonCards');
+        teachermonInvCollection = db.collection('teachermonInventories');
+        teachermonTradesCollection = db.collection('teachermonTrades');
+        teachermonBattlesCollection = db.collection('teachermonBattles');
 
         authCodesCollection = db.collection(authCodesCollectionName);
-    
+
         bankTransactionsCollection = db.collection('bankTransactions');
         console.log(`${LOG_PREFIX_SERVER} ✅ MongoDB verbunden & alle Collections initialisiert.`);
         // --- 2. Indizes & Reparaturen ---
@@ -914,7 +915,7 @@ MongoClient.connect(mongoUri)
             await humansCollection.createIndex({ id: 1 }, { unique: true, sparse: true });
             await criteriaCollection.createIndex({ id: 1 }, { unique: true });
             await categoriesCollection.createIndex({ id: 1 }, { unique: true });
-			await initCacheSystem();
+            await initCacheSystem();
             await usersCollection.createIndex({ userShareCode: 1 }, { unique: true, sparse: true });
             await limChatsCollection.createIndex({ participants: 1 });
             await limChatsCollection.createIndex({ type: 1 });
@@ -945,13 +946,13 @@ MongoClient.connect(mongoUri)
             await tokenCodesCollection.createIndex({ code: 1 }, { unique: true });
             await tokenCodesCollection.createIndex({ redeemedByUserId: 1 });
             await tokenCodesCollection.createIndex({ generatedForUserId: 1, isRedeemed: 1 });
-			await highscoresCollection.createIndex({ game: 1, score: -1 });
-			await limterestCollection.createIndex({ tags: 1 });
-			await teachermonInvCollection.createIndex({ userId: 1, cardId: 1 }, { unique: true });
-			await ratingsCollection.createIndex({ userId: 1 }); // Wichtig, da bisher nur { humanId: 1, userId: 1 } existiert
-			await dontBlameMeCollection.createIndex({ userId: 1 });
-			await auctionsCollection.createIndex({ sellerId: 1 });
-            
+            await highscoresCollection.createIndex({ game: 1, score: -1 });
+            await limterestCollection.createIndex({ tags: 1 });
+            await teachermonInvCollection.createIndex({ userId: 1, cardId: 1 }, { unique: true });
+            await ratingsCollection.createIndex({ userId: 1 }); // Wichtig, da bisher nur { humanId: 1, userId: 1 } existiert
+            await dontBlameMeCollection.createIndex({ userId: 1 });
+            await auctionsCollection.createIndex({ sellerId: 1 });
+
             if (tokenTransactionsCollection) {
                 await tokenTransactionsCollection.createIndex({ userId: 1 });
                 await tokenTransactionsCollection.createIndex({ type: 1 });
@@ -961,46 +962,46 @@ MongoClient.connect(mongoUri)
                 { "createdAt": 1 },
                 { expireAfterSeconds: 72 * 60 * 60 }
             );
-			await authCodesCollection.createIndex({ "createdAt": 1 }, { expireAfterSeconds: 300 });
+            await authCodesCollection.createIndex({ "createdAt": 1 }, { expireAfterSeconds: 300 });
 
-			// --- AUTO-DELETE (TTL) INDIZES ---
-			// Löscht Logs automatisch nach einer bestimmten Zeit
+            // --- AUTO-DELETE (TTL) INDIZES ---
+            // Löscht Logs automatisch nach einer bestimmten Zeit
 
-			// Bank-Historie: 90 Tage aufheben
-			await bankTransactionsCollection.createIndex(
-			    { "timestamp": 1 }, 
-			    { expireAfterSeconds: 90 * 24 * 60 * 60 } 
-			);
+            // Bank-Historie: 90 Tage aufheben
+            await bankTransactionsCollection.createIndex(
+                { "timestamp": 1 },
+                { expireAfterSeconds: 90 * 24 * 60 * 60 }
+            );
 
-			// Raub-Logs: 30 Tage aufheben (interessiert später niemanden mehr)
-			if (robberyLogsCollection) {
-			    await robberyLogsCollection.createIndex(
-			        { "timestamp": 1 }, 
-			        { expireAfterSeconds: 30 * 24 * 60 * 60 } 
-				);
-			}
+            // Raub-Logs: 30 Tage aufheben (interessiert später niemanden mehr)
+            if (robberyLogsCollection) {
+                await robberyLogsCollection.createIndex(
+                    { "timestamp": 1 },
+                    { expireAfterSeconds: 30 * 24 * 60 * 60 }
+                );
+            }
 
-			// Token-Logs: 60 Tage aufheben
-			if (tokenTransactionsCollection) {
- 			   await tokenTransactionsCollection.createIndex(
- 			     { "timestamp": 1 }, 
-   			     { expireAfterSeconds: 60 * 24 * 60 * 60 } 
-  				);
-			}
+            // Token-Logs: 60 Tage aufheben
+            if (tokenTransactionsCollection) {
+                await tokenTransactionsCollection.createIndex(
+                    { "timestamp": 1 },
+                    { expireAfterSeconds: 60 * 24 * 60 * 60 }
+                );
+            }
 
-			// Nachrichten: Optional, z.B. nach 1 Jahr löschen, wenn der Chat zu voll wird
-			await limMessagesCollection.createIndex(
-			    { "timestamp": 1 }, 
-			    { expireAfterSeconds: 365 * 24 * 60 * 60 } 
-			);
+            // Nachrichten: Optional, z.B. nach 1 Jahr löschen, wenn der Chat zu voll wird
+            await limMessagesCollection.createIndex(
+                { "timestamp": 1 },
+                { expireAfterSeconds: 365 * 24 * 60 * 60 }
+            );
 
-			console.log(`${LOG_PREFIX_SERVER} ♻️ Auto-Delete (TTL) Indizes geprüft.`);
-			
-			await seedTeachermonCards();
+            console.log(`${LOG_PREFIX_SERVER} ♻️ Auto-Delete (TTL) Indizes geprüft.`);
+
+            await seedTeachermonCards();
 
             console.log(`${LOG_PREFIX_SERVER} ✅ Alle Indizes erfolgreich geprüft/erstellt.`);
-        } catch (indexErr) { 
-            console.error(`${LOG_PREFIX_SERVER} ❌ Fehler bei der Indexerstellung:`, indexErr); 
+        } catch (indexErr) {
+            console.error(`${LOG_PREFIX_SERVER} ❌ Fehler bei der Indexerstellung:`, indexErr);
         }
 
         // --- 3. Seeding (Datenbank befüllen) ---
@@ -1011,139 +1012,187 @@ MongoClient.connect(mongoUri)
                 await seedDatabaseFromLocalJson();
             }
         } catch (seedErr) { console.error(`${LOG_PREFIX_SERVER}    Fehler beim Produkt-Seeding:`, seedErr); }
-        
+
         await seedTokenCardProducts();
         await seedDefaultPublicWheel();
-        
+
         // WICHTIG: Human Grades Defaults laden (hier an der richtigen Stelle!)
-        await seedHumanGradesDefaults(); 
+        await seedHumanGradesDefaults();
 
         // --- 4. Automatisierte Checks & Jobs ---
         console.log(`${LOG_PREFIX_SERVER} 🚀 Führe initiale Datenintegritäts-Prüfung aus...`);
         await runAutomatedSecurityChecks();
 
         const SECURITY_CHECK_INTERVAL_MS = 60 * 60 * 1000;
-        setInterval(runAutomatedSecurityChecks, SECURITY_CHECK_INTERVAL_MS);
-        console.log(`${LOG_PREFIX_SERVER} ⏰ Automatische Sicherheits-Prüfung aktiv.`);
+        if (cluster.isPrimary) {
+            setInterval(runAutomatedSecurityChecks, SECURITY_CHECK_INTERVAL_MS);
+            console.log(`${LOG_PREFIX_SERVER} ⏰ Automatische Sicherheits-Prüfung aktiv (Nur Master).`);
+        }
 
         // AUKTION-ENDE-JOB
-        setInterval(async () => {
-            // console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Prüfe...`);
-            const now = new Date();
-            try {
-                const expiredAuctions = await auctionsCollection.find({ status: 'active', endTime: { $lte: now } }).toArray();
-                if (expiredAuctions.length > 0) {
-                    console.log(`${LOG_PREFIX_SERVER} [AuctionJob] ${expiredAuctions.length} Auktion(en) beendet.`);
-                    for (const auction of expiredAuctions) {
-                        if (auction.highestBidderId) {
-                            await inventoriesCollection.updateOne({ userId: auction.highestBidderId, productId: auction.productId }, { $inc: { quantityOwned: auction.quantity } }, { upsert: true });
-                            await usersCollection.updateOne({ _id: auction.sellerId }, { $inc: { balance: auction.currentBid } });
-                            await auctionsCollection.updateOne({ _id: auction._id }, { $set: { status: 'ended_sold' } });
-                            console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Auktion ${auction._id} verkauft.`);
-                        } else {
-                            await inventoriesCollection.updateOne({ userId: auction.sellerId, productId: auction.productId }, { $inc: { quantityOwned: auction.quantity } }, { upsert: true });
-                            await auctionsCollection.updateOne({ _id: auction._id }, { $set: { status: 'ended_unsold' } });
-                            console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Auktion ${auction._id} nicht verkauft (Rückgabe).`);
+        if (cluster.isPrimary) {
+            setInterval(async () => {
+                // console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Prüfe...`);
+                const now = new Date();
+                try {
+                    const expiredAuctions = await auctionsCollection.find({ status: 'active', endTime: { $lte: now } }).toArray();
+                    if (expiredAuctions.length > 0) {
+                        console.log(`${LOG_PREFIX_SERVER} [AuctionJob] ${expiredAuctions.length} Auktion(en) beendet.`);
+                        for (const auction of expiredAuctions) {
+                            if (auction.highestBidderId) {
+                                await inventoriesCollection.updateOne({ userId: auction.highestBidderId, productId: auction.productId }, { $inc: { quantityOwned: auction.quantity } }, { upsert: true });
+                                await usersCollection.updateOne({ _id: auction.sellerId }, { $inc: { balance: auction.currentBid } });
+                                await auctionsCollection.updateOne({ _id: auction._id }, { $set: { status: 'ended_sold' } });
+                                console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Auktion ${auction._id} verkauft.`);
+                            } else {
+                                await inventoriesCollection.updateOne({ userId: auction.sellerId, productId: auction.productId }, { $inc: { quantityOwned: auction.quantity } }, { upsert: true });
+                                await auctionsCollection.updateOne({ _id: auction._id }, { $set: { status: 'ended_unsold' } });
+                                console.log(`${LOG_PREFIX_SERVER} [AuctionJob] Auktion ${auction._id} nicht verkauft (Rückgabe).`);
+                            }
                         }
                     }
-                }
-            } catch (err) { console.error(`${LOG_PREFIX_SERVER} [AuctionJob] Fehler:`, err); }
-        }, 60000);
+                } catch (err) { console.error(`${LOG_PREFIX_SERVER} [AuctionJob] Fehler:`, err); }
+            }, 60000);
+        }
 
-		// =========================================================
+        // =========================================================
         // === BÖRSEN-JOB (Hybrid: User + Chaos + Gravity + LIMITS) ===
         // =========================================================
         const PRICE_UPDATE_INTERVAL_MS = 60000; // 60 Sekunden
-        
-        const MAX_STOCK_PRICE = 100000.00;      
 
-        setInterval(async () => {
-            const now = new Date();
-            try {
-                const stocksToUpdate = await productsCollection.find({ isTokenCard: { $ne: true } }).toArray();
-                if (stocksToUpdate.length === 0) return;
-                
-                const bulkOps = stocksToUpdate.map(stock => {
-                    // 1. Basis-Preis ermitteln
-                    let basePrice = stock.basePrice;
-                    if (!basePrice) {
-                        basePrice = parseFloat((stock.price || "10").replace(/[^0-9.]/g, '')) || 10;
-                    }
+        const MAX_STOCK_PRICE = 100000.00;
 
-                    let currentPrice = stock.currentPrice || basePrice;
+        if (cluster.isPrimary) {
+            setInterval(async () => {
+                const now = new Date();
+                try {
+                    const stocksToUpdate = await productsCollection.find({ isTokenCard: { $ne: true } }).toArray();
+                    if (stocksToUpdate.length === 0) return;
 
-                    // 2. User-Einfluss (Angebot & Nachfrage)
-                    const buys = stock.buysLastInterval || 0;
-                    const sells = stock.sellsLastInterval || 0;
-                    const netDemand = buys - sells;
-                    
-                    // Einflussstärke (0.1% pro Aktie)
-                    const impactFactor = 0.001; 
-                    const userImpact = currentPrice * (netDemand * impactFactor);
+                    const bulkOps = stocksToUpdate.map(stock => {
+                        let basePrice = stock.basePrice;
+                        if (!basePrice) {
+                            basePrice = parseFloat((stock.price || "10").replace(/[^0-9.]/g, '')) || 10;
+                        }
 
-                    // 3. Chaos (Zufall +/- 2%)
-                    const volatility = 0.02; 
-                    const randomChange = currentPrice * (Math.random() * volatility * 2 - volatility);
+                        let currentPrice = stock.currentPrice || basePrice;
+                        const buys = stock.buysLastInterval || 0;
+                        const sells = stock.sellsLastInterval || 0;
+                        const netDemand = buys - sells;
 
-                    // 4. Schwerkraft (Mean Reversion)
-                    const reversionStrength = 0.05; 
-                    const gravityPull = (basePrice - currentPrice) * reversionStrength;
+                        const impactFactor = 0.001;
+                        const userImpact = currentPrice * (netDemand * impactFactor);
+                        const volatility = 0.02;
+                        const randomChange = currentPrice * (Math.random() * volatility * 2 - volatility);
+                        const reversionStrength = 0.05;
+                        const gravityPull = (basePrice - currentPrice) * reversionStrength;
 
-                    // 5. Neuer Preis berechnen
-                    let newPrice = currentPrice + userImpact + randomChange + gravityPull;
+                        let newPrice = currentPrice + userImpact + randomChange + gravityPull;
 
-                    // 6. 🛡️ LIMITS SETZEN 🛡️
-                    if (newPrice < 0.10) newPrice = 0.10;
-                    if (newPrice > MAX_STOCK_PRICE) newPrice = MAX_STOCK_PRICE; // Cap bei 100k
+                        if (newPrice < 0.10) newPrice = 0.10;
+                        if (newPrice > MAX_STOCK_PRICE) newPrice = MAX_STOCK_PRICE;
 
-                    return {
-                        updateOne: {
-                            filter: { _id: stock._id },
-                            update: {
-                                $set: { 
-                                    currentPrice: parseFloat(newPrice.toFixed(2)), 
-                                    basePrice: basePrice, 
-                                    buysLastInterval: 0, 
-                                    sellsLastInterval: 0 
-                                },
-                                $push: { 
-                                    priceHistory: { 
-                                        $each: [{ price: parseFloat(newPrice.toFixed(2)), timestamp: now }], 
-                                        $slice: -30 
-                                    } 
+                        return {
+                            updateOne: {
+                                filter: { _id: stock._id },
+                                update: {
+                                    $set: {
+                                        currentPrice: parseFloat(newPrice.toFixed(2)),
+                                        basePrice: basePrice,
+                                        buysLastInterval: 0,
+                                        sellsLastInterval: 0
+                                    },
+                                    $push: {
+                                        priceHistory: {
+                                            $each: [{ price: parseFloat(newPrice.toFixed(2)), timestamp: now }],
+                                            $slice: -30
+                                        }
+                                    }
                                 }
                             }
-                        }
-                    };
-                });
+                        };
+                    });
 
-                if (bulkOps.length > 0) {
-                    await productsCollection.bulkWrite(bulkOps);
-                    
-                    // NEU: WICHTIG! Cache nach Börsen-Update aktualisieren,
-                    // damit User im Shop die neuen Preise sehen.
-                    await refreshProductCache();
+                    if (bulkOps.length > 0) {
+                        await productsCollection.bulkWrite(bulkOps);
+
+                        await refreshProductCache(); // Der Master aktualisiert seinen Cache
+
+                        // Den Workern Bescheid sagen, dass sie updaten sollen
+                        if (global.redisPub) {
+                            global.redisPub.publish('sync-product-cache', 'update');
+                        }
+                    }
+
+                } catch (err) {
+                    console.error(`${LOG_PREFIX_SERVER} [StockMarketJob] Fehler:`, err);
+                }
+            }, PRICE_UPDATE_INTERVAL_MS);
+        }
+
+        // --- 5. REDIS INIT & HTTP CLUSTER START ---
+
+        // Redis Funkgeräte aufbauen
+        const redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
+        const redisPub = createClient({ url: redisUrl });
+        const redisSub = redisPub.duplicate();
+
+        Promise.all([redisPub.connect(), redisSub.connect()]).then(() => {
+            console.log(`${LOG_PREFIX_SERVER} 📡 Redis verbunden!`);
+            global.redisPub = redisPub; // Global machen für die updateDataVersion Funktion
+
+            // Hören, ob ein anderer Worker ein Update ruft
+            redisSub.subscribe('sync-version', (key) => {
+                if (dataVersions[key]) dataVersions[key] = Date.now();
+            });
+
+            redisSub.subscribe('sync-product-cache', async () => {
+                await refreshProductCache();
+            });
+
+            // NEU: Teachermon-Cache auf allen Kernen leeren
+            redisSub.subscribe('sync-teachermon-cache', () => {
+                cachedTeachermonCards = null;
+                // Optionaler Log, um zu sehen, dass alle Kerne gehorchen:
+                console.log(`${LOG_PREFIX_SERVER} ♻️ Teachermon-Cache auf Worker ${process.pid} geleert.`);
+            });
+
+            // CLUSTER LOGIK
+            if (cluster.isPrimary) {
+                console.log(`${LOG_PREFIX_SERVER} 👑 Master-Prozess ${process.pid} leitet die Server-Farm.`);
+                console.log(`${LOG_PREFIX_SERVER} 🚀 Starte ${numCPUs} Worker-Kerne...`);
+
+                // Für jeden CPU-Kern einen Worker starten
+                for (let i = 0; i < numCPUs; i++) {
+                    cluster.fork();
                 }
 
-            } catch (err) { 
-                console.error(`${LOG_PREFIX_SERVER} [StockMarketJob] Fehler:`, err); 
-            }
-        }, PRICE_UPDATE_INTERVAL_MS);
+                // Worker neu starten, falls einer crasht
+                cluster.on('exit', (worker, code, signal) => {
+                    console.error(`${LOG_PREFIX_SERVER} ⚠️ Worker ${worker.process.pid} abgestürzt. Starte Ersatz...`);
+                    cluster.fork();
+                });
 
-        // --- 5. HTTP Server Starten ---
-		http.createServer(app).listen(HTTP_PORT, '::', () => {
-    		console.log(`${LOG_PREFIX_SERVER} 🌐 Server läuft auf Port ${HTTP_PORT} (Dual Stack IPv6/IPv4)`);
-		});
-    })
-    .catch(err => { 
-        console.error(`${LOG_PREFIX_SERVER} ❌ Kritischer Fehler: MongoDB-Verbindung fehlgeschlagen:`, err); 
-        process.exit(1); 
+            } else {
+                // 👷 WORKER-PROZESS: Startet den eigentlichen Express-Server
+                http.createServer(app).listen(HTTP_PORT, '::', () => {
+                    console.log(`${LOG_PREFIX_SERVER} 🌐 Worker ${process.pid} ist online auf Port ${HTTP_PORT}`);
+                });
+            }
+        }).catch(err => {
+            console.error(`${LOG_PREFIX_SERVER} ❌ Redis-Verbindungsfehler:`, err);
+        });
+
+    }) // Ende vom MongoClient.connect .then()
+    .catch(err => {
+        console.error(`${LOG_PREFIX_SERVER} ❌ Kritischer Fehler: MongoDB-Verbindung fehlgeschlagen:`, err);
+        process.exit(1);
     });
 
 // POST: Manuelle Steuereintreibung (Admin Only)
 app.post('/api/admin/system/force-tax', isAuthenticated, isAdmin, async (req, res) => {
     console.log(`${LOG_PREFIX_SERVER} 👮 Admin ${req.session.username} erzwingt Steuer-Eintreibung...`);
-    
+
     const TAX_THRESHOLD = 100000000; // 100 Millionen (Grenze)
     const TAX_RATE = 0.005; // 0,5% Steuersatz
 
@@ -1162,16 +1211,16 @@ app.post('/api/admin/system/force-tax', isAuthenticated, isAdmin, async (req, re
         let totalTaxCollected = 0;
         let shieldedUsers = 0;
         let taxedUsersCount = 0;
-        
+
         const bulkOps = [];
         const inventoryOps = []; // Für verbrauchte Schilde
 
         for (const user of richUsers) {
             // A. Hat der User ein Schild?
-            const shield = await inventoriesCollection.findOne({ 
-                userId: user._id, 
-                productId: 'tax_shield', 
-                quantityOwned: { $gt: 0 } 
+            const shield = await inventoriesCollection.findOne({
+                userId: user._id,
+                productId: 'tax_shield',
+                quantityOwned: { $gt: 0 }
             });
 
             if (shield) {
@@ -1192,15 +1241,15 @@ app.post('/api/admin/system/force-tax', isAuthenticated, isAdmin, async (req, re
             if (taxAmount > 0) {
                 taxedUsersCount++;
                 totalTaxCollected += taxAmount;
-                
+
                 bulkOps.push({
                     updateOne: {
                         filter: { _id: user._id },
-                        update: { 
-                            $inc: { 
-                                balance: -taxAmount, 
-                                totalTaxesPaid: taxAmount 
-                            } 
+                        update: {
+                            $inc: {
+                                balance: -taxAmount,
+                                totalTaxesPaid: taxAmount
+                            }
                         }
                     }
                 });
@@ -1214,7 +1263,7 @@ app.post('/api/admin/system/force-tax', isAuthenticated, isAdmin, async (req, re
         // D. Geld in die Staatskasse
         if (totalTaxCollected > 0) {
             await addToStateTreasury(totalTaxCollected);
-            
+
             // News generieren
             await newsCollection.insertOne({
                 headline: "Sonder-Steuerprüfung!",
@@ -1226,8 +1275,8 @@ app.post('/api/admin/system/force-tax', isAuthenticated, isAdmin, async (req, re
             });
         }
 
-        res.json({ 
-            success: true, 
+        res.json({
+            success: true,
             message: `Steuer-Razzia beendet!`,
             details: {
                 collected: totalTaxCollected,
@@ -1245,11 +1294,11 @@ app.post('/api/admin/system/force-tax', isAuthenticated, isAdmin, async (req, re
 // === GRACEFUL SHUTDOWN (Für Docker) ===
 async function gracefulShutdown(signal) {
     console.log(`${LOG_PREFIX_SERVER} 🛑 ${signal} empfangen. Fahre sauber herunter...`);
-    
+
     // 1. Keine neuen HTTP-Anfragen mehr annehmen
     server.close(async () => {
         console.log(`${LOG_PREFIX_SERVER} 🔌 HTTP Server geschlossen. Laufende Requests beendet.`);
-        
+
         // 2. Datenbankverbindung sauber trennen
         if (client) {
             try {
@@ -1259,7 +1308,7 @@ async function gracefulShutdown(signal) {
                 console.error(`${LOG_PREFIX_SERVER} Fehler beim Schließen der DB:`, err);
             }
         }
-        
+
         console.log(`${LOG_PREFIX_SERVER} 👋 Tschüss!`);
         process.exit(0);
     });
@@ -1295,7 +1344,7 @@ async function getStateTreasuryBalance() {
 
 // AUTH
 app.post('/api/auth/register', async (req, res) => {
-	// IP ermitteln (wichtig hinter Proxies/Nginx)
+    // IP ermitteln (wichtig hinter Proxies/Nginx)
     const clientIp = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
 
     // Prüfen ob IP gebannt ist
@@ -1343,7 +1392,7 @@ function rateLimitLogin(req, res, next) {
 
     if (loginAttempts.has(ip)) {
         const data = loginAttempts.get(ip);
-        
+
         // Wenn Zeit abgelaufen, Reset
         if (now > data.expireTime) {
             loginAttempts.set(ip, { count: 1, expireTime: now + LOGIN_BLOCK_DURATION });
@@ -1353,8 +1402,8 @@ function rateLimitLogin(req, res, next) {
         // Wenn Limit erreicht
         if (data.count >= MAX_LOGIN_ATTEMPTS) {
             console.warn(`${LOG_PREFIX_SERVER} 🚫 Login Block für IP ${ip} (Zu viele Versuche)`);
-            return res.status(429).json({ 
-                error: "Zu viele falsche Login-Versuche. Bitte warte 15 Minuten." 
+            return res.status(429).json({
+                error: "Zu viele falsche Login-Versuche. Bitte warte 15 Minuten."
             });
         }
 
@@ -1364,7 +1413,7 @@ function rateLimitLogin(req, res, next) {
         // Neuer Eintrag
         loginAttempts.set(ip, { count: 1, expireTime: now + LOGIN_BLOCK_DURATION });
     }
-    
+
     // Kleiner Cleanup (damit der RAM nicht vollläuft)
     if (loginAttempts.size > 1000) {
         for (const [key, val] of loginAttempts) {
@@ -1377,7 +1426,7 @@ function rateLimitLogin(req, res, next) {
 
 app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
     const { username, password, rememberMe } = req.body;
-    
+
     // IP Adresse ermitteln (hinter Proxies oder direkt)
     const clientIp = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
 
@@ -1404,7 +1453,7 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
             // =========================================================
             // 🛑 NEU: BAN-CHECK & IP-UPDATE
             // =========================================================
-            
+
             // 1. Prüfen, ob die IP auf der schwarzen Liste steht
             const isBanned = await db.collection('banned_ips').findOne({ ip: clientIp });
 
@@ -1420,7 +1469,7 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
 
             // 2. IP im User speichern (damit wir sie später bannen können)
             await usersCollection.updateOne(
-                { _id: user._id }, 
+                { _id: user._id },
                 { $set: { lastIp: clientIp, lastLogin: new Date() } }
             );
             // =========================================================
@@ -1433,27 +1482,27 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
             else { req.session.cookie.expires = false; req.session.cookie.maxAge = null; }
 
             req.session.save(err => {
-                if (err) { 
-                    console.error(`${LOG_PREFIX_SERVER} Fehler Speichern Session Login ${user.username}:`, err); 
-                    return res.status(500).json({ error: 'Fehler Session.' }); 
+                if (err) {
+                    console.error(`${LOG_PREFIX_SERVER} Fehler Speichern Session Login ${user.username}:`, err);
+                    return res.status(500).json({ error: 'Fehler Session.' });
                 }
-                
+
                 console.log(`${LOG_PREFIX_SERVER} User ${user.username} eingeloggt. Session ID: ${req.session.id}, Admin: ${req.session.isAdmin}`);
-                
+
                 const effectiveInfinityMoney = user.isAdmin ? true : (user.infinityMoney || false);
-                
-                res.json({ 
-                    message: 'Login erfolgreich!', 
-                    user: { 
-                        userId: user._id.toString(), 
-                        username: user.username, 
-                        balance: user.balance, 
-                        tokens: user.tokens || 0, 
-                        isAdmin: user.isAdmin || false, 
-                        infinityMoney: effectiveInfinityMoney, 
-                        unlockedInfinityMoney: user.unlockedInfinityMoney || false, 
-                        productSellCooldowns: user.productSellCooldowns || {} 
-                    } 
+
+                res.json({
+                    message: 'Login erfolgreich!',
+                    user: {
+                        userId: user._id.toString(),
+                        username: user.username,
+                        balance: user.balance,
+                        tokens: user.tokens || 0,
+                        isAdmin: user.isAdmin || false,
+                        infinityMoney: effectiveInfinityMoney,
+                        unlockedInfinityMoney: user.unlockedInfinityMoney || false,
+                        productSellCooldowns: user.productSellCooldowns || {}
+                    }
                 });
             });
 
@@ -1547,40 +1596,40 @@ app.patch('/api/admin/zero-stock', isAdmin, async (req, res) => {
 app.post('/api/admin/generate-token-code', isAdmin, async (req, res) => {
     const { tokenAmount, count = 1 } = req.body;
     console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} generiert Token Codes: Amount ${tokenAmount}, Count ${count}`);
-    
+
     if (typeof tokenAmount !== 'number' || tokenAmount <= 0 || !Number.isInteger(tokenAmount)) {
         return res.status(400).json({ error: "Ungültiger Token-Betrag (positive Ganzzahl)." });
     }
     if (typeof count !== 'number' || count <= 0 || count > 100 || !Number.isInteger(count)) {
         return res.status(400).json({ error: "Ungültige Anzahl (1-100, Ganzzahl)." });
     }
-    
+
     try {
         const generatedCodes = [];
         const docsToInsert = [];
-        
+
         for (let i = 0; i < count; i++) {
             const uniqueCode = await generateUniqueTokenRedeemCode();
-            docsToInsert.push({ 
-                code: uniqueCode, 
-                tokenAmount: tokenAmount, 
-                isRedeemed: false, 
-                createdAt: new Date(), 
-                generatedByAdminId: new ObjectId(req.session.userId) 
+            docsToInsert.push({
+                code: uniqueCode,
+                tokenAmount: tokenAmount,
+                isRedeemed: false,
+                createdAt: new Date(),
+                generatedByAdminId: new ObjectId(req.session.userId)
             });
             generatedCodes.push({ code: uniqueCode, amount: tokenAmount });
         }
-        
+
         // EIN einziger Datenbank-Call
         if (docsToInsert.length > 0) {
             await tokenCodesCollection.insertMany(docsToInsert);
         }
-        
+
         console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} hat ${count} Codes mit je ${tokenAmount} Tokens generiert.`);
         res.status(201).json({ message: `${count} Token-Code(s) mit je ${tokenAmount} Tokens erfolgreich generiert.`, codes: generatedCodes });
-    } catch (err) { 
-        console.error(`${LOG_PREFIX_SERVER} Admin Fehler Code-Generierung:`, err); 
-        res.status(500).json({ error: "Fehler bei der Code-Generierung." }); 
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Admin Fehler Code-Generierung:`, err);
+        res.status(500).json({ error: "Fehler bei der Code-Generierung." });
     }
 });
 
@@ -1667,7 +1716,7 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
 
     // --- Performance & Security Limits ---
-    const MAX_ITEMS_PER_TYPE = 1000; 
+    const MAX_ITEMS_PER_TYPE = 1000;
     const MAX_CART_SIZE = 500;
 
     if (!Array.isArray(cart) || cart.length === 0) return res.status(400).json({ error: 'Warenkorb leer/ungültig.' });
@@ -1686,7 +1735,7 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
         }
         totalCartQuantity += item.quantity;
         cartItemIds.push(item.id);
-        
+
         // Summiere Mengen, falls ein Produkt mehrfach im Array auftaucht
         const currentQty = cartMap.get(item.id) || 0;
         cartMap.set(item.id, currentQty + item.quantity);
@@ -1699,7 +1748,7 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
     // --- START TRANSACTION ---
     // Dies verhindert den "Slow Internet Exploit" (Race Conditions)
     const session = client.startSession();
-    
+
     try {
         let transactionResult = await session.withTransaction(async () => {
             // A. User und ALLE Produkte parallel laden (Performance Boost!)
@@ -1717,14 +1766,14 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
             const productStockOps = [];
             const tokenCodeGenerationTasks = [];
             let newUnlockOccurred = false;
-            
+
             // Map für DB Produkte erstellen für schnellen Zugriff
             const dbProductMap = new Map(dbProducts.map(p => [p.id, p]));
 
             // Über die zusammengefasste Cart-Map iterieren
             for (const [prodId, quantity] of cartMap.entries()) {
                 const pDb = dbProductMap.get(prodId);
-                
+
                 if (!pDb) throw new Error(`Produkt ID ${prodId} existiert nicht mehr.`);
 
                 // Preis ermitteln
@@ -1737,7 +1786,7 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
                     if (quantity > currentStock) {
                         throw new Error(`Nicht genügend Lagerbestand für "${pDb.name}". Verfügbar: ${currentStock}, Gewünscht: ${quantity}`);
                     }
-                    
+
                     // Stock abziehen vorbereiten
                     productStockOps.push({
                         updateOne: {
@@ -1747,39 +1796,39 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
                     });
                 } else if (pDb.isTokenCard && pDb.tokenValue > 0) {
                     // Token Codes vorbereiten
-                    for (let i = 0; i < quantity; i++) { 
-                        tokenCodeGenerationTasks.push({ 
-                            tokenAmount: pDb.tokenValue, 
-                            limazonProductId: pDb.id, 
-                            generatedForUserId: userId, 
-                            originalPricePaid: price 
-                        }); 
+                    for (let i = 0; i < quantity; i++) {
+                        tokenCodeGenerationTasks.push({
+                            tokenAmount: pDb.tokenValue,
+                            limazonProductId: pDb.id,
+                            generatedForUserId: userId,
+                            originalPricePaid: price
+                        });
                     }
                 }
 
                 // Daten für Order History und Inventar sammeln
-                productDataForOrder.push({ 
-                    productId: pDb.id, 
-                    name: pDb.name, 
-                    quantity: quantity, 
-                    price: price, 
-                    image_url: pDb.image_url, 
-                    isTokenCardPurchase: !!pDb.isTokenCard 
+                productDataForOrder.push({
+                    productId: pDb.id,
+                    name: pDb.name,
+                    quantity: quantity,
+                    price: price,
+                    image_url: pDb.image_url,
+                    isTokenCardPurchase: !!pDb.isTokenCard
                 });
 
                 // Inventar Update vorbereiten
-                inventoryOps.push({ 
-                    updateOne: { 
-                        filter: { userId: userId, productId: pDb.id }, 
-                        update: { $inc: { quantityOwned: quantity }, $set: { lastAcquiredPrice: price } }, 
-                        upsert: true 
-                    } 
+                inventoryOps.push({
+                    updateOne: {
+                        filter: { userId: userId, productId: pDb.id },
+                        update: { $inc: { quantityOwned: quantity }, $set: { lastAcquiredPrice: price } },
+                        upsert: true
+                    }
                 });
             }
 
             // C. Guthaben prüfen und abziehen
             const isInfinityMoneyActive = user.isAdmin || user.infinityMoney;
-            
+
             // Runden auf 2 Stellen zur Sicherheit
             totalOrderValue = Math.round((totalOrderValue + Number.EPSILON) * 100) / 100;
 
@@ -1787,17 +1836,17 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
                 if (user.balance < totalOrderValue) {
                     throw new Error(`Zu wenig Guthaben. Benötigt: $${totalOrderValue.toFixed(2)}, Vorhanden: $${user.balance.toFixed(2)}`);
                 }
-                
+
                 // GELD ABZIEHEN
                 await usersCollection.updateOne(
-                    { _id: userId }, 
-                    { $inc: { balance: -totalOrderValue } }, 
+                    { _id: userId },
+                    { $inc: { balance: -totalOrderValue } },
                     { session }
                 );
             }
 
             // D. Alle Datenbank-Updates ausführen (Innerhalb der Transaction)
-            
+
             // 1. Produkte Stock Updates
             if (productStockOps.length > 0) {
                 await productsCollection.bulkWrite(productStockOps, { session });
@@ -1816,14 +1865,14 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
                     // Hier müssen wir await nutzen, da generateUniqueTokenRedeemCode DB-Calls macht.
                     // Das ist in Ordnung, da es nicht mehr die Haupt-Race-Condition betrifft.
                     const uniqueCode = generateFastTokenCode();
-                    codesToIns.push({ 
-                        code: uniqueCode, 
-                        tokenAmount: task.tokenAmount, 
-                        isRedeemed: false, 
-                        createdAt: new Date(), 
-                        limazonProductId: task.limazonProductId, 
-                        generatedForUserId: task.generatedForUserId, 
-                        originalPricePaid: task.originalPricePaid 
+                    codesToIns.push({
+                        code: uniqueCode,
+                        tokenAmount: task.tokenAmount,
+                        isRedeemed: false,
+                        createdAt: new Date(),
+                        limazonProductId: task.limazonProductId,
+                        generatedForUserId: task.generatedForUserId,
+                        originalPricePaid: task.originalPricePaid
                     });
                     genCodesStrings.push(uniqueCode);
                 }
@@ -1833,12 +1882,12 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
             }
 
             // 4. Order Log speichern
-            await ordersCollection.insertOne({ 
-                userId: userId, 
-                username: user.username, 
-                date: new Date(), 
-                items: productDataForOrder, 
-                total: totalOrderValue 
+            await ordersCollection.insertOne({
+                userId: userId,
+                username: user.username,
+                date: new Date(),
+                items: productDataForOrder,
+                total: totalOrderValue
             }, { session });
 
             // 5. Infinity Money Unlock Check (Logik beibehalten)
@@ -1847,17 +1896,17 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
             if (!user.unlockedInfinityMoney && !user.isAdmin) {
                 // Check basierend auf geladenen Daten
                 let maxPriceInShop = 0;
-                if(globalProductCache && globalProductCache.length > 0) {
-                     const normalItems = globalProductCache.filter(p => !p.isTokenCard);
-                     if(normalItems.length > 0) {
-                         // Schnellste Methode Max zu finden
-                         maxPriceInShop = normalItems.reduce((max, p) => {
-                             const price = parseFloat((p.price||"$0").replace(/[^0-9.]/g, '')) || 0;
-                             return price > max ? price : max;
-                         }, 0);
-                     }
+                if (globalProductCache && globalProductCache.length > 0) {
+                    const normalItems = globalProductCache.filter(p => !p.isTokenCard);
+                    if (normalItems.length > 0) {
+                        // Schnellste Methode Max zu finden
+                        maxPriceInShop = normalItems.reduce((max, p) => {
+                            const price = parseFloat((p.price || "$0").replace(/[^0-9.]/g, '')) || 0;
+                            return price > max ? price : max;
+                        }, 0);
+                    }
                 }
-                
+
                 const regItems = productDataForOrder.filter(i => !i.isTokenCardPurchase);
                 for (const item of regItems) {
                     if (item.price >= maxPriceInShop && maxPriceInShop > 0.01) {
@@ -1868,10 +1917,10 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
                 }
             }
 
-            return { 
-                totalOrderValue, 
-                genCodesCount: tokenCodeGenerationTasks.length, 
-                newUnlockOccurred 
+            return {
+                totalOrderValue,
+                genCodesCount: tokenCodeGenerationTasks.length,
+                newUnlockOccurred
             };
         });
 
@@ -1890,15 +1939,15 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
         if (transactionResult.newUnlockOccurred) purMessage += ' Glückwunsch, Infinity Money freigeschaltet!';
 
         console.log(`${LOG_PREFIX_SERVER} ✅ User ${finalUser.username} Einkauf $${transactionResult.totalOrderValue.toFixed(2)} abgeschlossen.`);
-        
-        res.json({ 
-            message: purMessage, 
-            user: { 
-                ...finalUser, 
-                tokens: finalUser.tokens || 0, 
-                infinityMoney: effInfMonFinal, 
-                productSellCooldowns: finalUser.productSellCooldowns || {} 
-            } 
+
+        res.json({
+            message: purMessage,
+            user: {
+                ...finalUser,
+                tokens: finalUser.tokens || 0,
+                infinityMoney: effInfMonFinal,
+                productSellCooldowns: finalUser.productSellCooldowns || {}
+            }
         });
 
     } catch (err) {
@@ -1943,7 +1992,7 @@ app.post('/api/products/sell', isAuthenticated, async (req, res) => {
             // B. Checks (Logik)
             if (!user) throw new Error('Benutzer nicht gefunden.');
             if (!prodToSell) throw new Error('Produkt nicht verkaufbar oder existiert nicht.');
-            
+
             // Bestand prüfen
             if (!invItem || invItem.quantityOwned < quantity) {
                 throw new Error(`Nicht genügend Items! Du besitzt nur ${invItem ? invItem.quantityOwned : 0} Stk. von "${prodToSell.name}".`);
@@ -1963,7 +2012,7 @@ app.post('/api/products/sell', isAuthenticated, async (req, res) => {
 
             // C. Wahrscheinlichkeits-Berechnung (Deine Original-Logik)
             const origPrice = prodToSell.basePrice || parseFloat((prodToSell.price || "$0").replace(/[^0-9.]/g, '')) || 1;
-            
+
             let prob = 1.0;
             if (sellPrice > origPrice) prob = origPrice / sellPrice;
             else if (sellPrice < origPrice * 0.5) prob = 1.0;
@@ -1971,13 +2020,13 @@ app.post('/api/products/sell', isAuthenticated, async (req, res) => {
             // Markt-Sättigung einbeziehen
             const globStock = prodToSell.stock || 0;
             const defGlobStock = prodToSell.default_stock || 20;
-            
+
             if (globStock > defGlobStock * 2.5) prob *= 0.1;      // Markt überschwemmt -> schwer zu verkaufen
             else if (globStock > defGlobStock * 1.8) prob *= 0.5;
             else if (globStock > defGlobStock * 1.2) prob *= 0.8;
 
             prob = Math.max(0.01, Math.min(1.0, prob));
-            
+
             const wasSold = Math.random() < prob;
 
             // D. Transaktionen ausführen
@@ -2019,9 +2068,9 @@ app.post('/api/products/sell', isAuthenticated, async (req, res) => {
                     const newCooldowns = { ...cooldowns };
                     delete newCooldowns[productId.toString()];
                     await usersCollection.updateOne(
-                        { _id: userId }, 
-                        { $set: { productSellCooldowns: newCooldowns } }, 
-                        { session } 
+                        { _id: userId },
+                        { $set: { productSellCooldowns: newCooldowns } },
+                        { session }
                     );
                 }
 
@@ -2034,7 +2083,7 @@ app.post('/api/products/sell', isAuthenticated, async (req, res) => {
 
             } else {
                 // FEHLSCHLAG (Niemand wollte kaufen)
-                
+
                 // Cooldown setzen
                 const cdEndTime = new Date(Date.now() + SELL_COOLDOWN_SECONDS * 1000);
                 const newCooldowns = { ...cooldowns };
@@ -2057,7 +2106,7 @@ app.post('/api/products/sell', isAuthenticated, async (req, res) => {
         });
 
         // E. Transaktion erfolgreich beendet
-        
+
         // Cache aktualisieren, da sich der Global Stock geändert hat
         if (resultData.success) {
             refreshProductCache();
@@ -2073,11 +2122,11 @@ app.post('/api/products/sell', isAuthenticated, async (req, res) => {
                 message: resultData.message,
                 earnings: resultData.earnings,
                 probability: resultData.probability,
-                user: { 
-                    ...updatedUser, 
-                    tokens: updatedUser.tokens || 0, 
-                    infinityMoney: effInfMonFinal, 
-                    productSellCooldowns: updatedUser.productSellCooldowns || {} 
+                user: {
+                    ...updatedUser,
+                    tokens: updatedUser.tokens || 0,
+                    infinityMoney: effInfMonFinal,
+                    productSellCooldowns: updatedUser.productSellCooldowns || {}
                 }
             });
         } else {
@@ -2095,12 +2144,12 @@ app.post('/api/products/sell', isAuthenticated, async (req, res) => {
     } catch (err) {
         // Fehlerbehandlung
         console.error(`${LOG_PREFIX_SERVER} Fehler Verkauf (${username}):`, err.message);
-        
+
         if (err.message.startsWith("COOLDOWN_ACTIVE")) {
             const seconds = err.message.split(":")[1];
             return res.status(429).json({ success: false, error: `Cooldown aktiv: Warte ${seconds}s.` });
         }
-        
+
         if (err.message.includes("Nicht genügend Items") || err.message.includes("Fehler: Item wurde während")) {
             return res.status(400).json({ error: err.message });
         }
@@ -3029,11 +3078,11 @@ app.post('/api/chat/chats/:chatId/messages', isAuthenticated, isChatParticipant,
         const newMessageData = {
             chatId: chatId,
             senderId: senderId,
-            senderUsername: senderUsername, 
+            senderUsername: senderUsername,
             content: content.trim(),
             timestamp: now
         };
-        
+
         const result = await limMessagesCollection.insertOne(newMessageData);
         const newMessage = { _id: result.insertedId, ...newMessageData };
 
@@ -3941,7 +3990,7 @@ app.post('/api/auctions/:id/bid', isAuthenticated, async (req, res) => {
 
             if (bidderResult.modifiedCount === 0) {
                 // Checken, ob User existiert oder nur pleite ist
-                const userExists = await usersCollection.findOne({_id: bidderId}, {session});
+                const userExists = await usersCollection.findOne({ _id: bidderId }, { session });
                 if (!userExists) throw new Error("Benutzer nicht gefunden.");
                 throw new Error(`Nicht genügend Guthaben für Gebot von $${finalBidAmount.toFixed(2)}.`);
             }
@@ -3963,14 +4012,14 @@ app.post('/api/auctions/:id/bid', isAuthenticated, async (req, res) => {
             if (auction.status !== 'active') throw new Error("Auktion ist beendet.");
             if (new Date() > new Date(auction.endTime)) throw new Error("Auktion ist abgelaufen.");
             if (auction.sellerId.equals(bidderId)) throw new Error("Du kannst nicht auf eigene Auktionen bieten.");
-            
+
             // Check gegen den geladenen Wert (Soft Check für schnelle Fehlermeldung)
             if (finalBidAmount <= auction.currentBid) throw new Error(`Gebot zu niedrig. Aktuell: $${auction.currentBid}`);
 
             // Das eigentliche, sichere Update
             const auctionUpdate = await auctionsCollection.updateOne(
-                { 
-                    _id: auctionId, 
+                {
+                    _id: auctionId,
                     status: 'active',
                     currentBid: { $lt: finalBidAmount } // <--- DAS IST DER SCHUTZ!
                 },
@@ -4088,8 +4137,8 @@ app.post('/api/admin/normalize-balances', isAuthenticated, isAdmin, async (req, 
 
 const checkTradeCooldown = async (user) => {
     // 5 Minuten = 300.000 Millisekunden
-    const COOLDOWN_MS = 300000; 
-    
+    const COOLDOWN_MS = 300000;
+
     const now = Date.now();
     if (user.lastTradeTime && (now - user.lastTradeTime) < COOLDOWN_MS) {
         // Berechnet Minuten und Sekunden für die Fehlermeldung
@@ -4115,7 +4164,7 @@ app.post('/pi/stonks/buy', isAuthenticated, async (req, res) => {
 
     try {
         const userIdObj = new ObjectId(userIdStr);
-        
+
         // ID-Typ Erkennung (Zahl oder String)
         const queryProductId = isNaN(parseInt(productId)) ? productId : parseInt(productId);
 
@@ -4141,14 +4190,14 @@ app.post('/pi/stonks/buy', isAuthenticated, async (req, res) => {
         // 100k Aufschlag Logik (aus deinem ursprünglichen Code-Snippet übernommen, falls gewünscht)
         // Falls du den Aufschlag nicht willst, nimm einfach product.currentPrice
         const currentPrice = parseFloat(product.currentPrice || product.price || 0);
-        
+
         // Kosten berechnen
         const totalCost = currentPrice * qty;
 
         // 5. Geld-Check
         if (user.balance < totalCost) {
-            return res.status(400).json({ 
-                error: `Zu wenig Geld. Kosten: ${totalCost.toFixed(2)}€, Dein Konto: ${user.balance.toFixed(2)}€` 
+            return res.status(400).json({
+                error: `Zu wenig Geld. Kosten: ${totalCost.toFixed(2)}€, Dein Konto: ${user.balance.toFixed(2)}€`
             });
         }
 
@@ -4156,13 +4205,13 @@ app.post('/pi/stonks/buy', isAuthenticated, async (req, res) => {
         const maxShares = product.maxShares || 1000000000;
         // Um das genau zu prüfen, müssten wir erst zählen, wie viele schon weg sind. 
         // Für Performance lassen wir das hier oft weg oder prüfen es einfach gegen das Inventar.
-        
+
         // 7. TRANSAKTION DURCHFÜHREN
 
         // A) Geld abziehen (usersCollection)
         await usersCollection.updateOne(
             { _id: userIdObj },
-            { 
+            {
                 $inc: { balance: -totalCost },
                 $set: { lastTradeTime: Date.now() }
             }
@@ -4172,11 +4221,11 @@ app.post('/pi/stonks/buy', isAuthenticated, async (req, res) => {
         // 'upsert: true' macht das Magische: Wenn Eintrag da ist -> update ($inc). Wenn nicht -> insert ($setOnInsert).
         await portfoliosCollection.updateOne(
             { userId: userIdObj, productId: queryProductId },
-            { 
+            {
                 $inc: { quantityShares: qty }, // Erhöht die Anzahl
                 // Falls es ein neuer Eintrag ist, setzen wir Startwerte:
-                $setOnInsert: { 
-                    userId: userIdObj, 
+                $setOnInsert: {
+                    userId: userIdObj,
                     productId: queryProductId,
                     averageBuyPrice: currentPrice // Startpreis (kann man später verfeinern)
                 }
@@ -4189,9 +4238,9 @@ app.post('/pi/stonks/buy', isAuthenticated, async (req, res) => {
 
         console.log(`${LOG_PREFIX_SERVER} KAUF: User ${req.session.username} kauft ${qty}x ${queryProductId} für ${totalCost}€`);
 
-        res.json({ 
+        res.json({
             message: `Kauf erfolgreich! -${totalCost.toFixed(2)}€`,
-            newBalance: updatedUser.balance 
+            newBalance: updatedUser.balance
         });
 
     } catch (e) {
@@ -4233,15 +4282,15 @@ app.post('/api/stonks/sell', isAuthenticated, async (req, res) => {
 
         // Menge prüfen
         if (portfolioItem.quantityShares < qty) {
-            return res.status(400).json({ 
-                error: `Nicht genügend Aktien. Du hast ${portfolioItem.quantityShares}, willst aber ${qty} verkaufen.` 
+            return res.status(400).json({
+                error: `Nicht genügend Aktien. Du hast ${portfolioItem.quantityShares}, willst aber ${qty} verkaufen.`
             });
         }
 
         // 4. Preis ermitteln
         // Fallback: Falls Produkt gelöscht wurde, versuchen wir currentPrice aus dem Portfolio-Item oder 0
         const currentPrice = product ? (product.currentPrice || product.price || 0) : 0;
-        
+
         if (currentPrice <= 0) {
             return res.status(400).json({ error: "Aktueller Preis konnte nicht ermittelt werden." });
         }
@@ -4265,7 +4314,7 @@ app.post('/api/stonks/sell', isAuthenticated, async (req, res) => {
         // B) Geld dem User gutschreiben (in usersCollection!)
         await usersCollection.updateOne(
             { _id: userIdObj },
-            { 
+            {
                 $inc: { balance: totalPayout },
                 $set: { lastTradeTime: Date.now() }
             }
@@ -4276,9 +4325,9 @@ app.post('/api/stonks/sell', isAuthenticated, async (req, res) => {
 
         console.log(`${LOG_PREFIX_SERVER} VERKAUF: User ${req.session.username} verkauft ${qty}x ${queryProductId} für ${totalPayout}€`);
 
-        res.json({ 
+        res.json({
             message: `Verkauf erfolgreich! +$${totalPayout.toFixed(2)}`,
-            newBalance: updatedUser.balance 
+            newBalance: updatedUser.balance
         });
 
     } catch (e) {
@@ -4331,14 +4380,14 @@ app.get('/api/stonks/portfolio', isAuthenticated, async (req, res) => {
 app.get('/api/stocks', async (req, res) => {
     try {
         const { search, limit } = req.query;
-        
+
         // 1. LIMIT ERZWINGEN (Maximal 50, wenn nichts angegeben ist)
         // Das verhindert, dass 4000 Items geladen werden!
-        const maxItems = parseInt(limit) || 50; 
+        const maxItems = parseInt(limit) || 50;
 
         // 2. Filter bauen
         const query = { isTokenCard: { $ne: true } };
-        
+
         // Nur filtern, wenn wirklich gesucht wird
         if (search && search.trim().length > 0) {
             query.name = { $regex: search.trim(), $options: 'i' };
@@ -4347,23 +4396,23 @@ app.get('/api/stocks', async (req, res) => {
         // 3. Datenbankabfrage mit LIMIT
         const stocks = await productsCollection.find(
             query,
-            { 
-                projection: { 
-                    id: 1, name: 1, currentPrice: 1, price: 1, basePrice: 1, 
+            {
+                projection: {
+                    id: 1, name: 1, currentPrice: 1, price: 1, basePrice: 1,
                     // History: Nur die allerletzten 10 Punkte holen (Spart extrem Speicher)
-                    priceHistory: { $slice: -10 }, 
-                    image_url: 1 
-                } 
+                    priceHistory: { $slice: -10 },
+                    image_url: 1
+                }
             }
         )
-        .sort({ id: 1 }) 
-        .limit(maxItems) // <--- HIER IST DIE BREMSE
-        .toArray();
+            .sort({ id: 1 })
+            .limit(maxItems) // <--- HIER IST DIE BREMSE
+            .toArray();
 
         // 4. Formatierung (Fehlertolerant)
         const formatted = stocks.map(s => {
             const price = s.currentPrice || parseFloat((s.price || "0").replace(/[^0-9.]/g, '')) || 0;
-            
+
             let change = 0;
             if (s.priceHistory && s.priceHistory.length >= 2) {
                 const last = s.priceHistory[s.priceHistory.length - 1].price;
@@ -4377,7 +4426,7 @@ app.get('/api/stocks', async (req, res) => {
             return {
                 id: s.id,
                 name: s.name,
-                symbol: (s.name.substring(0, 3) + String(s.id).slice(-2)).toUpperCase(), 
+                symbol: (s.name.substring(0, 3) + String(s.id).slice(-2)).toUpperCase(),
                 price: price,
                 changePercent: change,
                 history: historyData,
@@ -4389,7 +4438,7 @@ app.get('/api/stocks', async (req, res) => {
     } catch (e) {
         console.error("Stonks Error:", e);
         // Sende leeres Array statt Fehler, damit Frontend nicht crasht
-        res.json([]); 
+        res.json([]);
     }
 });
 
@@ -4398,26 +4447,28 @@ app.get('/api/finance/portfolio/full', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
     try {
         const user = await usersCollection.findOne({ _id: userId });
-        
+
         // Aktien laden
         const stockPortfolio = await portfoliosCollection.aggregate([
             { $match: { userId: userId, quantityShares: { $gt: 0 } } },
             { $lookup: { from: productsCollectionName, localField: 'productId', foreignField: 'id', as: 'details' } },
             { $unwind: "$details" },
-            { $project: {
-                id: "$productId",
-                name: "$details.name",
-                quantity: "$quantityShares",
-                currentPrice: { $ifNull: ["$details.currentPrice", 0] },
-                buyPrice: "$averageBuyPrice",
-                image: "$details.image_url"
-            }}
+            {
+                $project: {
+                    id: "$productId",
+                    name: "$details.name",
+                    quantity: "$quantityShares",
+                    currentPrice: { $ifNull: ["$details.currentPrice", 0] },
+                    buyPrice: "$averageBuyPrice",
+                    image: "$details.image_url"
+                }
+            }
         ]).toArray();
 
         // Krypto laden (Aus dem globalen CRYPTO_MARKET Objekt in server.js)
         const cryptoWallet = user.cryptoWallet || {};
         const cryptoList = [];
-        
+
         if (typeof CRYPTO_MARKET !== 'undefined') {
             for (const [symbol, amount] of Object.entries(cryptoWallet)) {
                 if (amount > 0 && CRYPTO_MARKET[symbol]) {
@@ -4552,10 +4603,10 @@ async function seedHumanGradesDefaults() {
             { id: 'pol', label: 'Politik', type: 'main', categoryId: 'lehrer' },
             { id: 'kun', label: 'Kunst', type: 'main', categoryId: 'lehrer' },
             { id: 'mus', label: 'Musik', type: 'main', categoryId: 'lehrer' },
-            { id: 'inf', label: 'Informatik', type: 'sec', categoryId: 'lehrer' }, 
-            { id: 'tec', label: 'Technik', type: 'sec', categoryId: 'lehrer' },     
-            { id: 'fra', label: 'Französisch', type: 'sec', categoryId: 'lehrer' }, 
-            { id: 'ndl', label: 'Niederländisch', type: 'sec', categoryId: 'lehrer' }, 
+            { id: 'inf', label: 'Informatik', type: 'sec', categoryId: 'lehrer' },
+            { id: 'tec', label: 'Technik', type: 'sec', categoryId: 'lehrer' },
+            { id: 'fra', label: 'Französisch', type: 'sec', categoryId: 'lehrer' },
+            { id: 'ndl', label: 'Niederländisch', type: 'sec', categoryId: 'lehrer' },
 
             // --- POLITIKER ---
             { id: 'glaub', label: 'Glaubwürdigkeit', type: 'main', categoryId: 'politiker' },
@@ -4622,13 +4673,13 @@ async function seedHumanGradesDefaults() {
 async function updateHumanAverage(humanId) {
     const hId = new ObjectId(humanId);
     const ratings = await ratingsCollection.find({ humanId: hId }).toArray();
-    
+
     if (ratings.length === 0) {
         await humansCollection.updateOne({ _id: hId }, { $set: { averages: {}, totalAverage: 0, ratingCount: 0 } });
         return;
     }
 
-    const criteriaStats = {}; 
+    const criteriaStats = {};
     let totalSum = 0;
     let totalCount = 0;
 
@@ -4677,17 +4728,17 @@ app.post('/api/human/admin/categories', isAuthenticated, isAdmin, async (req, re
     try {
         await categoriesCollection.insertOne({ id, label });
         res.json({ message: "Kategorie erstellt." });
-    } catch(e) { res.status(500).json({ error: "Fehler." }); }
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
 });
 
 // Admin: Kriterium erstellen
 app.post('/api/human/admin/criteria', isAuthenticated, isAdmin, async (req, res) => {
     const { label, type, categoryId } = req.body;
-    const id = label.toLowerCase().replace(/[^a-z0-9]/g, '').substring(0,10) + "_" + Math.floor(Math.random()*1000);
+    const id = label.toLowerCase().replace(/[^a-z0-9]/g, '').substring(0, 10) + "_" + Math.floor(Math.random() * 1000);
     try {
         await criteriaCollection.insertOne({ id, label, type, categoryId });
         res.json({ message: "Kriterium erstellt." });
-    } catch(e) { res.status(500).json({ error: "Fehler." }); }
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
 });
 
 // Menschen laden
@@ -4720,7 +4771,7 @@ app.put('/api/human/admin/humans/:id', isAuthenticated, isAdmin, async (req, res
     try {
         await humansCollection.updateOne({ _id: new ObjectId(req.params.id) }, { $set: { name, categoryId, criteriaIds } });
         res.json({ message: "Update erfolgreich." });
-    } catch(e) { res.status(500).json({ error: "Fehler." }); }
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
 });
 
 // Admin: Mensch löschen
@@ -4767,7 +4818,7 @@ app.post('/api/human/admin/reset-defaults', isAuthenticated, isAdmin, async (req
         await criteriaCollection.deleteMany({});
         await seedHumanGradesDefaults();
         res.json({ message: "Datenbank auf Standardwerte (Fächer/Kategorien) zurückgesetzt." });
-    } catch(e) { res.status(500).json({ error: "Fehler beim Reset." }); }
+    } catch (e) { res.status(500).json({ error: "Fehler beim Reset." }); }
 });
 
 // =========================================================
@@ -4789,11 +4840,11 @@ app.get('/api/human/admin/raters', isAuthenticated, isAdmin, async (req, res) =>
             },
             { $sort: { lastActive: -1 } } // Die neusten zuerst
         ]).toArray();
-        
+
         res.json({ raters });
-    } catch(e) { 
+    } catch (e) {
         console.error(e);
-        res.status(500).json({ error: "Fehler beim Laden der User." }); 
+        res.status(500).json({ error: "Fehler beim Laden der User." });
     }
 });
 
@@ -4801,7 +4852,7 @@ app.get('/api/human/admin/raters', isAuthenticated, isAdmin, async (req, res) =>
 app.get('/api/human/admin/raters/:userId', isAuthenticated, isAdmin, async (req, res) => {
     try {
         const uId = new ObjectId(req.params.userId);
-        
+
         // Hole Ratings und joine mit Humans-Collection, um den Namen der bewerteten Person zu haben
         const userRatings = await ratingsCollection.aggregate([
             { $match: { userId: uId } },
@@ -4814,7 +4865,7 @@ app.get('/api/human/admin/raters/:userId', isAuthenticated, isAdmin, async (req,
                 }
             },
             { $unwind: "$humanInfo" }, // Array auflösen
-            { 
+            {
                 $project: {
                     _id: 1,
                     grades: 1,
@@ -4827,9 +4878,9 @@ app.get('/api/human/admin/raters/:userId', isAuthenticated, isAdmin, async (req,
         ]).toArray();
 
         res.json({ ratings: userRatings });
-    } catch(e) { 
+    } catch (e) {
         console.error(e);
-        res.status(500).json({ error: "Fehler beim Laden der Bewertungen." }); 
+        res.status(500).json({ error: "Fehler beim Laden der Bewertungen." });
     }
 });
 
@@ -4837,7 +4888,7 @@ app.get('/api/human/admin/raters/:userId', isAuthenticated, isAdmin, async (req,
 app.delete('/api/human/admin/ratings/:id', isAuthenticated, isAdmin, async (req, res) => {
     try {
         const rId = new ObjectId(req.params.id);
-        
+
         // Zuerst Bewertung finden, um HumanID für Neuberechnung zu haben
         const rating = await ratingsCollection.findOne({ _id: rId });
         if (!rating) return res.status(404).json({ error: "Bewertung nicht gefunden." });
@@ -4849,9 +4900,9 @@ app.delete('/api/human/admin/ratings/:id', isAuthenticated, isAdmin, async (req,
         await updateHumanAverage(rating.humanId);
 
         res.json({ message: "Bewertung gelöscht und Durchschnitt aktualisiert." });
-    } catch(e) { 
+    } catch (e) {
         console.error(e);
-        res.status(500).json({ error: "Fehler beim Löschen." }); 
+        res.status(500).json({ error: "Fehler beim Löschen." });
     }
 });
 
@@ -4865,9 +4916,9 @@ app.get('/api/bank/transactions', isAuthenticated, async (req, res) => {
     try {
         // Suche Transaktionen, wo der User Sender ODER Empfänger war
         const history = await bankTransactionsCollection.find({
-            $or: [ { fromId: userId }, { toId: userId } ]
+            $or: [{ fromId: userId }, { toId: userId }]
         }).sort({ timestamp: -1 }).limit(50).toArray();
-        
+
         res.json({ transactions: history });
     } catch (e) {
         console.error(e);
@@ -4877,17 +4928,17 @@ app.get('/api/bank/transactions', isAuthenticated, async (req, res) => {
 
 // 2. Überweisung tätigen (Geld oder Tokens) - MIT SICHERHEITS-UPDATES
 app.post('/api/bank/transfer', isAuthenticated, async (req, res) => {
-    const { recipientName, amount, type, reason, highLimitMode } = req.body; 
+    const { recipientName, amount, type, reason, highLimitMode } = req.body;
     const senderId = new ObjectId(req.session.userId);
     const senderName = req.session.username;
 
     // Standard Limits
-    const MAX_MONEY_TRANSFER = 1000000;  
-    const MAX_TOKEN_TRANSFER = 1000;     
-    
+    const MAX_MONEY_TRANSFER = 1000000;
+    const MAX_TOKEN_TRANSFER = 1000;
+
     // High-Limit Modus (Kostet 1% Gebühr)
     // Javascript Safe Max ist ca. 9 Billiarden. Mehr geht technisch nicht präzise ohne BigInt Umbau.
-    const ULTRA_LIMIT = Number.MAX_SAFE_INTEGER; 
+    const ULTRA_LIMIT = Number.MAX_SAFE_INTEGER;
 
     if (!recipientName || !amount || amount <= 0) return res.status(400).json({ error: "Ungültige Daten." });
     if (recipientName.toLowerCase() === senderName.toLowerCase()) return res.status(400).json({ error: "Keine Überweisung an sich selbst." });
@@ -5024,7 +5075,7 @@ app.post('/api/daily', isAuthenticated, async (req, res) => {
 
     const now = new Date();
     const last = user.lastDaily ? new Date(user.lastDaily) : new Date(0);
-    
+
     // Prüfen ob heute schon abgeholt (gleicher Tag, Monat, Jahr)
     if (now.getDate() === last.getDate() && now.getMonth() === last.getMonth() && now.getFullYear() === last.getFullYear()) {
         return res.status(400).json({ error: "Komm morgen wieder!" });
@@ -5033,7 +5084,7 @@ app.post('/api/daily', isAuthenticated, async (req, res) => {
     // Streak Logik (War das letzte mal gestern?)
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
-    
+
     let streak = user.dailyStreak || 0;
     // Wenn das letzte mal NICHT gestern war (und nicht heute), ist der Streak gebrochen
     if (last.toDateString() !== yesterday.toDateString()) {
@@ -5047,7 +5098,7 @@ app.post('/api/daily', isAuthenticated, async (req, res) => {
 
     await usersCollection.updateOne(
         { _id: userId },
-        { 
+        {
             $inc: { balance: reward },
             $set: { lastDaily: now, dailyStreak: streak }
         }
@@ -5062,17 +5113,17 @@ app.post('/api/daily', isAuthenticated, async (req, res) => {
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 // Wir erhöhen das Intervall leicht auf 45 Min, damit sich Ereignisse "ansammeln" können
-const NEWS_INTERVAL_MS = 45 * 60 * 1000; 
+const NEWS_INTERVAL_MS = 45 * 60 * 1000;
 
 // Hilfsfunktion: Zeitstempel des letzten Laufs aus der DB holen & aktualisieren
 // Das verhindert, dass der Bot alte Kamellen wiederholt.
 async function getLastNewsTime(update = false) {
     // Wir speichern den Zeitstempel in 'systemSettings', damit er auch Neustarts überlebt
     const setting = await systemSettingsCollection.findOne({ id: 'lnn_last_run' });
-    
+
     // Wenn noch nie gelaufen, nimm "jetzt minus Intervall"
     const lastRun = setting ? new Date(setting.timestamp) : new Date(Date.now() - NEWS_INTERVAL_MS);
-    
+
     if (update) {
         await systemSettingsCollection.updateOne(
             { id: 'lnn_last_run' },
@@ -5088,14 +5139,14 @@ async function gatherSmartNewsContext(lastRun) {
     console.log(`${LOG_PREFIX_SERVER} [LNN] Sammle Daten seit: ${lastRun.toLocaleTimeString()}`);
 
     // 1. Don't Blame Me (Nur NEUE Posts)
-    const newConfessions = await dontBlameMeCollection.find({ 
-        createdAt: { $gt: lastRun } 
+    const newConfessions = await dontBlameMeCollection.find({
+        createdAt: { $gt: lastRun }
     }).limit(3).toArray();
 
     // 2. Shop / Economy (Große Käufe)
-    const bigOrders = await ordersCollection.find({ 
+    const bigOrders = await ordersCollection.find({
         date: { $gt: lastRun },
-        total: { $gt: 500 } 
+        total: { $gt: 500 }
     }).limit(3).toArray();
 
     // 3. Crime (Überfälle)
@@ -5103,14 +5154,14 @@ async function gatherSmartNewsContext(lastRun) {
     if (typeof robberyLogsCollection !== 'undefined') {
         crimeNews = await robberyLogsCollection.find({
             timestamp: { $gt: lastRun },
-            success: true 
+            success: true
         }).sort({ amountLost: -1 }).limit(2).toArray();
     }
 
     // 4. Auktionen (Beendete Auktionen)
     const endedAuctions = await auctionsCollection.find({
         status: 'ended_sold',
-        endTime: { $gt: lastRun } 
+        endTime: { $gt: lastRun }
     }).sort({ currentBid: -1 }).limit(1).toArray();
 
     // 5. Tinda Matches
@@ -5181,7 +5232,7 @@ async function gatherSmartNewsContext(lastRun) {
 
     // Wenn NICHTS passiert ist -> null
     if (contextParts.length === 0) {
-        return null; 
+        return null;
     }
 
     return contextParts.join("\n");
@@ -5196,7 +5247,7 @@ async function generateAiNews(force = false) {
 
     // 1. Zeitfenster bestimmen (Wann liefen wir zuletzt?)
     const lastRun = await getLastNewsTime();
-    
+
     // 2. Daten sammeln (Nur Dinge, die NACH lastRun passiert sind)
     const contextData = await gatherSmartNewsContext(lastRun);
 
@@ -5204,7 +5255,7 @@ async function generateAiNews(force = false) {
     if (!contextData && !force) {
         console.log(`${LOG_PREFIX_SERVER} [LNN] Nichts Neues passiert. Bot hält den Mund.`);
         // Zeitstempel wird NICHT aktualisiert, damit Daten sich für den nächsten Lauf weiter ansammeln.
-        return null; 
+        return null;
     }
 
     // Wir holen die Headline der LETZTEN News aus der DB, damit die KI sich nicht wiederholt
@@ -5212,15 +5263,15 @@ async function generateAiNews(force = false) {
     try {
         const lastNews = await newsCollection.find().sort({ createdAt: -1 }).limit(1).toArray();
         if (lastNews.length > 0) lastHeadline = lastNews[0].headline;
-    } catch(e) {}
+    } catch (e) { }
 
     const promptData = contextData || "Es ist gerade sehr ruhig in Limazon. Die Bank hat geöffnet, die Vögel zwitschern.";
 
     console.log(`${LOG_PREFIX_SERVER} [LNN] Generiere News mit Kontext...`);
 
-    const modelName = "gemini-2.5-flash"; 
+    const modelName = "gemini-2.5-flash";
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
-    
+
     // NEUER PROMPT: Zwingt die KI, NICHT das Gleiche wie beim letzten Mal zu schreiben
     const prompt = `
     Du bist der sarkastische Chefredakteur des "Limo News Network" (LNN).
@@ -5244,8 +5295,8 @@ async function generateAiNews(force = false) {
     `;
 
     try {
-        const response = await axios.post(url, { 
-            contents: [{ parts: [{ text: prompt }] }] 
+        const response = await axios.post(url, {
+            contents: [{ parts: [{ text: prompt }] }]
         });
 
         if (!response.data || !response.data.candidates || !response.data.candidates[0]) {
@@ -5254,7 +5305,7 @@ async function generateAiNews(force = false) {
 
         let textResponse = response.data.candidates[0].content.parts[0].text;
         textResponse = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
-        
+
         let article;
         try {
             article = JSON.parse(textResponse);
@@ -5273,10 +5324,10 @@ async function generateAiNews(force = false) {
             likes: 0
         };
         await newsCollection.insertOne(newEntry);
-        
+
         // WICHTIG: Zeitstempel JETZT aktualisieren, da erfolgreich gepostet wurde
-        await getLastNewsTime(true); 
-        
+        await getLastNewsTime(true);
+
         // Frontend informieren (Polling Trigger)
         if (typeof updateDataVersion === 'function') updateDataVersion('news');
 
@@ -5290,8 +5341,7 @@ async function generateAiNews(force = false) {
 }
 
 // Job starten
-if (GEMINI_API_KEY) {
-    // Erster Check nach 60 Sekunden, dann Intervall
+if (cluster.isPrimary && GEMINI_API_KEY) {
     setTimeout(() => generateAiNews(false), 60000); 
     setInterval(() => generateAiNews(false), NEWS_INTERVAL_MS);
 }
@@ -5307,7 +5357,7 @@ app.get('/api/news', async (req, res) => {
 
 // Like
 app.post('/api/news/:id/like', isAuthenticated, async (req, res) => {
-    try { await newsCollection.updateOne({ _id: new ObjectId(req.params.id) }, { $inc: { likes: 1 } }); res.json({ message: "Geliked!" }); } 
+    try { await newsCollection.updateOne({ _id: new ObjectId(req.params.id) }, { $inc: { likes: 1 } }); res.json({ message: "Geliked!" }); }
     catch (e) { res.status(500).json({ error: "Fehler." }); }
 });
 
@@ -5335,9 +5385,9 @@ app.delete('/api/admin/news/:id', isAuthenticated, isAdmin, async (req, res) => 
         const result = await newsCollection.deleteOne({ _id: new ObjectId(req.params.id) });
         if (result.deletedCount === 0) return res.status(404).json({ error: "Artikel nicht gefunden." });
         res.json({ message: "Artikel erfolgreich gelöscht." });
-    } catch (e) { 
+    } catch (e) {
         console.error(e);
-        res.status(500).json({ error: "Fehler beim Löschen." }); 
+        res.status(500).json({ error: "Fehler beim Löschen." });
     }
 });
 
@@ -5359,7 +5409,7 @@ app.get('/api/admin/users', isAuthenticated, isAdmin, async (req, res) => {
 app.put('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
     // Wir holen uns jetzt auch 'infinityMoney' aus dem Body
     const { balance, tokens, isAdmin: makeAdmin, infinityMoney } = req.body;
-    
+
     try {
         const updateData = {
             balance: parseFloat(balance),
@@ -5378,7 +5428,7 @@ app.put('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
             { _id: new ObjectId(req.params.id) },
             { $set: updateData }
         );
-        
+
         console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} hat User ${req.params.id} bearbeitet (InfMoney: ${infinityMoney}).`);
         res.json({ message: "User erfolgreich aktualisiert." });
     } catch (e) {
@@ -5391,7 +5441,7 @@ app.put('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
 app.post('/api/admin/users/:id/reset-pw', isAuthenticated, isAdmin, async (req, res) => {
     const { newPassword } = req.body;
     if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: "Passwort zu kurz." });
-    
+
     try {
         const hashedPassword = await bcrypt.hash(newPassword, 10);
         await usersCollection.updateOne(
@@ -5407,10 +5457,10 @@ app.post('/api/admin/users/:id/reset-pw', isAuthenticated, isAdmin, async (req, 
 app.delete('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
     try {
         const uId = new ObjectId(req.params.id);
-        
+
         // 1. User selbst löschen
         const userResult = await usersCollection.deleteOne({ _id: uId });
-        
+
         if (userResult.deletedCount === 0) return res.status(404).json({ error: "User nicht gefunden" });
 
         // 2. Alles aufräumen, was dem User gehörte
@@ -5419,23 +5469,23 @@ app.delete('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) =>
         await Promise.all([
             inventoriesCollection.deleteMany({ userId: uId }),
             portfoliosCollection.deleteMany({ userId: uId }),
-            wheelsCollection.deleteMany({ creatorId: uId }), 
-            auctionsCollection.deleteMany({ sellerId: uId }), 
-            ideasCollection.deleteMany({ submitterId: uId }), 
-            ratingsCollection.deleteMany({ userId: uId }), 
-            
+            wheelsCollection.deleteMany({ creatorId: uId }),
+            auctionsCollection.deleteMany({ sellerId: uId }),
+            ideasCollection.deleteMany({ submitterId: uId }),
+            ratingsCollection.deleteMany({ userId: uId }),
+
             // FIX: "userId" anstelle von "authorId"
-            dontBlameMeCollection.deleteMany({ userId: uId }), 
-            
+            dontBlameMeCollection.deleteMany({ userId: uId }),
+
             limUserChatSettingsCollection.deleteMany({ userId: uId })
         ]);
 
         console.log(`${LOG_PREFIX_SERVER} ✅ User ${uId} und alle verknüpften Daten gelöscht.`);
         res.json({ message: "User und alle verknüpften Daten wurden restlos gelöscht." });
 
-    } catch (e) { 
+    } catch (e) {
         console.error(e);
-        res.status(500).json({ error: "Fehler beim Löschen." }); 
+        res.status(500).json({ error: "Fehler beim Löschen." });
     }
 });
 
@@ -5494,10 +5544,10 @@ app.post('/api/admin/products', isAuthenticated, isAdmin, async (req, res) => {
 app.delete('/api/admin/products/:id', isAuthenticated, isAdmin, async (req, res) => {
     try {
         const pId = new ObjectId(req.params.id);
-        
+
         // Zuerst das Produkt holen, um die String-ID (z.B. "411310" oder "apple") zu bekommen
         const product = await productsCollection.findOne({ _id: pId });
-        
+
         if (!product) return res.status(404).json({ error: "Produkt nicht gefunden." });
 
         const stringId = product.id; // Das ist die ID, die in Portfolios/Inventar genutzt wird
@@ -5511,13 +5561,13 @@ app.delete('/api/admin/products/:id', isAuthenticated, isAdmin, async (req, res)
         await Promise.all([
             // Aus Inventaren aller User entfernen
             inventoriesCollection.deleteMany({ productId: stringId }),
-            
+
             // Aus Portfolios (Aktien) aller User entfernen
             portfoliosCollection.deleteMany({ productId: stringId }),
-            
+
             // Laufende Auktionen mit diesem Produkt löschen
             auctionsCollection.deleteMany({ productId: stringId }),
-            
+
             // Transaktionshistorie bereinigen (optional, aber sauberer)
             transactionsCollection.deleteMany({ productId: stringId })
         ]);
@@ -5525,9 +5575,9 @@ app.delete('/api/admin/products/:id', isAuthenticated, isAdmin, async (req, res)
         console.log(`${LOG_PREFIX_SERVER} ✅ Produkt ${stringId} und Referenzen gelöscht.`);
         res.json({ message: "Produkt und alle Bestände/Aktien wurden gelöscht." });
 
-    } catch (e) { 
+    } catch (e) {
         console.error(e);
-        res.status(500).json({ error: "Fehler beim Löschen." }); 
+        res.status(500).json({ error: "Fehler beim Löschen." });
     }
 });
 
@@ -5561,13 +5611,13 @@ app.post('/api/admin/banUser', async (req, res) => {
         if (targetUser.lastIp) {
             await db.collection('banned_ips').updateOne(
                 { ip: targetUser.lastIp },
-                { 
-                    $set: { 
-                        ip: targetUser.lastIp, 
-                        bannedAt: new Date(), 
+                {
+                    $set: {
+                        ip: targetUser.lastIp,
+                        bannedAt: new Date(),
                         bannedBy: req.session.username,
-                        reason: "Account Deleted & Banned by Admin" 
-                    } 
+                        reason: "Account Deleted & Banned by Admin"
+                    }
                 },
                 { upsert: true } // Erstellt den Eintrag, falls er noch nicht existiert
             );
@@ -5591,210 +5641,336 @@ app.post('/api/admin/banUser', async (req, res) => {
 
 const ACHIEVEMENT_DEFINITIONS = [
     // --- 🐣 BASIC / ANFANG ---
-    { id: 'newbie', icon: '🐣', title: 'Frischfleisch', desc: 'Willkommen im Limo Verse.', 
-      check: () => true },
-    { id: 'identity', icon: '🪪', title: 'Identität', desc: 'Setze eine Bio in deinem Profil.', 
-      check: (u) => u.bio && u.bio.length > 5 },
-    { id: 'og', icon: '🦕', title: 'Urgestein', desc: 'Dein Account ist älter als 7 Tage.', 
-      check: (u) => (new Date() - u._id.getTimestamp()) / (1000 * 60 * 60 * 24) >= 7 },
-    { id: 'veteran', icon: '🎖️', title: 'Veteran', desc: 'Dein Account ist älter als 30 Tage.',
-      check: (u) => (new Date() - u._id.getTimestamp()) / (1000 * 60 * 60 * 24) >= 30 },
+    {
+        id: 'newbie', icon: '🐣', title: 'Frischfleisch', desc: 'Willkommen im Limo Verse.',
+        check: () => true
+    },
+    {
+        id: 'identity', icon: '🪪', title: 'Identität', desc: 'Setze eine Bio in deinem Profil.',
+        check: (u) => u.bio && u.bio.length > 5
+    },
+    {
+        id: 'og', icon: '🦕', title: 'Urgestein', desc: 'Dein Account ist älter als 7 Tage.',
+        check: (u) => (new Date() - u._id.getTimestamp()) / (1000 * 60 * 60 * 24) >= 7
+    },
+    {
+        id: 'veteran', icon: '🎖️', title: 'Veteran', desc: 'Dein Account ist älter als 30 Tage.',
+        check: (u) => (new Date() - u._id.getTimestamp()) / (1000 * 60 * 60 * 24) >= 30
+    },
 
     // --- 💰 REICHTUM (MONEY) ---
-    { id: 'piggy', icon: '🐷', title: 'Sparschwein', desc: 'Habe $7.500 auf dem Konto.', 
-      check: (u) => u.balance >= 7500 },
-    { id: 'middle_class', icon: '🏠', title: 'Mittelstand', desc: 'Besitze $50.000.', 
-      check: (u) => u.balance >= 50000 },
-    { id: 'rich', icon: '💸', title: 'Bonze', desc: 'Der erste Schritt: $100.000.', 
-      check: (u) => u.balance >= 100000 },
-    { id: 'half_mil', icon: '💼', title: 'Halbe Million', desc: 'Besitze $500.000.', 
-      check: (u) => u.balance >= 500000 },
-    { id: 'millionaire', icon: '💎', title: 'Millionär', desc: 'Willkommen im Club ($1M).', 
-      check: (u) => u.balance >= 1000000 },
-    { id: 'multi_million', icon: '🏰', title: 'Tycoon', desc: 'Besitze über $10 Millionen.', 
-      check: (u) => u.balance >= 10000000 },
-    { id: 'limo_bezos', icon: '🚀', title: 'Limo Bezos', desc: 'Besitze unfassbare $1 Milliarde.', 
-      check: (u) => u.balance >= 1000000000 },
-    
+    {
+        id: 'piggy', icon: '🐷', title: 'Sparschwein', desc: 'Habe $7.500 auf dem Konto.',
+        check: (u) => u.balance >= 7500
+    },
+    {
+        id: 'middle_class', icon: '🏠', title: 'Mittelstand', desc: 'Besitze $50.000.',
+        check: (u) => u.balance >= 50000
+    },
+    {
+        id: 'rich', icon: '💸', title: 'Bonze', desc: 'Der erste Schritt: $100.000.',
+        check: (u) => u.balance >= 100000
+    },
+    {
+        id: 'half_mil', icon: '💼', title: 'Halbe Million', desc: 'Besitze $500.000.',
+        check: (u) => u.balance >= 500000
+    },
+    {
+        id: 'millionaire', icon: '💎', title: 'Millionär', desc: 'Willkommen im Club ($1M).',
+        check: (u) => u.balance >= 1000000
+    },
+    {
+        id: 'multi_million', icon: '🏰', title: 'Tycoon', desc: 'Besitze über $10 Millionen.',
+        check: (u) => u.balance >= 10000000
+    },
+    {
+        id: 'limo_bezos', icon: '🚀', title: 'Limo Bezos', desc: 'Besitze unfassbare $1 Milliarde.',
+        check: (u) => u.balance >= 1000000000
+    },
+
     // --- 📉 ARMUT / MEMES (Jetzt mit Rundung!) ---
-    { id: 'broke', icon: '📉', title: 'Pleitegeier', desc: 'Weniger als $1 Guthaben.', 
-      check: (u) => u.balance < 1 && u.balance > -500 },
-    { id: 'debt_collector', icon: '🆘', title: 'In den Miesen', desc: 'Habe Schulden (Negatives Guthaben).', 
-      check: (u) => u.balance < 0 },
-    { id: 'exact_zero', icon: '0️⃣', title: 'Perfekte Null', desc: 'Exakt $0.00 auf dem Konto.', 
-      // Wir prüfen ob der Betrag extrem nah an 0 ist (wegen Floating Point)
-      check: (u) => Math.abs(u.balance) < 0.01 },
-    { id: 'meme_420', icon: '🌿', title: 'Blaze It', desc: 'Habe ca. $420 Guthaben.', 
-      // Math.round sorgt dafür, dass 419.60 bis 420.49 als 420 gelten
-      check: (u) => Math.round(u.balance) === 420 },
-    { id: 'meme_69', icon: '♋', title: 'Nice', desc: 'Habe ca. $69 Guthaben.', 
-      check: (u) => Math.round(u.balance) === 69 },
+    {
+        id: 'broke', icon: '📉', title: 'Pleitegeier', desc: 'Weniger als $1 Guthaben.',
+        check: (u) => u.balance < 1 && u.balance > -500
+    },
+    {
+        id: 'debt_collector', icon: '🆘', title: 'In den Miesen', desc: 'Habe Schulden (Negatives Guthaben).',
+        check: (u) => u.balance < 0
+    },
+    {
+        id: 'exact_zero', icon: '0️⃣', title: 'Perfekte Null', desc: 'Exakt $0.00 auf dem Konto.',
+        // Wir prüfen ob der Betrag extrem nah an 0 ist (wegen Floating Point)
+        check: (u) => Math.abs(u.balance) < 0.01
+    },
+    {
+        id: 'meme_420', icon: '🌿', title: 'Blaze It', desc: 'Habe ca. $420 Guthaben.',
+        // Math.round sorgt dafür, dass 419.60 bis 420.49 als 420 gelten
+        check: (u) => Math.round(u.balance) === 420
+    },
+    {
+        id: 'meme_69', icon: '♋', title: 'Nice', desc: 'Habe ca. $69 Guthaben.',
+        check: (u) => Math.round(u.balance) === 69
+    },
 
     // --- 🪙 TOKENS ---
-    { id: 'token_start', icon: '🥉', title: 'Token Anfänger', desc: 'Besitze 1 Token.', 
-      check: (u) => (u.tokens||0) >= 1 },
-    { id: 'token_fan', icon: '🥈', title: 'Token Sammler', desc: 'Besitze 50 Tokens.', 
-      check: (u) => (u.tokens||0) >= 50 },
-    { id: 'token_lord', icon: '🥇', title: 'Token Lord', desc: 'Besitze 100 Tokens.', 
-      check: (u) => (u.tokens||0) >= 100 },
-    { id: 'token_god', icon: '👑', title: 'Token Gott', desc: 'Besitze 1.000 Tokens.', 
-      check: (u) => (u.tokens||0) >= 1000 },
+    {
+        id: 'token_start', icon: '🥉', title: 'Token Anfänger', desc: 'Besitze 1 Token.',
+        check: (u) => (u.tokens || 0) >= 1
+    },
+    {
+        id: 'token_fan', icon: '🥈', title: 'Token Sammler', desc: 'Besitze 50 Tokens.',
+        check: (u) => (u.tokens || 0) >= 50
+    },
+    {
+        id: 'token_lord', icon: '🥇', title: 'Token Lord', desc: 'Besitze 100 Tokens.',
+        check: (u) => (u.tokens || 0) >= 100
+    },
+    {
+        id: 'token_god', icon: '👑', title: 'Token Gott', desc: 'Besitze 1.000 Tokens.',
+        check: (u) => (u.tokens || 0) >= 1000
+    },
 
     // --- 🛒 SHOP & BESITZ ---
-    { id: 'shopper', icon: '🛍️', title: 'Shopping Queen', desc: '5 Items im Inventar.', 
-      check: (u, s) => s.inventoryCount >= 5 },
-    { id: 'hoarder', icon: '📦', title: 'Lagerhalle', desc: '50 Items im Inventar.', 
-      check: (u, s) => s.inventoryCount >= 50 },
-    { id: 'museum', icon: '🏛️', title: 'Das Museum', desc: '100 Items im Inventar.', 
-      check: (u, s) => s.inventoryCount >= 100 },
+    {
+        id: 'shopper', icon: '🛍️', title: 'Shopping Queen', desc: '5 Items im Inventar.',
+        check: (u, s) => s.inventoryCount >= 5
+    },
+    {
+        id: 'hoarder', icon: '📦', title: 'Lagerhalle', desc: '50 Items im Inventar.',
+        check: (u, s) => s.inventoryCount >= 50
+    },
+    {
+        id: 'museum', icon: '🏛️', title: 'Das Museum', desc: '100 Items im Inventar.',
+        check: (u, s) => s.inventoryCount >= 100
+    },
 
     // --- 📈 BÖRSE (LIMO STONKS) ---
-    { id: 'investor', icon: '📈', title: 'Aktionär', desc: 'Besitze deine erste Aktie.', 
-      check: (u, s) => s.stockCount >= 1 },
-    { id: 'wolf', icon: '🐺', title: 'Wolf of Limo Street', desc: 'Besitze 5 verschiedene Aktien.', 
-      check: (u, s) => s.stockCount >= 5 },
-    { id: 'hedge_fund', icon: '🏦', title: 'Hedgefonds', desc: 'Besitze 10 verschiedene Aktien.', 
-      check: (u, s) => s.stockCount >= 10 },
+    {
+        id: 'investor', icon: '📈', title: 'Aktionär', desc: 'Besitze deine erste Aktie.',
+        check: (u, s) => s.stockCount >= 1
+    },
+    {
+        id: 'wolf', icon: '🐺', title: 'Wolf of Limo Street', desc: 'Besitze 5 verschiedene Aktien.',
+        check: (u, s) => s.stockCount >= 5
+    },
+    {
+        id: 'hedge_fund', icon: '🏦', title: 'Hedgefonds', desc: 'Besitze 10 verschiedene Aktien.',
+        check: (u, s) => s.stockCount >= 10
+    },
 
     // --- 🎓 HUMAN GRADES & IDEAS (SOCIAL) ---
-    { id: 'critic', icon: '📝', title: 'Kritiker', desc: 'Gib deine erste Bewertung ab.', 
-      check: (u, s) => s.ratingCount >= 1 },
-    { id: 'judge', icon: '⚖️', title: 'Richter', desc: 'Gib 10 Bewertungen ab.', 
-      check: (u, s) => s.ratingCount >= 10 },
-    { id: 'jury', icon: '📜', title: 'Die Jury', desc: 'Gib 50 Bewertungen ab.', 
-      check: (u, s) => s.ratingCount >= 50 },
-    { id: 'inventor', icon: '💡', title: 'Erfinder', desc: 'Reiche eine Idee in der Ideenbox ein.',
-      check: (u, s) => s.ideaCount >= 1 },
-    { id: 'visionary', icon: '🔮', title: 'Visionär', desc: 'Reiche 5 Ideen in der Ideenbox ein.',
-      check: (u, s) => s.ideaCount >= 5 },
+    {
+        id: 'critic', icon: '📝', title: 'Kritiker', desc: 'Gib deine erste Bewertung ab.',
+        check: (u, s) => s.ratingCount >= 1
+    },
+    {
+        id: 'judge', icon: '⚖️', title: 'Richter', desc: 'Gib 10 Bewertungen ab.',
+        check: (u, s) => s.ratingCount >= 10
+    },
+    {
+        id: 'jury', icon: '📜', title: 'Die Jury', desc: 'Gib 50 Bewertungen ab.',
+        check: (u, s) => s.ratingCount >= 50
+    },
+    {
+        id: 'inventor', icon: '💡', title: 'Erfinder', desc: 'Reiche eine Idee in der Ideenbox ein.',
+        check: (u, s) => s.ideaCount >= 1
+    },
+    {
+        id: 'visionary', icon: '🔮', title: 'Visionär', desc: 'Reiche 5 Ideen in der Ideenbox ein.',
+        check: (u, s) => s.ideaCount >= 5
+    },
 
     // --- 💬 CHAT ---
-    { id: 'talkative', icon: '🗣️', title: 'Gesprächig', desc: 'Sende 10 Nachrichten im Chat.',
-      check: (u, s) => s.messageCount >= 10 },
-    { id: 'influencer', icon: '📢', title: 'Influencer', desc: 'Sende 100 Nachrichten im Chat.',
-      check: (u, s) => s.messageCount >= 100 },
-    { id: 'legend_spam', icon: '🔥', title: 'Tastatur-Glüher', desc: 'Sende 1.000 Nachrichten im Chat.',
-      check: (u, s) => s.messageCount >= 1000 },
+    {
+        id: 'talkative', icon: '🗣️', title: 'Gesprächig', desc: 'Sende 10 Nachrichten im Chat.',
+        check: (u, s) => s.messageCount >= 10
+    },
+    {
+        id: 'influencer', icon: '📢', title: 'Influencer', desc: 'Sende 100 Nachrichten im Chat.',
+        check: (u, s) => s.messageCount >= 100
+    },
+    {
+        id: 'legend_spam', icon: '🔥', title: 'Tastatur-Glüher', desc: 'Sende 1.000 Nachrichten im Chat.',
+        check: (u, s) => s.messageCount >= 1000
+    },
 
     // --- 🏦 BANKING ---
-    { id: 'philanthropist', icon: '🤝', title: 'Gönner', desc: 'Tätige deine erste Überweisung.',
-      check: (u, s) => s.transferCount >= 1 },
-    { id: 'banker', icon: '💼', title: 'Bankier', desc: 'Tätige 10 Überweisungen.',
-      check: (u, s) => s.transferCount >= 10 },
+    {
+        id: 'philanthropist', icon: '🤝', title: 'Gönner', desc: 'Tätige deine erste Überweisung.',
+        check: (u, s) => s.transferCount >= 1
+    },
+    {
+        id: 'banker', icon: '💼', title: 'Bankier', desc: 'Tätige 10 Überweisungen.',
+        check: (u, s) => s.transferCount >= 10
+    },
 
     // --- 📅 DAILY & LOYALITÄT ---
-    { id: 'streak_week', icon: '📅', title: 'Eine Woche Treue', desc: '7 Tage Daily Streak.',
-      check: (u, s) => s.dailyStreak >= 7 },
-    { id: 'streak_month', icon: '🗓️', title: 'Monats-Abo', desc: '30 Tage Daily Streak.',
-      check: (u, s) => s.dailyStreak >= 30 },
+    {
+        id: 'streak_week', icon: '📅', title: 'Eine Woche Treue', desc: '7 Tage Daily Streak.',
+        check: (u, s) => s.dailyStreak >= 7
+    },
+    {
+        id: 'streak_month', icon: '🗓️', title: 'Monats-Abo', desc: '30 Tage Daily Streak.',
+        check: (u, s) => s.dailyStreak >= 30
+    },
 
     // --- 🔨 AUKTIONEN & ERSTELLER ---
-    { id: 'seller', icon: '🏷️', title: 'Verkäufer', desc: 'Erstelle eine Auktion.', 
-      check: (u, s) => s.auctionCount >= 1 },
-    { id: 'power_seller', icon: '📦', title: 'Power Seller', desc: 'Erstelle 10 Auktionen.',
-      check: (u, s) => s.auctionCount >= 10 },
-    { id: 'sniper', icon: '🎯', title: 'Sniper', desc: 'Gewinne eine Auktion.',
-      check: (u, s) => s.auctionWonCount >= 1 },
-    { id: 'auction_king', icon: '👑', title: 'Auktionskönig', desc: 'Gewinne 5 Auktionen.',
-      check: (u, s) => s.auctionWonCount >= 5 },
-    { id: 'wheel_spin', icon: '🎡', title: 'Glücksrad-Bauer', desc: 'Erstelle ein eigenes Glücksrad.', 
-      check: (u, s) => s.wheelCount >= 1 },
+    {
+        id: 'seller', icon: '🏷️', title: 'Verkäufer', desc: 'Erstelle eine Auktion.',
+        check: (u, s) => s.auctionCount >= 1
+    },
+    {
+        id: 'power_seller', icon: '📦', title: 'Power Seller', desc: 'Erstelle 10 Auktionen.',
+        check: (u, s) => s.auctionCount >= 10
+    },
+    {
+        id: 'sniper', icon: '🎯', title: 'Sniper', desc: 'Gewinne eine Auktion.',
+        check: (u, s) => s.auctionWonCount >= 1
+    },
+    {
+        id: 'auction_king', icon: '👑', title: 'Auktionskönig', desc: 'Gewinne 5 Auktionen.',
+        check: (u, s) => s.auctionWonCount >= 5
+    },
+    {
+        id: 'wheel_spin', icon: '🎡', title: 'Glücksrad-Bauer', desc: 'Erstelle ein eigenes Glücksrad.',
+        check: (u, s) => s.wheelCount >= 1
+    },
 
     // --- 🕵️ HIDDEN / EASTER EGGS ---
-    { id: 'leet', icon: '👾', title: '1337', desc: 'Habe ca. $1337 Guthaben.', 
-      check: (u) => Math.round(u.balance) === 1337 },
-    { id: 'devil', icon: '😈', title: 'Teuflisch', desc: 'Habe ca. $666 Guthaben.', 
-      check: (u) => Math.round(u.balance) === 666 },
-    { id: 'lucky', icon: '🍀', title: 'Lucky 7', desc: 'Habe ca. $777 Guthaben.', 
-      check: (u) => Math.round(u.balance) === 777 },
-    { id: 'admin_power', icon: '🛡️', title: 'Admin Power', desc: 'Du hast Admin-Rechte.', 
-      check: (u) => u.isAdmin },
-
-	// --- SPECIAL / BUG BOUNTY ---
-    { 
-      id: 'badge_hunter', 
-      icon: '🐛', 
-      title: 'Bug Hunter', 
-      desc: 'Hat einen Fehler in der Matrix gefunden und eliminiert.', 
-      // check gibt immer false zurück, da dieses Badge nur manuell/per Kauf vergeben wird
-      check: () => false 
+    {
+        id: 'leet', icon: '👾', title: '1337', desc: 'Habe ca. $1337 Guthaben.',
+        check: (u) => Math.round(u.balance) === 1337
     },
-	// --- 🔥 TINDA (DATING) ---
-    { id: 'romeo', icon: '🌹', title: 'Romeo', desc: 'Habe dein erstes Tinda-Match.', 
-      check: (u, s) => s.tindaMatchCount >= 1 },
-    { id: 'casanova', icon: '😘', title: 'Casanova', desc: 'Sammle 10 Tinda-Matches.', 
-      check: (u, s) => s.tindaMatchCount >= 10 },
-    { id: 'heartbreaker', icon: '💔', title: 'Heartbreaker', desc: 'Sammle 50 Tinda-Matches.', 
-      check: (u, s) => s.tindaMatchCount >= 50 },
+    {
+        id: 'devil', icon: '😈', title: 'Teuflisch', desc: 'Habe ca. $666 Guthaben.',
+        check: (u) => Math.round(u.balance) === 666
+    },
+    {
+        id: 'lucky', icon: '🍀', title: 'Lucky 7', desc: 'Habe ca. $777 Guthaben.',
+        check: (u) => Math.round(u.balance) === 777
+    },
+    {
+        id: 'admin_power', icon: '🛡️', title: 'Admin Power', desc: 'Du hast Admin-Rechte.',
+        check: (u) => u.isAdmin
+    },
+
+    // --- SPECIAL / BUG BOUNTY ---
+    {
+        id: 'badge_hunter',
+        icon: '🐛',
+        title: 'Bug Hunter',
+        desc: 'Hat einen Fehler in der Matrix gefunden und eliminiert.',
+        // check gibt immer false zurück, da dieses Badge nur manuell/per Kauf vergeben wird
+        check: () => false
+    },
+    // --- 🔥 TINDA (DATING) ---
+    {
+        id: 'romeo', icon: '🌹', title: 'Romeo', desc: 'Habe dein erstes Tinda-Match.',
+        check: (u, s) => s.tindaMatchCount >= 1
+    },
+    {
+        id: 'casanova', icon: '😘', title: 'Casanova', desc: 'Sammle 10 Tinda-Matches.',
+        check: (u, s) => s.tindaMatchCount >= 10
+    },
+    {
+        id: 'heartbreaker', icon: '💔', title: 'Heartbreaker', desc: 'Sammle 50 Tinda-Matches.',
+        check: (u, s) => s.tindaMatchCount >= 50
+    },
 
     // --- 🦹 CRIME & JUSTIZ ---
-    { id: 'master_thief', icon: '💰', title: 'Meisterdieb', desc: 'Erbeute insgesamt über $50.000 durch Überfälle.', 
-      check: (u) => (u.crimeStats?.totalStolen || 0) >= 50000 },
-    { id: 'busted', icon: '🚓', title: 'Erwischt!', desc: 'Zahle insgesamt über $10.000 an Strafen (Fehlgeschlagene Überfälle).', 
-      check: (u) => (u.crimeStats?.totalFines || 0) >= 10000 },
-    { id: 'victim', icon: '🤕', title: 'Opferlamm', desc: 'Wurde 5-mal erfolgreich ausgeraubt.', 
-      // Das müssen wir über Logs prüfen oder im User speichern. Einfachheitshalber:
-      // Wir nehmen an, du speicherst "timesRobbed" im User bei einem Überfall (siehe Schritt 3 unten)
-      check: (u) => (u.crimeStats?.timesRobbed || 0) >= 5 },
+    {
+        id: 'master_thief', icon: '💰', title: 'Meisterdieb', desc: 'Erbeute insgesamt über $50.000 durch Überfälle.',
+        check: (u) => (u.crimeStats?.totalStolen || 0) >= 50000
+    },
+    {
+        id: 'busted', icon: '🚓', title: 'Erwischt!', desc: 'Zahle insgesamt über $10.000 an Strafen (Fehlgeschlagene Überfälle).',
+        check: (u) => (u.crimeStats?.totalFines || 0) >= 10000
+    },
+    {
+        id: 'victim', icon: '🤕', title: 'Opferlamm', desc: 'Wurde 5-mal erfolgreich ausgeraubt.',
+        // Das müssen wir über Logs prüfen oder im User speichern. Einfachheitshalber:
+        // Wir nehmen an, du speicherst "timesRobbed" im User bei einem Überfall (siehe Schritt 3 unten)
+        check: (u) => (u.crimeStats?.timesRobbed || 0) >= 5
+    },
 
     // --- 🏛️ STEUERN & STAAT ---
-    { id: 'good_citizen', icon: '🫡', title: 'Vorzeigebürger', desc: 'Zahle insgesamt über $1.000.000 an Steuern.', 
-      check: (u) => (u.totalTaxesPaid || 0) >= 1000000 },
-    { id: 'tax_evader', icon: '🕳️', title: 'Steuerflüchtling', desc: 'Besitze ein Steuerschutz-Zertifikat im Inventar.', 
-      // Prüft ob man das Item besitzt
-      check: (u, s) => s.hasTaxShield },
+    {
+        id: 'good_citizen', icon: '🫡', title: 'Vorzeigebürger', desc: 'Zahle insgesamt über $1.000.000 an Steuern.',
+        check: (u) => (u.totalTaxesPaid || 0) >= 1000000
+    },
+    {
+        id: 'tax_evader', icon: '🕳️', title: 'Steuerflüchtling', desc: 'Besitze ein Steuerschutz-Zertifikat im Inventar.',
+        // Prüft ob man das Item besitzt
+        check: (u, s) => s.hasTaxShield
+    },
 
     // --- 🎮 GAMES (HIGHSCORES) ---
     // Hier prüfen wir, ob der User in der Highscore DB einen Score über X hat
-    { id: 'flappy_noob', icon: '🐤', title: 'Flugschule', desc: 'Erreiche Score 10 in Flappy Limo.', 
-      check: (u, s) => s.bestFlappyScore >= 10 },
-    { id: 'flappy_ace', icon: '🦅', title: 'Flug-Ass', desc: 'Erreiche Score 50 in Flappy Limo.', 
-      check: (u, s) => s.bestFlappyScore >= 50 },
-    { id: 'snake_eater', icon: '🐍', title: 'Schlangenbeschwörer', desc: 'Erreiche Score 100 in Snake.', 
-      check: (u, s) => s.bestSnakeScore >= 100 },
+    {
+        id: 'flappy_noob', icon: '🐤', title: 'Flugschule', desc: 'Erreiche Score 10 in Flappy Limo.',
+        check: (u, s) => s.bestFlappyScore >= 10
+    },
+    {
+        id: 'flappy_ace', icon: '🦅', title: 'Flug-Ass', desc: 'Erreiche Score 50 in Flappy Limo.',
+        check: (u, s) => s.bestFlappyScore >= 50
+    },
+    {
+        id: 'snake_eater', icon: '🐍', title: 'Schlangenbeschwörer', desc: 'Erreiche Score 100 in Snake.',
+        check: (u, s) => s.bestSnakeScore >= 100
+    },
 
     // --- 🐛 DELTA & BUGS ---
-    { id: 'delta_force', icon: '🔺', title: 'Delta Force', desc: 'Besitze 5 Delta Coins.', 
-      check: (u) => (u.deltaCoins || 0) >= 5 },
-	{ id: 'foodie', icon: '🌭', title: 'Der Vorkoster', desc: 'Iss 10 Gerichte im Restaurant.', 
-      check: (u, s) => s.foodEaten >= 10 },
-    { id: 'regular', icon: '😋', title: 'Stammkunde', desc: 'Iss 50 Gerichte. Der Koch kennt deinen Namen.', 
-      check: (u, s) => s.foodEaten >= 50 },
-    { id: 'glutton', icon: '🐋', title: 'Vielfraß', desc: 'Iss 500 Gerichte. Die Stühle ächzen.', 
-      check: (u, s) => s.foodEaten >= 500 },
-    { 
-        id: 'badge_hacker', icon: '💻', title: 'Ghost Shell', 
-        desc: 'Meister der digitalen Schatten.', 
-        check: () => false 
+    {
+        id: 'delta_force', icon: '🔺', title: 'Delta Force', desc: 'Besitze 5 Delta Coins.',
+        check: (u) => (u.deltaCoins || 0) >= 5
     },
-    { 
-        id: 'badge_rich', icon: '🎩', title: 'Tycoon', 
-        desc: 'Geld spielt keine Rolle mehr.', 
-        check: () => false 
+    {
+        id: 'foodie', icon: '🌭', title: 'Der Vorkoster', desc: 'Iss 10 Gerichte im Restaurant.',
+        check: (u, s) => s.foodEaten >= 10
     },
-    { 
-        id: 'badge_illuminati', icon: '👁️', title: 'Illuminati', 
-        desc: 'Du siehst alles. Du weißt alles.', 
-        check: () => false 
+    {
+        id: 'regular', icon: '😋', title: 'Stammkunde', desc: 'Iss 50 Gerichte. Der Koch kennt deinen Namen.',
+        check: (u, s) => s.foodEaten >= 50
     },
-	{ id: 'badge_yakuza', icon: '🐉', title: 'Yakuza', desc: 'Teil der Familie. Gekauft im Untergrund.', 
-      check: () => false },
+    {
+        id: 'glutton', icon: '🐋', title: 'Vielfraß', desc: 'Iss 500 Gerichte. Die Stühle ächzen.',
+        check: (u, s) => s.foodEaten >= 500
+    },
+    {
+        id: 'badge_hacker', icon: '💻', title: 'Ghost Shell',
+        desc: 'Meister der digitalen Schatten.',
+        check: () => false
+    },
+    {
+        id: 'badge_rich', icon: '🎩', title: 'Tycoon',
+        desc: 'Geld spielt keine Rolle mehr.',
+        check: () => false
+    },
+    {
+        id: 'badge_illuminati', icon: '👁️', title: 'Illuminati',
+        desc: 'Du siehst alles. Du weißt alles.',
+        check: () => false
+    },
+    {
+        id: 'badge_yakuza', icon: '🐉', title: 'Yakuza', desc: 'Teil der Familie. Gekauft im Untergrund.',
+        check: () => false
+    },
 ];
 
 // Hilfsfunktion: Automatische Prüfung (V3 - Extended Edition)
 async function updateUserAchievements(user) {
     const userId = user._id;
-    
+
     // Parallel alle Counts abfragen für Performance
     const [
-        invCount, 
-        portCount, 
-        ratingCount, 
-        auctionCreatedCount, 
+        invCount,
+        portCount,
+        ratingCount,
+        auctionCreatedCount,
         auctionWonCount,
         wheelCount,
-        messageCount,    
-        ideaCount,       
+        messageCount,
+        ideaCount,
         transferCount,
         // NEU: Tinda Matches zählen (Chats vom Typ 'tinda')
         tindaMatchCount,
@@ -5821,7 +5997,7 @@ async function updateUserAchievements(user) {
         // Inventar Check für Badge:
         inventoriesCollection.findOne({ userId, productId: 'tax_shield', quantityOwned: { $gt: 0 } })
     ]);
-    
+
     // Das Statistik-Objekt ("s"), das wir an die Checks übergeben
     const stats = {
         inventoryCount: invCount,
@@ -5837,7 +6013,7 @@ async function updateUserAchievements(user) {
         tindaMatchCount: tindaMatchCount,
         bestFlappyScore: bestFlappy ? bestFlappy.score : 0,
         bestSnakeScore: bestSnake ? bestSnake.score : 0,
-		foodEaten: user.stats?.foodEaten || 0,
+        foodEaten: user.stats?.foodEaten || 0,
         hasTaxShield: !!taxShieldItem
     };
 
@@ -5852,14 +6028,14 @@ async function updateUserAchievements(user) {
                 if (ach.check(user, stats)) {
                     newUnlocks.push(ach.id);
                 }
-            } catch(e) { console.error(`Check Error (${ach.id}):`, e); }
+            } catch (e) { console.error(`Check Error (${ach.id}):`, e); }
         }
     }
 
     // Speichern
     if (newUnlocks.length > 0) {
         await usersCollection.updateOne(
-            { _id: user._id }, 
+            { _id: user._id },
             { $addToSet: { achievements: { $each: newUnlocks } } }
         );
         console.log(`${LOG_PREFIX_SERVER} 🏆 User ${user.username} hat ${newUnlocks.length} neue Achievements: ${newUnlocks.join(', ')}`);
@@ -5884,28 +6060,30 @@ app.get('/api/profile/:username', async (req, res) => {
         let inventory = [];
         const requestingUserId = req.session.userId;
         const isOwner = requestingUserId && (req.session.userId === user._id.toString());
-        
+
         if (isOwner || user.isInventoryPublic) {
             inventory = await inventoriesCollection.aggregate([
                 { $match: { userId: user._id, quantityOwned: { $gt: 0 } } },
                 { $lookup: { from: productsCollectionName, localField: "productId", foreignField: "id", as: "details" } },
                 { $unwind: "$details" },
-                { $project: { 
-                    name: "$details.name", 
-                    quantity: "$quantityOwned", 
-                    image: "$details.image" 
-                }}
+                {
+                    $project: {
+                        name: "$details.name",
+                        quantity: "$quantityOwned",
+                        image: "$details.image"
+                    }
+                }
             ]).toArray();
         }
 
         // Definitionen für das Frontend (ohne die check-Funktion, um Traffic zu sparen)
-        const frontendAchievements = ACHIEVEMENT_DEFINITIONS.map(({check, ...keep}) => keep);
+        const frontendAchievements = ACHIEVEMENT_DEFINITIONS.map(({ check, ...keep }) => keep);
 
         // --- WICHTIG: MERGE ---
         // Wir holen die erspielten (achievements) UND die gekauften (badges)
         // Set verhindert Dopplungen
         const allUserBadges = [
-            ...(user.achievements || []), 
+            ...(user.achievements || []),
             ...(user.badges || [])
         ];
         // Doppelte entfernen (falls mal was schief lief)
@@ -5916,7 +6094,7 @@ app.get('/api/profile/:username', async (req, res) => {
             bio: user.bio || "Keine Beschreibung.",
             joinDate: user._id.getTimestamp(),
             // HIER IST DIE ÄNDERUNG: Wir senden die kombinierte Liste
-            achievements: uniqueBadges, 
+            achievements: uniqueBadges,
             isAdmin: user.isAdmin,
             badgesCount: uniqueBadges.length,
             // Neue Felder:
@@ -5936,7 +6114,7 @@ app.get('/api/profile/:username', async (req, res) => {
 // API: Profil bearbeiten (Bio & Privacy)
 app.post('/api/profile/edit', isAuthenticated, async (req, res) => {
     const { bio, isInventoryPublic } = req.body;
-    
+
     // NEU: Limit auf 255 erhöht
     if (bio && bio.length > 255) {
         return res.status(400).json({ error: "Bio zu lang (max. 255 Zeichen)." });
@@ -5965,9 +6143,9 @@ let lastGithubFetchTime = 0;
 const GITHUB_CACHE_DURATION = 60 * 60 * 1000; // 1 Stunde in Millisekunden
 
 app.get('/api/system/stats', async (req, res) => {
-    
-    const GITHUB_USER = "limo123123"; 
-    const FRONTEND_REPOS = ["limazon"]; 
+
+    const GITHUB_USER = "limo123123";
+    const FRONTEND_REPOS = ["limazon"];
 
     try {
         // 1. DATENBANK STATS (Echtzeit)
@@ -5985,13 +6163,13 @@ app.get('/api/system/stats', async (req, res) => {
         try {
             const serverCode = fs.readFileSync(__filename, 'utf8');
             serverLoc = serverCode.split('\n').length;
-        } catch(e) { serverLoc = 0; }
+        } catch (e) { serverLoc = 0; }
 
         // 3. FRONTEND LOC (Mit Cache-System gegen Rate-Limits)
         const now = Date.now();
         if (cachedFrontendLoc === 0 || (now - lastGithubFetchTime) > GITHUB_CACHE_DURATION) {
             try {
-                const repoPromises = FRONTEND_REPOS.map(repo => 
+                const repoPromises = FRONTEND_REPOS.map(repo =>
                     fetch(`https://api.github.com/repos/${GITHUB_USER}/${repo}/languages`)
                         .then(res => res.ok ? res.json() : {})
                         .catch(() => ({}))
@@ -6001,13 +6179,13 @@ app.get('/api/system/stats', async (req, res) => {
                 let totalBytes = 0;
 
                 repoLangsArray.forEach(langs => {
-                    totalBytes += (langs.HTML || 0) + 
-                                  (langs.JavaScript || 0) + 
-                                  (langs.CSS || 0) + 
-                                  (langs.TypeScript || 0) + 
-                                  (langs.Python || 0);
+                    totalBytes += (langs.HTML || 0) +
+                        (langs.JavaScript || 0) +
+                        (langs.CSS || 0) +
+                        (langs.TypeScript || 0) +
+                        (langs.Python || 0);
                 });
-                
+
                 // Neuen Wert berechnen und speichern
                 if (totalBytes > 0) {
                     cachedFrontendLoc = Math.floor(totalBytes / 35);
@@ -6015,7 +6193,7 @@ app.get('/api/system/stats', async (req, res) => {
                     console.log(`[SYSTEM] GitHub LOC aktualisiert: ${cachedFrontendLoc} Zeilen.`);
                 }
 
-            } catch(e) { console.error("GitHub Fetch Error:", e); }
+            } catch (e) { console.error("GitHub Fetch Error:", e); }
         }
 
         res.json({
@@ -6025,8 +6203,8 @@ app.get('/api/system/stats', async (req, res) => {
             humans,
             auctions,
             loc: {
-                server: serverLoc,      
-                frontend: cachedFrontendLoc,  
+                server: serverLoc,
+                frontend: cachedFrontendLoc,
                 total: serverLoc + cachedFrontendLoc
             }
         });
@@ -6083,7 +6261,7 @@ app.post('/api/oauth/token', async (req, res) => {
 
     await authCodesCollection.deleteOne({ _id: authEntry._id });
     const user = await usersCollection.findOne({ _id: authEntry.userId });
-    
+
     res.json({ user: { id: user._id, username: user.username, isAdmin: user.isAdmin } });
 });
 
@@ -6103,7 +6281,10 @@ let dataVersions = {
 function updateDataVersion(key) {
     if (dataVersions[key]) {
         dataVersions[key] = Date.now();
-        // console.log(`${LOG_PREFIX_SERVER} 🔄 Smart-Polling: Version für '${key}' aktualisiert.`);
+        // Wenn Redis verbunden ist, rufe es den anderen Workern zu!
+        if (global.redisPub) {
+            global.redisPub.publish('sync-version', key);
+        }
     }
 }
 
@@ -6118,11 +6299,11 @@ app.get('/api/status/versions', (req, res) => {
 // =========================================================
 app.post('/api/admin/system/fix-images', isAuthenticated, isAdmin, async (req, res) => {
     console.log(`${LOG_PREFIX_SERVER} 🔧 Starte Bild-Reparatur (via.placeholder -> placehold.co)...`);
-    
+
     try {
         // 1. Hole alle Produkte, die die kaputte Domain enthalten
-        const productsToFix = await productsCollection.find({ 
-            image_url: { $regex: "via.placeholder.com" } 
+        const productsToFix = await productsCollection.find({
+            image_url: { $regex: "via.placeholder.com" }
         }).toArray();
 
         if (productsToFix.length === 0) {
@@ -6133,7 +6314,7 @@ app.post('/api/admin/system/fix-images', isAuthenticated, isAdmin, async (req, r
         const bulkOps = productsToFix.map(p => {
             // Ersetze die Domain im String
             const newUrl = p.image_url.replace("via.placeholder.com", "placehold.co");
-            
+
             return {
                 updateOne: {
                     filter: { _id: p._id },
@@ -6147,15 +6328,15 @@ app.post('/api/admin/system/fix-images', isAuthenticated, isAdmin, async (req, r
 
         // 4. WICHTIG: Cache aktualisieren, damit es im Shop sofort sichtbar ist
         await refreshProductCache();
-        
+
         // 5. Frontend informieren (Smart Polling)
         if (typeof updateDataVersion === 'function') {
             updateDataVersion('products');
         }
 
         console.log(`${LOG_PREFIX_SERVER} ✅ ${result.modifiedCount} Bild-URLs repariert.`);
-        
-        res.json({ 
+
+        res.json({
             message: `Erfolg! ${result.modifiedCount} Produkte wurden auf placehold.co umgestellt. Cache wurde erneuert.`,
             modifiedCount: result.modifiedCount
         });
@@ -6168,12 +6349,12 @@ app.post('/api/admin/system/fix-images', isAuthenticated, isAdmin, async (req, r
 
 app.post('/api/admin/system/fix-decimals', isAuthenticated, isAdmin, async (req, res) => {
     console.log(`${LOG_PREFIX_SERVER} 🔧 Starte Dezimal-Reparatur der Kontostände...`);
-    
+
     try {
         // Alle User holen
         const users = await usersCollection.find({}).toArray();
         let modifiedCount = 0;
-        
+
         const bulkOps = [];
 
         for (const user of users) {
@@ -6213,11 +6394,11 @@ app.get('/api/admin/health-check', isAuthenticated, isAdmin, async (req, res) =>
     // 1. Speicherverbrauch des Node.js Prozesses (WICHTIG für Docker/Limits)
     const processMem = process.memoryUsage();
     const heapUsedMB = (processMem.heapUsed / 1024 / 1024).toFixed(2);
-    
+
     // 2. System Uptime berechnen
     const uptimeSeconds = process.uptime();
-    const d = Math.floor(uptimeSeconds / (3600*24));
-    const h = Math.floor(uptimeSeconds % (3600*24) / 3600);
+    const d = Math.floor(uptimeSeconds / (3600 * 24));
+    const h = Math.floor(uptimeSeconds % (3600 * 24) / 3600);
     const m = Math.floor(uptimeSeconds % 3600 / 60);
     const uptimeString = `${d}d ${h}h ${m}m`;
 
@@ -6274,15 +6455,15 @@ async function collectTaxes() {
         for (const user of richUsers) {
             // 1. PRÜFUNG: Hat der User ein Steuerschutz-Zertifikat?
             // Wir schauen direkt in die Inventar-Collection
-            const shield = await inventoriesCollection.findOne({ 
-                userId: user._id, 
-                productId: 'tax_shield', 
-                quantityOwned: { $gt: 0 } 
+            const shield = await inventoriesCollection.findOne({
+                userId: user._id,
+                productId: 'tax_shield',
+                quantityOwned: { $gt: 0 }
             });
 
             if (shield) {
                 console.log(`${LOG_PREFIX_SERVER} 🛡️ User ${user.username} ist geschützt! Verbrauche 1x Steuerschutz.`);
-                
+
                 // Schild verbrauchen (-1 quantity)
                 inventoryOps.push({
                     updateOne: {
@@ -6290,9 +6471,9 @@ async function collectTaxes() {
                         update: { $inc: { quantityOwned: -1 } }
                     }
                 });
-                
+
                 // Wir ziehen KEIN Geld ab -> weiter zum nächsten User
-                continue; 
+                continue;
             }
 
             // 2. STEUER EINZIEHEN (Wenn kein Schild da ist)
@@ -6302,11 +6483,11 @@ async function collectTaxes() {
                 bulkOps.push({
                     updateOne: {
                         filter: { _id: user._id },
-                        update: { 
-                            $inc: { 
-                                balance: -taxAmount, 
-                                totalTaxesPaid: taxAmount 
-                            } 
+                        update: {
+                            $inc: {
+                                balance: -taxAmount,
+                                totalTaxesPaid: taxAmount
+                            }
                         }
                     }
                 });
@@ -6321,7 +6502,7 @@ async function collectTaxes() {
 
         if (bulkOps.length > 0) {
             await usersCollection.bulkWrite(bulkOps);
-            
+
             // News generieren, wenn Steuern geflossen sind
             if (totalTaxCollected > 1000000) {
                 await newsCollection.insertOne({
@@ -6335,7 +6516,7 @@ async function collectTaxes() {
             }
         }
 
-		if (totalTaxCollected > 0) {
+        if (totalTaxCollected > 0) {
             // GELD GEHT AN DEN SERVER, NICHT INS NICHTS!
             await addToStateTreasury(totalTaxCollected);
         }
@@ -6348,7 +6529,9 @@ async function collectTaxes() {
 }
 
 // Starte den Steuer-Intervall (läuft einmal am Tag)
-setInterval(collectTaxes, TAX_INTERVAL_MS);
+if (cluster.isPrimary) {
+    setInterval(collectTaxes, TAX_INTERVAL_MS);
+}
 
 
 // --- API: Steuer-Daten für das Frontend ---
@@ -6357,13 +6540,13 @@ app.get('/api/taxes/my-stats', isAuthenticated, async (req, res) => {
     try {
         // WICHTIG: Wir laden jetzt auch isAdmin und infinityMoney
         const user = await usersCollection.findOne(
-            { _id: userId }, 
+            { _id: userId },
             { projection: { totalTaxesPaid: 1, balance: 1, isAdmin: 1, infinityMoney: 1 } }
         );
-        
+
         // Prüfung korrigiert: Nur steuerpflichtig, wenn KEIN Admin UND KEIN Infinity-User
         const isLiable = (user.balance > TAX_THRESHOLD) && !user.isAdmin && !user.infinityMoney;
-        
+
         const nextTaxEstimation = isLiable ? (user.balance * TAX_RATE) : 0;
 
         res.json({
@@ -6388,7 +6571,7 @@ app.get('/api/casino/stats', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
     try {
         const user = await usersCollection.findOne({ _id: userId }, { projection: { casinoStats: 1 } });
-        
+
         // Hole das Objekt oder ein leeres Objekt
         const dbStats = user.casinoStats || {};
 
@@ -6399,7 +6582,7 @@ app.get('/api/casino/stats', isAuthenticated, async (req, res) => {
             totalWagered: dbStats.totalWagered || 0,
             netProfit: dbStats.netProfit || 0
         };
-        
+
         res.json({ stats: safeStats });
     } catch (err) {
         console.error(`${LOG_PREFIX_SERVER} Fehler bei Casino-Stats:`, err);
@@ -6451,20 +6634,20 @@ app.post('/api/casino/flip', isAuthenticated, async (req, res) => {
             // Beispiel: Einsatz 100 -> Gewinn 150. Netto-Profit +50.
             winAmount = betAmount * 1.5;
             balanceChange = winAmount - betAmount; // Der Netto-Gewinn
-            
-            updateFields.$inc.balance = balanceChange; 
+
+            updateFields.$inc.balance = balanceChange;
             updateFields.$inc["casinoStats.wins"] = 1;
             updateFields.$inc["casinoStats.netProfit"] = balanceChange;
-            
+
             message = `Gewonnen! Es war ${resultSide === 'heads' ? 'Kopf' : 'Zahl'}. Du erhältst $${winAmount.toFixed(2)}.`;
         } else {
             // VERLUST: Einsatz ist weg.
             balanceChange = -betAmount;
-            
+
             updateFields.$inc.balance = balanceChange;
             updateFields.$inc["casinoStats.losses"] = 1;
             updateFields.$inc["casinoStats.netProfit"] = balanceChange; // Wird negativ
-            
+
             message = `Verloren! Es war ${resultSide === 'heads' ? 'Kopf' : 'Zahl'}. Dein Einsatz von $${betAmount.toFixed(2)} ist weg.`;
         }
 
@@ -6510,11 +6693,11 @@ app.get('/api/jobs', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
     try {
         const user = await usersCollection.findOne({ _id: userId }, { projection: { job: 1, jobLevel: 1, lastWorkedAt: 1 } });
-        
+
         // Berechne verbleibenden Cooldown
         let secondsLeft = 0;
         let currentJobDef = null;
-        
+
         if (user.job) {
             currentJobDef = JOB_LIST.find(j => j.id === user.job);
             if (currentJobDef && user.lastWorkedAt) {
@@ -6549,7 +6732,7 @@ app.post('/api/jobs/select', isAuthenticated, async (req, res) => {
 
     try {
         const user = await usersCollection.findOne({ _id: userId });
-        
+
         // Prüfen ob User den Job schon hat
         if (user.job === jobId) return res.status(400).json({ error: "Du hast diesen Job bereits." });
 
@@ -6561,7 +6744,7 @@ app.post('/api/jobs/select', isAuthenticated, async (req, res) => {
         // Job setzen (Level wird auf 1 resettet bei Jobwechsel)
         await usersCollection.updateOne(
             { _id: userId },
-            { 
+            {
                 $set: { job: jobId, jobLevel: 1, lastWorkedAt: 0 },
                 $inc: { balance: -targetJob.cost }
             }
@@ -6583,7 +6766,7 @@ app.post('/api/jobs/work', isAuthenticated, async (req, res) => {
         if (!user.job) return res.status(400).json({ error: "Du hast keinen Job. Wähle erst einen aus." });
 
         const jobDef = JOB_LIST.find(j => j.id === user.job);
-        
+
         // Cooldown Check
         const now = Date.now();
         const lastWork = user.lastWorkedAt ? new Date(user.lastWorkedAt).getTime() : 0;
@@ -6612,7 +6795,7 @@ app.post('/api/jobs/work', isAuthenticated, async (req, res) => {
             $inc: { balance: payout },
             $set: { lastWorkedAt: new Date() }
         };
-        
+
         if (levelUp) updateOps.$inc.jobLevel = 1;
 
         await usersCollection.updateOne({ _id: userId }, updateOps);
@@ -6631,8 +6814,8 @@ app.post('/api/jobs/work', isAuthenticated, async (req, res) => {
 // =========================================================
 const LOG_PREFIX_CRIME = "[Crime API]";
 const ROBBERY_COOLDOWN_MS = 60 * 60 * 1000; // 1 Stunde
-const ROBBERY_MIN_BALANCE = 500; 
-const ROBBERY_PROTECTION_LIMIT = 10000; 
+const ROBBERY_MIN_BALANCE = 500;
+const ROBBERY_PROTECTION_LIMIT = 10000;
 
 // Hilfsfunktion: Berechnet die Erfolgschance (0.0 bis 1.0)
 async function calculateRobberyChance(victimId, victimBalance) {
@@ -6674,7 +6857,7 @@ app.post('/api/crime/rob', isAuthenticated, async (req, res) => {
 
         // Checks
         if (robber.balance < ROBBERY_MIN_BALANCE) return res.status(400).json({ error: "Du brauchst $500 Startkapital für Equipment." });
-        
+
         const now = Date.now();
         const lastRob = robber.lastRobberyAt ? new Date(robber.lastRobberyAt).getTime() : 0;
         if (now - lastRob < ROBBERY_COOLDOWN_MS) {
@@ -6697,23 +6880,23 @@ app.post('/api/crime/rob', isAuthenticated, async (req, res) => {
 
         if (isSuccess) {
             // Erfolg: 2% bis 5% klauen
-            const percent = (Math.random() * 0.03) + 0.02; 
+            const percent = (Math.random() * 0.03) + 0.02;
             stolen = Math.floor(victim.balance * percent);
-            if(stolen > 100000) stolen = 100000; // Cap bei 100k pro Raub
+            if (stolen > 100000) stolen = 100000; // Cap bei 100k pro Raub
 
             // --- UPDATE BEIM OPFER (Geld weg + Achievement Zähler hoch) ---
             await usersCollection.updateOne(
-                { _id: victim._id }, 
-                { 
-                    $inc: { 
-                        balance: -stolen, 
+                { _id: victim._id },
+                {
+                    $inc: {
+                        balance: -stolen,
                         "crimeStats.timesRobbed": 1 // <--- WICHTIG FÜR ACHIEVEMENT "OPFERLAMM"
-                    } 
+                    }
                 }
             );
 
             // Update beim Räuber
-            await usersCollection.updateOne({ _id: robberId }, { 
+            await usersCollection.updateOne({ _id: robberId }, {
                 $inc: { balance: stolen, "crimeStats.successfulRobberies": 1, "crimeStats.totalStolen": stolen },
                 $set: { lastRobberyAt: new Date() }
             });
@@ -6723,16 +6906,16 @@ app.post('/api/crime/rob', isAuthenticated, async (req, res) => {
             // FEHLSCHLAG: Strafe zahlen
             const percentFine = (Math.random() * 0.05) + 0.05; // 5% bis 10%
             fine = Math.floor(robber.balance * percentFine);
-            
+
             // Limits für Strafe
-            if (fine > 2000000) fine = 2000000; 
+            if (fine > 2000000) fine = 2000000;
             if (fine < 500) fine = 500;
 
-            await usersCollection.updateOne({ _id: robberId }, { 
+            await usersCollection.updateOne({ _id: robberId }, {
                 $inc: { balance: -fine, "crimeStats.failedRobberies": 1, "crimeStats.totalFines": fine },
                 $set: { lastRobberyAt: new Date() }
             });
-			await addToStateTreasury(fine);
+            await addToStateTreasury(fine);
             logMessage = `Versuchter Überfall durch ${robberName} (abgewehrt).`;
         }
 
@@ -6749,7 +6932,7 @@ app.post('/api/crime/rob', isAuthenticated, async (req, res) => {
 
         // Antwort an Räuber
         const updatedRobber = await usersCollection.findOne({ _id: robberId }, { projection: { balance: 1 } });
-        
+
         res.json({
             success: isSuccess,
             amount: isSuccess ? stolen : -fine,
@@ -6769,7 +6952,7 @@ app.get('/api/crime/security', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
     try {
         const user = await usersCollection.findOne({ _id: userId });
-        
+
         // 1. Meine theoretische Chance, ausgeraubt zu werden
         let myRisk = 0;
         if (user.balance >= ROBBERY_PROTECTION_LIMIT && !user.isAdmin) {
@@ -6813,11 +6996,11 @@ app.post('/api/admin/system/revoke-infinity', isAuthenticated, isAdmin, async (r
     try {
         const result = await usersCollection.updateMany(
             { isAdmin: { $ne: true } }, // Filter: Alle, die KEIN Admin sind
-            { 
-                $set: { 
-                    infinityMoney: false, 
-                    unlockedInfinityMoney: false 
-                } 
+            {
+                $set: {
+                    infinityMoney: false,
+                    unlockedInfinityMoney: false
+                }
             }
         );
         res.json({ message: `Infinity Money bei ${result.modifiedCount} normalen Usern entfernt.` });
@@ -6831,29 +7014,29 @@ app.post('/api/admin/system/revoke-infinity', isAuthenticated, isAdmin, async (r
 app.post('/api/admin/system/reset-rich-users', isAuthenticated, isAdmin, async (req, res) => {
     const LIMIT = 100000000; // Wer mehr als 100m hat...
     const RESET_TO = 5000000; // ...wird auf 5m gesetzt.
-    
+
     console.log(`${LOG_PREFIX_SERVER} 📉 Admin ${req.session.username} setzt reiche User zurück...`);
-    
+
     try {
         const result = await usersCollection.updateMany(
-            { 
-                balance: { $gt: LIMIT }, 
+            {
+                balance: { $gt: LIMIT },
                 isAdmin: { $ne: true } // Admins verschonen
             },
             { $set: { balance: RESET_TO } }
         );
-        
+
         // Auch Tokens resetten bei extremen Werten (> 1000)
         const tokenResult = await usersCollection.updateMany(
-            { 
-                tokens: { $gt: 100000 }, 
-                isAdmin: { $ne: true } 
+            {
+                tokens: { $gt: 100000 },
+                isAdmin: { $ne: true }
             },
             { $set: { tokens: 1000 } }
         );
 
-        res.json({ 
-            message: `Wirtschaft bereinigt: ${result.modifiedCount} User-Guthaben und ${tokenResult.modifiedCount} Token-Konten zurückgesetzt.` 
+        res.json({
+            message: `Wirtschaft bereinigt: ${result.modifiedCount} User-Guthaben und ${tokenResult.modifiedCount} Token-Konten zurückgesetzt.`
         });
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Reset." });
@@ -6867,14 +7050,14 @@ app.post('/api/admin/system/reset-rich-users', isAuthenticated, isAdmin, async (
 // Diese Funktion wandelt String-IDs in echte ObjectIds um, falls nötig
 function parseQuery(obj) {
     if (typeof obj !== 'object' || obj === null) return obj;
-    
+
     // Wenn es ein Array ist, rekursiv durchlaufen
     if (Array.isArray(obj)) return obj.map(parseQuery);
 
     const newObj = {};
     for (const key in obj) {
         let value = obj[key];
-        
+
         // Rekursion für verschachtelte Objekte (z.B. $or, $set)
         if (typeof value === 'object') {
             value = parseQuery(value);
@@ -6885,9 +7068,9 @@ function parseQuery(obj) {
             try {
                 newObj[key] = new ObjectId(value);
                 continue; // Nächster Key
-            } catch (e) {}
+            } catch (e) { }
         }
-        
+
         newObj[key] = value;
     }
     return newObj;
@@ -6896,7 +7079,7 @@ function parseQuery(obj) {
 app.post('/api/admin/engine', isAuthenticated, isAdmin, async (req, res) => {
     const { mode, collection, operation, filter, payload } = req.body;
     // mode: 'db' (Raw DB) oder 'shortcut' (Schnellbefehle)
-    
+
     console.log(`${LOG_PREFIX_SERVER} ⚙️ Engine Command von ${req.session.username}: [${mode}] ${collection}.${operation}`);
 
     try {
@@ -6905,9 +7088,9 @@ app.post('/api/admin/engine', isAuthenticated, isAdmin, async (req, res) => {
         // MODUS 1: RAW DATABASE ACCESS
         if (mode === 'db') {
             if (!collection || !operation) return res.status(400).json({ error: "Collection/Operation fehlt." });
-            
+
             const targetCol = db.collection(collection);
-            
+
             // Query Parsing (IDs umwandeln)
             const cleanFilter = parseQuery(filter || {});
             const cleanPayload = parseQuery(payload || {});
@@ -6942,8 +7125,8 @@ app.post('/api/admin/engine', isAuthenticated, isAdmin, async (req, res) => {
                 default:
                     return res.status(400).json({ error: "Operation nicht unterstützt." });
             }
-        } 
-        
+        }
+
         // MODUS 2: SHORTCUTS (Deine gewünschte "prd/add" Logik)
         else if (mode === 'shortcut') {
             // Beispiel: collection='product', operation='add'
@@ -6955,7 +7138,7 @@ app.post('/api/admin/engine', isAuthenticated, isAdmin, async (req, res) => {
                     const prod = { ...payload, id: newId };
                     await productsCollection.insertOne(prod);
                     result = { message: "Produkt erstellt", product: prod };
-                } 
+                }
                 else if (operation === 'remove') {
                     // Filter ist hier z.B. { id: 123456 }
                     const delRes = await productsCollection.deleteOne(parseQuery(filter));
@@ -6987,10 +7170,10 @@ app.get('/api/games/status', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
     try {
         const user = await usersCollection.findOne({ _id: userId }, { projection: { tokens: 1, gamePlays: 1 } });
-        res.json({ 
+        res.json({
             tokens: user.tokens || 0,
             // Wir geben das ganze Objekt zurück, damit das Frontend flappy UND snake sieht
-            gamePlays: user.gamePlays || {} 
+            gamePlays: user.gamePlays || {}
         });
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Laden des Spielstatus." });
@@ -6999,12 +7182,12 @@ app.get('/api/games/status', isAuthenticated, async (req, res) => {
 
 // 2. Spiel starten (Automatische Abbuchung)
 app.post('/api/games/start', isAuthenticated, async (req, res) => {
-    const { gameId } = req.body; 
+    const { gameId } = req.body;
     const userId = new ObjectId(req.session.userId);
-    
+
     // Konfiguration
-    const COST_PER_BUNDLE = 1; 
-    const PLAYS_PER_BUNDLE = 3; 
+    const COST_PER_BUNDLE = 1;
+    const PLAYS_PER_BUNDLE = 3;
 
     // FIX: Wir prüfen gegen die Liste, statt stur auf 'flappy'
     if (!ALLOWED_GAMES.includes(gameId)) {
@@ -7035,22 +7218,22 @@ app.post('/api/games/start', isAuthenticated, async (req, res) => {
 
             await usersCollection.updateOne(
                 { _id: userId },
-                { 
-                    $inc: { 
+                {
+                    $inc: {
                         tokens: -COST_PER_BUNDLE,
-                        [`gamePlays.${gameId}`]: (PLAYS_PER_BUNDLE - 1) 
-                    } 
+                        [`gamePlays.${gameId}`]: (PLAYS_PER_BUNDLE - 1)
+                    }
                 },
                 { session }
             );
 
             await logTokenTransaction(userId, "game_start_auto_buy", -COST_PER_BUNDLE, user.tokens, user.tokens - COST_PER_BUNDLE, `Auto-buy for ${gameId}`);
-            
+
             return { started: true, deductedToken: true, remaining: (PLAYS_PER_BUNDLE - 1) };
         });
 
-        res.json({ 
-            success: true, 
+        res.json({
+            success: true,
             message: result.deductedToken ? "1 Token für 3 Runden eingesetzt!" : "Freispiel genutzt.",
             remainingPlays: result.remaining
         });
@@ -7072,9 +7255,9 @@ app.post('/api/games/submit-score', isAuthenticated, async (req, res) => {
     // FIX: Auch hier erlauben wir snake
     if (!ALLOWED_GAMES.includes(gameId)) return res.status(400).json({ error: "Spiel ungültig." });
     if (typeof score !== 'number') return res.status(400).json({ error: "Score fehlt." });
-    
+
     // Anti-Cheat (Snake Scores können höher sein als Flappy, daher Limit erhöht)
-    if (score > 1000000) return res.status(400).json({ error: "Score ungültig." }); 
+    if (score > 1000000) return res.status(400).json({ error: "Score ungültig." });
 
     try {
         await highscoresCollection.insertOne({
@@ -7093,7 +7276,7 @@ app.post('/api/games/submit-score', isAuthenticated, async (req, res) => {
 // 4. Leaderboard V2 (Bester Score + Suche + Seiten)
 app.get('/api/games/leaderboard/:gameId', async (req, res) => {
     const { gameId } = req.params;
-    
+
     // FIX: Auch hier erlauben wir snake
     if (!ALLOWED_GAMES.includes(gameId)) return res.status(400).json({ error: "Spiel ungültig." });
 
@@ -7106,18 +7289,22 @@ app.get('/api/games/leaderboard/:gameId', async (req, res) => {
         const pipeline = [
             { $match: { game: gameId } },
             { $sort: { score: -1 } },
-            { $group: {
-                _id: "$userId",
-                username: { $first: "$username" },
-                score: { $max: "$score" },
-                timestamp: { $first: "$timestamp" }
-            }},
+            {
+                $group: {
+                    _id: "$userId",
+                    username: { $first: "$username" },
+                    score: { $max: "$score" },
+                    timestamp: { $first: "$timestamp" }
+                }
+            },
             ...(search ? [{ $match: { username: { $regex: search, $options: 'i' } } }] : []),
             { $sort: { score: -1 } },
-            { $facet: {
-                metadata: [{ $count: "total" }],
-                data: [{ $skip: skip }, { $limit: limit }, { $project: { _id: 0 } }]
-            }}
+            {
+                $facet: {
+                    metadata: [{ $count: "total" }],
+                    data: [{ $skip: skip }, { $limit: limit }, { $project: { _id: 0 } }]
+                }
+            }
         ];
 
         const result = await highscoresCollection.aggregate(pipeline).toArray();
@@ -7168,325 +7355,325 @@ app.get('/api/tinda/stack', isAuthenticated, async (req, res) => {
             'influencer': 'Influencer 📱'
         };
 
-		const bioTemplates = {
-    'lehrer': [
-        "Ich korrigiere auch deine WhatsApp-Nachrichten.",
-        "Ruhe bitte! Oder swipe rechts.",
-        "Ich gebe keine Noten, ich verteile Chancen.",
-        "Mathe ist mein Leben, du könntest es auch sein.",
-        "Der Gong beendet den Unterricht, nicht unser Date.",
-        "Ich habe einen Rotstift und ich weiß, wie man ihn benutzt.",
-        "Lust auf eine Einzelstunde?",
-        "Bei mir gibt es keine Hausaufgaben, nur Hausbesuche.",
-        "Ich erkläre dir die Welt, wenn du zuhörst.",
-        "Pädagogisch wertvoll, privat eher ungezogen.",
-        "Klassenfahrten sind mein einziges Hobby.",
-        "Ich kann sehr streng sein... wenn du willst.",
-        "Setzen, sechs! Oder setzen, Sekt?",
-        "Lehrer aus Leidenschaft, Single aus Zeitmangel.",
-        "Grammatik ist sexy. Punkt.",
-        "Ich bringe dir Dinge bei, die nicht im Lehrplan stehen.",
-        "Physik ist überall, spürst du die Anziehung?",
-        "Große Pause? Ich hoffe, wir haben keine.",
-        "Meine Tafel ist sauber, meine Gedanken nicht immer.",
-        "Biologie war schon immer mein Lieblingsfach.",
-        "Bitte melde dich, bevor du mich anschreibst.",
-        "Wenn wir matchen, streiche ich dir den Tadel.",
-        "Ich korrigiere nicht nur deine Fehler, sondern auch deine Dates.",
-        "Kommst du nach der Stunde noch kurz zu mir ans Pult?",
-        "Wir können Chemie haben, ohne dass der Raum explodiert.",
-        "Sportlehrer: Ich bringe dich auch ohne Zirkeltraining ins Schwitzen.",
-        "Ich erwarte volle Aufmerksamkeit bei unserem Date.",
-        "In meinem Zeugnis für dich steht: Sehr bemüht.",
-        "Lass uns den Lehrplan ignorieren.",
-        "Kunstlehrer: Lass uns zusammen ein Meisterwerk erschaffen.",
-        "Musikunterricht bei mir: Wir finden den perfekten Rhythmus.",
-        "Mein Lieblingsfach ist unsere gemeinsame Zukunft.",
-        "Keine Angst, ich verteile keine Strafarbeiten... meistens.",
-        "Wer abschreibt, muss mich zum Essen einladen.",
-        "Ich bin streng, aber fair. Vor allem beim Flirten.",
-        "Nachsitzen war noch nie so verlockend.",
-        "Lass uns Vokabeln üben. Ich kenne viele schöne Worte.",
-        "Pausenaufsicht ist langweilig ohne dich.",
-        "Mein Stundenplan hat noch Platz für dich.",
-        "Ich habe eine Schwäche für kluge Köpfe.",
-        "Formelsammlung vergessen? Ich helfe dir beim Rechnen.",
-        "Wenn du frech wirst, setze ich dich in die erste Reihe.",
-        "Ich liebe Klassenfahrten – besonders, wenn wir zusammen fahren.",
-        "Keine Diskussionen im Klassenzimmer, nur im Chat!",
-        "Hitzefrei gibt es bei mir nur, wenn wir zusammen am See sind.",
-        "Ich gebe dir Nachhilfe in Sachen Romantik.",
-        "Der Stoff sitzt, aber bei dir verliere ich den Faden.",
-        "Elternsprechtag ist abgesagt, wir haben ein Date.",
-        "Du bist das Highlight in meinem Korrekturstapel.",
-        "Zuspätkommen wird bestraft, schnelles Antworten belohnt."
-    ],
-    'politiker': [
-        "Ich verspreche dir das Blaue vom Himmel.",
-        "Wähl mich, ich bin die beste Option.",
-        "Die Rente ist sicher, unser Date auch?",
-        "Keine leeren Versprechungen, nur leere Gläser.",
-        "Ich suche eine Koalition fürs Leben.",
-        "Mehr Netto vom Brutto, mehr Liebe für dich.",
-        "Ich habe den besten Plan für unsere Zukunft.",
-        "Lass uns über Diäten reden – ich breche meine ständig.",
-        "Ich bin sehr gut im Verhandeln. Probier's aus.",
-        "Meine Umfragewerte steigen, wenn ich dich sehe.",
-        "Kein Kommentar zu meiner Vergangenheit.",
-        "Ich stehe für Transparenz (außer im Schlafzimmer).",
-        "Lobbyismus für die Liebe.",
-        "Ich rede viel, aber ich küsse besser.",
-        "Stimmenthaltung ist keine Option.",
-        "Ich repräsentiere das Volk, aber ich will nur dich.",
-        "Krise? Welche Krise? Wir sind stabil.",
-        "Ich trete nicht zurück, ich trete näher.",
-        "Diplomatenpass vorhanden, Herz noch zu vergeben.",
-        "Glaub mir, ich bin Politiker.",
-        "Ein Date mit mir ist wie ein Koalitionsvertrag: kompliziert, aber lohnenswert.",
-        "Ich breche keine Versprechen, ich formuliere sie nur flexibel.",
-        "Lass uns einen Untersuchungsausschuss für unsere Liebe gründen.",
-        "Mein Wahlkampf-Slogan: Ich bin Single und bereit für Kompromisse.",
-        "Im Plenum bin ich laut, privat eher anschmiegsam.",
-        "Ich senke vielleicht nicht die Steuern, aber meine Schutzmauer für dich.",
-        "Wir brauchen eine Reform unseres Beziehungsstatus.",
-        "Ich debattiere gerne – am liebsten bei einem Glas Wein.",
-        "Steuergelder verschwenden ist out. Zeit mit dir verschwenden ist in.",
-        "Mein Terminkalender ist voll, aber für dich lege ich ein Veto ein.",
-        "Ich bin für jede Mehrheit offen.",
-        "Links, Mitte, Rechts? Hauptsache, du swipest in meine Richtung.",
-        "Ich habe ein absolutes Mandat für dein Herz.",
-        "Vertrauensfrage? Du hast meines schon gewonnen.",
-        "Ich rede mich oft um Kopf und Kragen. Findest du das süß?",
-        "Spitzenkandidat sucht First Lady / First Gentleman.",
-        "Lass uns gemeinsam die 5-Prozent-Hürde der Liebe knacken.",
-        "Bei mir gibt es keine Opposition, nur Konsens.",
-        "Ich verspreche flächendeckendes WLAN und gute Dates.",
-        "Mein Redenschreiber hat Urlaub, also muss ich selbst flirten.",
-        "Klimawandel? Die wahre Erderwärmung passiert, wenn ich dich sehe.",
-        "Ich habe einen Plan B, falls das hier nicht klappt. (Scherz!)",
-        "Wir können über alles abstimmen, außer über unser Treffen.",
-        "Wahlgeheimnis: Ich finde dich echt gut.",
-        "Ich bin politisch korrekt, aber privat für jeden Spaß zu haben.",
-        "Meine Beliebtheitswerte sind mir egal, solange du mich magst.",
-        "Ich baue Brücken, keine Mauern. Komm rüber!",
-        "Dienstwagen steht bereit. Wo soll's hingehen?",
-        "Gipfeltreffen heute Abend bei mir?",
-        "Ich setze neue Maßstäbe in der Außenpolitik – und bei Dates."
-    ],
-    'promis': [
-        "Keine Fotos bitte, nur Autogramme.",
-        "Ja, ich bin's wirklich.",
-        "Mein Leben ist ein Film, spielst du mit?",
-        "Follow me to the moon.",
-        "Mein Manager hat gesagt, ich soll mich unters Volk mischen.",
-        "Verifizierter Account, verifiziertes Herz.",
-        "Champagner ist mein Wasser.",
-        "Ich suche jemanden, der mich nicht googelt.",
-        "Privatjet oder Yacht? Entscheide du.",
-        "Paparazzi nerven, du hoffentlich nicht.",
-        "Ich bin nicht arrogant, ich bin nur berühmt.",
-        "Mein Gesicht hängt am Times Square, bald an deiner Wand?",
-        "VIP-Zugang zu meinem Herzen: Swipe rechts.",
-        "Ich gewinne jeden Award, außer den für die Liebe.",
-        "Mein Hund hat mehr Follower als du.",
-        "Business im Kopf, Party im Blut.",
-        "Ich brauche keine Vorstellung, du kennst mich.",
-        "Exklusiv und limitiert.",
-        "Red Carpet Ready.",
-        "Lass uns Schlagzeilen machen.",
-        "Lass uns den Klatschblättern einen echten Grund geben.",
-        "Mein Wikipedia-Artikel braucht ein Update beim Beziehungsstatus.",
-        "Ich bin nicht auf der Gästeliste, ich bin die Party.",
-        "Komm, wir fliegen kurz nach Paris auf einen Espresso.",
-        "In echt sehe ich sogar noch besser aus als im TV.",
-        "Vergiss den roten Teppich, lass uns auf die Couch.",
-        "Mein Leben ist komplett durchgeplant, sei meine Spontanität.",
-        "Ich schreibe dir Autogramme auf alles, was du willst.",
-        "Ich bin müde von Fake-Friends. Zeig mir was Echtes.",
-        "Meine DM's explodieren, aber ich warte nur auf deine.",
-        "Lass uns das ultimative Power-Couple werden.",
-        "Gage gespendet, Herz verschenkt.",
-        "Der Bodyguard bleibt draußen bei unserem Date.",
-        "Ich brauche jemanden, der mich auf dem Boden hält.",
-        "Oscar-prämiert im Küssen.",
-        "Ich drehe gerade einen neuen Film. Spielst du die Hauptrolle?",
-        "Das Blitzlichtgewitter blendet, aber du strahlst heller.",
-        "Komm in meine private VIP-Lounge.",
-        "Kein Make-up, keine Kamera, nur wir zwei.",
-        "Mein Name steht in Neonröhren, aber deiner in meinem Kopf.",
-        "Goldene Schallplatten wärmen mich nachts nicht.",
-        "Skandale sind out, Romantik ist mein neues Image.",
-        "Auf Welttournee vermisse ich immer nur eins: Dich.",
-        "Backstage-Pässe gibt's bei mir umsonst.",
-        "Ich trage Sonnenbrillen nachts, weil meine Zukunft so hell ist.",
-        "Lass uns inkognito einen Burger essen gehen.",
-        "Mein Stylist hat heute frei, ich komme im Jogginganzug.",
-        "Der Ruhm ist vergänglich, gute Dates nicht.",
-        "Mach ein Selfie mit mir, bevor ich noch berühmter werde.",
-        "Liebe auf den ersten Klick."
-    ],
-    'schler': [
-        "Hausaufgaben vergessen, aber dich nicht.",
-        "In der letzten Reihe sitzt es sich am besten.",
-        "Schule nervt, Dates nicht.",
-        "Suche jemanden, der mir Mathe erklärt.",
-        "Mein Rucksack ist schwerer als mein Leben.",
-        "5 Minuten vor der Prüfung lernen reicht.",
-        "Ich schwänze nicht, ich mache Homeoffice.",
-        "Pausenbrot teilen?",
-        "Eigentlich müsste ich lernen.",
-        "Ferien sind mein einziger Lichtblick.",
-        "Lehrerhasser, Liebesliebhaber.",
-        "Hast du die Lösungen für Bio?",
-        "Ich bin nur hier, weil der Unterricht langweilig ist.",
-        "Spicker-Profi sucht Komplizen.",
-        "Mein Schlafrhythmus ist kaputt, genau wie mein Füller.",
-        "Bus verpasst, Herz verloren.",
-        "Ich weiß nicht, was ich werden will, aber vllt. dein Freund?",
-        "Abi 20xx (hoffentlich).",
-        "Energie-Drink-Sucht inklusive.",
-        "Klassenclown sucht Publikum.",
-        "Ich habe ChatGPT mein Profil schreiben lassen.",
-        "Entschuldigung für die Verspätung, der Bus kam nicht. Und ich hab verschlafen.",
-        "Suche jemanden, der mir den Döner in der Pause zahlt.",
-        "Mein Akku hat nur noch 2%, antworte schnell!",
-        "Ich bin in der Findungsphase. Finde mich!",
-        "Wenn du mir bei der Facharbeit hilfst, gebe ich dir einen Bubble Tea aus.",
-        "Sport schwänzen und heimlich ans Meer fahren?",
-        "Ich lerne gerade fürs Leben, nicht für die Schule.",
-        "Mathe LK war ein Fehler, unser Match wäre das nicht.",
-        "Taschengeld reicht für eine halbe Pizza. Teilen wir?",
-        "Ich warte eigentlich nur auf das Klingeln zur großen Pause.",
-        "Mein Lehrer denkt, ich mache Notizen. Eigentlich schreibe ich dir.",
-        "Zeugnis war schlecht, aber meine Flirt-Skills sind eine 1+.",
-        "Hast du Lust, nach der 6. Stunde abzuhängen?",
-        "Freistunde! Was machen wir jetzt?",
-        "Ich bin der Grund, warum der Klassenlehrer seufzt.",
-        "Klassenbester im Über-Dates-Nachdenken.",
-        "Das Schul-WLAN blockiert Tinder, aber ich nutze Mobile Daten.",
-        "Ich teile sogar mein letztes Ladekabel mit dir.",
-        "Lieber mit dir chillen als Vokabeln lernen.",
-        "Klassensprecher? Nein, aber ich habe trotzdem das Sagen.",
-        "In Kunst habe ich dich im Kopf gezeichnet.",
-        "Morgen 1. Stunde fällt aus, wir können länger wach bleiben.",
-        "Hitzefrei! Lass uns sofort Eis essen gehen.",
-        "Ich schreibe morgen eine Klausur, lenk mich bitte ab!",
-        "Ich habe den ultimativen Flirt-Spickzettel in der Hand.",
-        "Nachsitzen ist eigentlich ganz cool, wenn du dabei bist.",
-        "Gefangen im Schulsystem, befreie mich.",
-        "Wir wären das süßeste Paar auf dem Schulhof.",
-        "Schulbücher sind teuer, Liebe ist kostenlos."
-    ],
-    'influencer': [
-        "Link in Bio!",
-        "Swipe up für mehr.",
-        "Kooperation? Schreib DM.",
-        "Mein Leben ist ein Filter.",
-        "Suche jemanden für Couple-Content.",
-        "Hast du mich schon abonniert?",
-        "Foodie, Traveler, Dreamer.",
-        "Unboxing my heart.",
-        "Keine Zeit, muss posten.",
-        "Hashtag Love.",
-        "Goldene Stunde ist meine Zeit.",
-        "Ich mache alles für den Algorithmus.",
-        "Sponsoren gesucht (für Drinks).",
-        "Mein Feed ist perfekt, ich bin es auch.",
-        "Vlogge unser erstes Date.",
-        "Like for Like?",
-        "Social Media Break? Niemals.",
-        "Ich bin online, also bin ich.",
-        "Influencer aus Leidenschaft.",
-        "Content Creator & Heart Breaker.",
-        "Swipe right und benutze meinen Rabattcode bei unserem Date.",
-        "Wir würden farblich so gut in meinen Feed passen.",
-        "Ich tagge dich auch, versprochen.",
-        "Lass uns zusammen auf TikTok viral gehen.",
-        "Get ready with me für unser erstes Date.",
-        "Mein Ringlicht macht uns beide wunderschön.",
-        "Storytime: Wie wir uns auf Tinda kennengelernt haben.",
-        "Ich suche meinen perfekten Instagram-Husband/Wife.",
-        "Unser Couple-Hashtag wäre absolut legendär.",
-        "Komm, wir machen einen Trend-Tanz zusammen.",
-        "Das Date wird natürlich gevloggt. Hoffe, du bist kameratauglich.",
-        "Ich habe 100k Follower, aber ich folge nur dir.",
-        "Sponsored by my broken heart.",
-        "Aesthetic check: Passen unsere Vibes zusammen?",
-        "POV: Du matchst mit deinem Lieblings-Creator.",
-        "Mein Leben sieht online perfekt aus, aber mir fehlst du.",
-        "Ich mache keine bezahlte Werbung für schlechte Dates.",
-        "Kaffee-Date? Ich brauche dringend Material für meine Story.",
-        "Wenn wir matchen, schalte ich mein Handy für eine Stunde in den Flugmodus.",
-        "Unboxing-Video: Meine Gefühle für dich.",
-        "Ich suche jemanden, der unauffällig gute Fotos von mir machen kann.",
-        "Der Algorithmus hat uns nicht umsonst zusammengeführt.",
-        "Community-Update: Ich bin vergeben (an dich?).",
-        "Lass uns auf ein Event gehen und das kostenlose Buffet plündern.",
-        "Hater würden sagen, es ist Fake, aber meine Liebe ist real.",
-        "Tippe doppelt auf mein Herz.",
-        "Meine Engagement-Rate ist extrem hoch, aber ich suche echtes Engagement.",
-        "Komm in meinen exklusiven Broadcast-Channel.",
-        "Filter aus, Realität an. Zeig dich wie du bist!",
-        "Das hier ist nicht gesponsert, ich meine es ernst."
-    ],
-    'default': [
-        "Neu hier, zeig mir deine Welt.",
-        "Suche jemanden zum Pferde stehlen.",
-        "Kaffee oder Tee?",
-        "Lass uns Geschichte schreiben.",
-        "Ich koche besser, als ich aussehe.",
-        "Humor ist mir wichtiger als Muskeln.",
-        "Suche den Grund, die App zu löschen.",
-        "Hobby: Atmen und Essen.",
-        "1,85m, falls das wichtig ist.",
-        "Katzenmensch.",
-        "Hundemensch.",
-        "Ich mag lange Spaziergänge zum Kühlschrank.",
-        "Netflix & Chill?",
-        "Einfach mal gucken, was passiert.",
-        "Nicht hier für Spiele.",
-        "Abenteuerlustig.",
-        "Sonntage sind für Pancakes.",
-        "Musik an, Welt aus.",
-        "Träumer & Macher.",
-        "Wer das liest, muss swipen.",
-        "Ich antworte meistens in 3-5 Werktagen.",
-        "Wenn wir matchen, musst du den ersten Schritt machen.",
-        "Suche jemanden für dumme Ideen am Wochenende.",
-        "Profi im Überdenken und Pizza-Bestellen.",
-        "Pizza-Rand-Esser bevorzugt.",
-        "Wenn du Tiere nicht magst, swipe direkt links.",
-        "Ich lache über Witze, die eigentlich gar nicht lustig sind.",
-        "Suche die Motivation, um morgens aufzustehen.",
-        "Wir können auch einfach nur schweigen und aufs Handy starren.",
-        "Ich bin der beste Beifahrer für Roadtrips.",
-        "Ich brauche jemanden, der mir Spinnen wegmacht.",
-        "Ich habe keine Ahnung, was ich hier tue.",
-        "Erzähl mir deinen peinlichsten Lieblingssong.",
-        "Kaffee am Morgen, Wein am Abend. Routine.",
-        "Ich bin hier, weil meine Freunde genervt von meinem Single-Dasein sind.",
-        "Lass uns zusammen das Menü im Restaurant stundenlang anstarren.",
-        "Wenn du Sarkasmus nicht fließend sprichst, wird es schwierig.",
-        "Mein größtes Talent? Ich kann Nudelwasser anbrennen lassen.",
-        "Suche jemanden, der meine Zimmerpflanzen gießt, wenn ich weg bin.",
-        "Eigentlich bin ich nur wegen der lustigen Profile hier.",
-        "Ich mag Leute, die pünktlich sind (ich bin es nämlich nie).",
-        "Bitte keine Bilder, auf denen du einen toten Fisch in der Hand hältst.",
-        "Spieleabend oder Club? Bin für beides zu faul, lass uns bestellen.",
-        "Mein Lieblingstier ist ganz klar der innere Schweinehund.",
-        "Ich swipe nur nach rechts, wenn du Snacks dabei hast.",
-        "Bist du heute Abend auch so chronisch unmotiviert wie ich?",
-        "Ich suche meinen Player 2 fürs Leben.",
-        "Mein absolutes Lieblings-Hobby: Pläne machen und dann doch absagen.",
-        "Wenn wir matchen, schuldest du mir theoretisch schon einen Drink.",
-        "Betrachte dies als mein offizielles Bewerbungsschreiben."
-    ]
-};
+        const bioTemplates = {
+            'lehrer': [
+                "Ich korrigiere auch deine WhatsApp-Nachrichten.",
+                "Ruhe bitte! Oder swipe rechts.",
+                "Ich gebe keine Noten, ich verteile Chancen.",
+                "Mathe ist mein Leben, du könntest es auch sein.",
+                "Der Gong beendet den Unterricht, nicht unser Date.",
+                "Ich habe einen Rotstift und ich weiß, wie man ihn benutzt.",
+                "Lust auf eine Einzelstunde?",
+                "Bei mir gibt es keine Hausaufgaben, nur Hausbesuche.",
+                "Ich erkläre dir die Welt, wenn du zuhörst.",
+                "Pädagogisch wertvoll, privat eher ungezogen.",
+                "Klassenfahrten sind mein einziges Hobby.",
+                "Ich kann sehr streng sein... wenn du willst.",
+                "Setzen, sechs! Oder setzen, Sekt?",
+                "Lehrer aus Leidenschaft, Single aus Zeitmangel.",
+                "Grammatik ist sexy. Punkt.",
+                "Ich bringe dir Dinge bei, die nicht im Lehrplan stehen.",
+                "Physik ist überall, spürst du die Anziehung?",
+                "Große Pause? Ich hoffe, wir haben keine.",
+                "Meine Tafel ist sauber, meine Gedanken nicht immer.",
+                "Biologie war schon immer mein Lieblingsfach.",
+                "Bitte melde dich, bevor du mich anschreibst.",
+                "Wenn wir matchen, streiche ich dir den Tadel.",
+                "Ich korrigiere nicht nur deine Fehler, sondern auch deine Dates.",
+                "Kommst du nach der Stunde noch kurz zu mir ans Pult?",
+                "Wir können Chemie haben, ohne dass der Raum explodiert.",
+                "Sportlehrer: Ich bringe dich auch ohne Zirkeltraining ins Schwitzen.",
+                "Ich erwarte volle Aufmerksamkeit bei unserem Date.",
+                "In meinem Zeugnis für dich steht: Sehr bemüht.",
+                "Lass uns den Lehrplan ignorieren.",
+                "Kunstlehrer: Lass uns zusammen ein Meisterwerk erschaffen.",
+                "Musikunterricht bei mir: Wir finden den perfekten Rhythmus.",
+                "Mein Lieblingsfach ist unsere gemeinsame Zukunft.",
+                "Keine Angst, ich verteile keine Strafarbeiten... meistens.",
+                "Wer abschreibt, muss mich zum Essen einladen.",
+                "Ich bin streng, aber fair. Vor allem beim Flirten.",
+                "Nachsitzen war noch nie so verlockend.",
+                "Lass uns Vokabeln üben. Ich kenne viele schöne Worte.",
+                "Pausenaufsicht ist langweilig ohne dich.",
+                "Mein Stundenplan hat noch Platz für dich.",
+                "Ich habe eine Schwäche für kluge Köpfe.",
+                "Formelsammlung vergessen? Ich helfe dir beim Rechnen.",
+                "Wenn du frech wirst, setze ich dich in die erste Reihe.",
+                "Ich liebe Klassenfahrten – besonders, wenn wir zusammen fahren.",
+                "Keine Diskussionen im Klassenzimmer, nur im Chat!",
+                "Hitzefrei gibt es bei mir nur, wenn wir zusammen am See sind.",
+                "Ich gebe dir Nachhilfe in Sachen Romantik.",
+                "Der Stoff sitzt, aber bei dir verliere ich den Faden.",
+                "Elternsprechtag ist abgesagt, wir haben ein Date.",
+                "Du bist das Highlight in meinem Korrekturstapel.",
+                "Zuspätkommen wird bestraft, schnelles Antworten belohnt."
+            ],
+            'politiker': [
+                "Ich verspreche dir das Blaue vom Himmel.",
+                "Wähl mich, ich bin die beste Option.",
+                "Die Rente ist sicher, unser Date auch?",
+                "Keine leeren Versprechungen, nur leere Gläser.",
+                "Ich suche eine Koalition fürs Leben.",
+                "Mehr Netto vom Brutto, mehr Liebe für dich.",
+                "Ich habe den besten Plan für unsere Zukunft.",
+                "Lass uns über Diäten reden – ich breche meine ständig.",
+                "Ich bin sehr gut im Verhandeln. Probier's aus.",
+                "Meine Umfragewerte steigen, wenn ich dich sehe.",
+                "Kein Kommentar zu meiner Vergangenheit.",
+                "Ich stehe für Transparenz (außer im Schlafzimmer).",
+                "Lobbyismus für die Liebe.",
+                "Ich rede viel, aber ich küsse besser.",
+                "Stimmenthaltung ist keine Option.",
+                "Ich repräsentiere das Volk, aber ich will nur dich.",
+                "Krise? Welche Krise? Wir sind stabil.",
+                "Ich trete nicht zurück, ich trete näher.",
+                "Diplomatenpass vorhanden, Herz noch zu vergeben.",
+                "Glaub mir, ich bin Politiker.",
+                "Ein Date mit mir ist wie ein Koalitionsvertrag: kompliziert, aber lohnenswert.",
+                "Ich breche keine Versprechen, ich formuliere sie nur flexibel.",
+                "Lass uns einen Untersuchungsausschuss für unsere Liebe gründen.",
+                "Mein Wahlkampf-Slogan: Ich bin Single und bereit für Kompromisse.",
+                "Im Plenum bin ich laut, privat eher anschmiegsam.",
+                "Ich senke vielleicht nicht die Steuern, aber meine Schutzmauer für dich.",
+                "Wir brauchen eine Reform unseres Beziehungsstatus.",
+                "Ich debattiere gerne – am liebsten bei einem Glas Wein.",
+                "Steuergelder verschwenden ist out. Zeit mit dir verschwenden ist in.",
+                "Mein Terminkalender ist voll, aber für dich lege ich ein Veto ein.",
+                "Ich bin für jede Mehrheit offen.",
+                "Links, Mitte, Rechts? Hauptsache, du swipest in meine Richtung.",
+                "Ich habe ein absolutes Mandat für dein Herz.",
+                "Vertrauensfrage? Du hast meines schon gewonnen.",
+                "Ich rede mich oft um Kopf und Kragen. Findest du das süß?",
+                "Spitzenkandidat sucht First Lady / First Gentleman.",
+                "Lass uns gemeinsam die 5-Prozent-Hürde der Liebe knacken.",
+                "Bei mir gibt es keine Opposition, nur Konsens.",
+                "Ich verspreche flächendeckendes WLAN und gute Dates.",
+                "Mein Redenschreiber hat Urlaub, also muss ich selbst flirten.",
+                "Klimawandel? Die wahre Erderwärmung passiert, wenn ich dich sehe.",
+                "Ich habe einen Plan B, falls das hier nicht klappt. (Scherz!)",
+                "Wir können über alles abstimmen, außer über unser Treffen.",
+                "Wahlgeheimnis: Ich finde dich echt gut.",
+                "Ich bin politisch korrekt, aber privat für jeden Spaß zu haben.",
+                "Meine Beliebtheitswerte sind mir egal, solange du mich magst.",
+                "Ich baue Brücken, keine Mauern. Komm rüber!",
+                "Dienstwagen steht bereit. Wo soll's hingehen?",
+                "Gipfeltreffen heute Abend bei mir?",
+                "Ich setze neue Maßstäbe in der Außenpolitik – und bei Dates."
+            ],
+            'promis': [
+                "Keine Fotos bitte, nur Autogramme.",
+                "Ja, ich bin's wirklich.",
+                "Mein Leben ist ein Film, spielst du mit?",
+                "Follow me to the moon.",
+                "Mein Manager hat gesagt, ich soll mich unters Volk mischen.",
+                "Verifizierter Account, verifiziertes Herz.",
+                "Champagner ist mein Wasser.",
+                "Ich suche jemanden, der mich nicht googelt.",
+                "Privatjet oder Yacht? Entscheide du.",
+                "Paparazzi nerven, du hoffentlich nicht.",
+                "Ich bin nicht arrogant, ich bin nur berühmt.",
+                "Mein Gesicht hängt am Times Square, bald an deiner Wand?",
+                "VIP-Zugang zu meinem Herzen: Swipe rechts.",
+                "Ich gewinne jeden Award, außer den für die Liebe.",
+                "Mein Hund hat mehr Follower als du.",
+                "Business im Kopf, Party im Blut.",
+                "Ich brauche keine Vorstellung, du kennst mich.",
+                "Exklusiv und limitiert.",
+                "Red Carpet Ready.",
+                "Lass uns Schlagzeilen machen.",
+                "Lass uns den Klatschblättern einen echten Grund geben.",
+                "Mein Wikipedia-Artikel braucht ein Update beim Beziehungsstatus.",
+                "Ich bin nicht auf der Gästeliste, ich bin die Party.",
+                "Komm, wir fliegen kurz nach Paris auf einen Espresso.",
+                "In echt sehe ich sogar noch besser aus als im TV.",
+                "Vergiss den roten Teppich, lass uns auf die Couch.",
+                "Mein Leben ist komplett durchgeplant, sei meine Spontanität.",
+                "Ich schreibe dir Autogramme auf alles, was du willst.",
+                "Ich bin müde von Fake-Friends. Zeig mir was Echtes.",
+                "Meine DM's explodieren, aber ich warte nur auf deine.",
+                "Lass uns das ultimative Power-Couple werden.",
+                "Gage gespendet, Herz verschenkt.",
+                "Der Bodyguard bleibt draußen bei unserem Date.",
+                "Ich brauche jemanden, der mich auf dem Boden hält.",
+                "Oscar-prämiert im Küssen.",
+                "Ich drehe gerade einen neuen Film. Spielst du die Hauptrolle?",
+                "Das Blitzlichtgewitter blendet, aber du strahlst heller.",
+                "Komm in meine private VIP-Lounge.",
+                "Kein Make-up, keine Kamera, nur wir zwei.",
+                "Mein Name steht in Neonröhren, aber deiner in meinem Kopf.",
+                "Goldene Schallplatten wärmen mich nachts nicht.",
+                "Skandale sind out, Romantik ist mein neues Image.",
+                "Auf Welttournee vermisse ich immer nur eins: Dich.",
+                "Backstage-Pässe gibt's bei mir umsonst.",
+                "Ich trage Sonnenbrillen nachts, weil meine Zukunft so hell ist.",
+                "Lass uns inkognito einen Burger essen gehen.",
+                "Mein Stylist hat heute frei, ich komme im Jogginganzug.",
+                "Der Ruhm ist vergänglich, gute Dates nicht.",
+                "Mach ein Selfie mit mir, bevor ich noch berühmter werde.",
+                "Liebe auf den ersten Klick."
+            ],
+            'schler': [
+                "Hausaufgaben vergessen, aber dich nicht.",
+                "In der letzten Reihe sitzt es sich am besten.",
+                "Schule nervt, Dates nicht.",
+                "Suche jemanden, der mir Mathe erklärt.",
+                "Mein Rucksack ist schwerer als mein Leben.",
+                "5 Minuten vor der Prüfung lernen reicht.",
+                "Ich schwänze nicht, ich mache Homeoffice.",
+                "Pausenbrot teilen?",
+                "Eigentlich müsste ich lernen.",
+                "Ferien sind mein einziger Lichtblick.",
+                "Lehrerhasser, Liebesliebhaber.",
+                "Hast du die Lösungen für Bio?",
+                "Ich bin nur hier, weil der Unterricht langweilig ist.",
+                "Spicker-Profi sucht Komplizen.",
+                "Mein Schlafrhythmus ist kaputt, genau wie mein Füller.",
+                "Bus verpasst, Herz verloren.",
+                "Ich weiß nicht, was ich werden will, aber vllt. dein Freund?",
+                "Abi 20xx (hoffentlich).",
+                "Energie-Drink-Sucht inklusive.",
+                "Klassenclown sucht Publikum.",
+                "Ich habe ChatGPT mein Profil schreiben lassen.",
+                "Entschuldigung für die Verspätung, der Bus kam nicht. Und ich hab verschlafen.",
+                "Suche jemanden, der mir den Döner in der Pause zahlt.",
+                "Mein Akku hat nur noch 2%, antworte schnell!",
+                "Ich bin in der Findungsphase. Finde mich!",
+                "Wenn du mir bei der Facharbeit hilfst, gebe ich dir einen Bubble Tea aus.",
+                "Sport schwänzen und heimlich ans Meer fahren?",
+                "Ich lerne gerade fürs Leben, nicht für die Schule.",
+                "Mathe LK war ein Fehler, unser Match wäre das nicht.",
+                "Taschengeld reicht für eine halbe Pizza. Teilen wir?",
+                "Ich warte eigentlich nur auf das Klingeln zur großen Pause.",
+                "Mein Lehrer denkt, ich mache Notizen. Eigentlich schreibe ich dir.",
+                "Zeugnis war schlecht, aber meine Flirt-Skills sind eine 1+.",
+                "Hast du Lust, nach der 6. Stunde abzuhängen?",
+                "Freistunde! Was machen wir jetzt?",
+                "Ich bin der Grund, warum der Klassenlehrer seufzt.",
+                "Klassenbester im Über-Dates-Nachdenken.",
+                "Das Schul-WLAN blockiert Tinder, aber ich nutze Mobile Daten.",
+                "Ich teile sogar mein letztes Ladekabel mit dir.",
+                "Lieber mit dir chillen als Vokabeln lernen.",
+                "Klassensprecher? Nein, aber ich habe trotzdem das Sagen.",
+                "In Kunst habe ich dich im Kopf gezeichnet.",
+                "Morgen 1. Stunde fällt aus, wir können länger wach bleiben.",
+                "Hitzefrei! Lass uns sofort Eis essen gehen.",
+                "Ich schreibe morgen eine Klausur, lenk mich bitte ab!",
+                "Ich habe den ultimativen Flirt-Spickzettel in der Hand.",
+                "Nachsitzen ist eigentlich ganz cool, wenn du dabei bist.",
+                "Gefangen im Schulsystem, befreie mich.",
+                "Wir wären das süßeste Paar auf dem Schulhof.",
+                "Schulbücher sind teuer, Liebe ist kostenlos."
+            ],
+            'influencer': [
+                "Link in Bio!",
+                "Swipe up für mehr.",
+                "Kooperation? Schreib DM.",
+                "Mein Leben ist ein Filter.",
+                "Suche jemanden für Couple-Content.",
+                "Hast du mich schon abonniert?",
+                "Foodie, Traveler, Dreamer.",
+                "Unboxing my heart.",
+                "Keine Zeit, muss posten.",
+                "Hashtag Love.",
+                "Goldene Stunde ist meine Zeit.",
+                "Ich mache alles für den Algorithmus.",
+                "Sponsoren gesucht (für Drinks).",
+                "Mein Feed ist perfekt, ich bin es auch.",
+                "Vlogge unser erstes Date.",
+                "Like for Like?",
+                "Social Media Break? Niemals.",
+                "Ich bin online, also bin ich.",
+                "Influencer aus Leidenschaft.",
+                "Content Creator & Heart Breaker.",
+                "Swipe right und benutze meinen Rabattcode bei unserem Date.",
+                "Wir würden farblich so gut in meinen Feed passen.",
+                "Ich tagge dich auch, versprochen.",
+                "Lass uns zusammen auf TikTok viral gehen.",
+                "Get ready with me für unser erstes Date.",
+                "Mein Ringlicht macht uns beide wunderschön.",
+                "Storytime: Wie wir uns auf Tinda kennengelernt haben.",
+                "Ich suche meinen perfekten Instagram-Husband/Wife.",
+                "Unser Couple-Hashtag wäre absolut legendär.",
+                "Komm, wir machen einen Trend-Tanz zusammen.",
+                "Das Date wird natürlich gevloggt. Hoffe, du bist kameratauglich.",
+                "Ich habe 100k Follower, aber ich folge nur dir.",
+                "Sponsored by my broken heart.",
+                "Aesthetic check: Passen unsere Vibes zusammen?",
+                "POV: Du matchst mit deinem Lieblings-Creator.",
+                "Mein Leben sieht online perfekt aus, aber mir fehlst du.",
+                "Ich mache keine bezahlte Werbung für schlechte Dates.",
+                "Kaffee-Date? Ich brauche dringend Material für meine Story.",
+                "Wenn wir matchen, schalte ich mein Handy für eine Stunde in den Flugmodus.",
+                "Unboxing-Video: Meine Gefühle für dich.",
+                "Ich suche jemanden, der unauffällig gute Fotos von mir machen kann.",
+                "Der Algorithmus hat uns nicht umsonst zusammengeführt.",
+                "Community-Update: Ich bin vergeben (an dich?).",
+                "Lass uns auf ein Event gehen und das kostenlose Buffet plündern.",
+                "Hater würden sagen, es ist Fake, aber meine Liebe ist real.",
+                "Tippe doppelt auf mein Herz.",
+                "Meine Engagement-Rate ist extrem hoch, aber ich suche echtes Engagement.",
+                "Komm in meinen exklusiven Broadcast-Channel.",
+                "Filter aus, Realität an. Zeig dich wie du bist!",
+                "Das hier ist nicht gesponsert, ich meine es ernst."
+            ],
+            'default': [
+                "Neu hier, zeig mir deine Welt.",
+                "Suche jemanden zum Pferde stehlen.",
+                "Kaffee oder Tee?",
+                "Lass uns Geschichte schreiben.",
+                "Ich koche besser, als ich aussehe.",
+                "Humor ist mir wichtiger als Muskeln.",
+                "Suche den Grund, die App zu löschen.",
+                "Hobby: Atmen und Essen.",
+                "1,85m, falls das wichtig ist.",
+                "Katzenmensch.",
+                "Hundemensch.",
+                "Ich mag lange Spaziergänge zum Kühlschrank.",
+                "Netflix & Chill?",
+                "Einfach mal gucken, was passiert.",
+                "Nicht hier für Spiele.",
+                "Abenteuerlustig.",
+                "Sonntage sind für Pancakes.",
+                "Musik an, Welt aus.",
+                "Träumer & Macher.",
+                "Wer das liest, muss swipen.",
+                "Ich antworte meistens in 3-5 Werktagen.",
+                "Wenn wir matchen, musst du den ersten Schritt machen.",
+                "Suche jemanden für dumme Ideen am Wochenende.",
+                "Profi im Überdenken und Pizza-Bestellen.",
+                "Pizza-Rand-Esser bevorzugt.",
+                "Wenn du Tiere nicht magst, swipe direkt links.",
+                "Ich lache über Witze, die eigentlich gar nicht lustig sind.",
+                "Suche die Motivation, um morgens aufzustehen.",
+                "Wir können auch einfach nur schweigen und aufs Handy starren.",
+                "Ich bin der beste Beifahrer für Roadtrips.",
+                "Ich brauche jemanden, der mir Spinnen wegmacht.",
+                "Ich habe keine Ahnung, was ich hier tue.",
+                "Erzähl mir deinen peinlichsten Lieblingssong.",
+                "Kaffee am Morgen, Wein am Abend. Routine.",
+                "Ich bin hier, weil meine Freunde genervt von meinem Single-Dasein sind.",
+                "Lass uns zusammen das Menü im Restaurant stundenlang anstarren.",
+                "Wenn du Sarkasmus nicht fließend sprichst, wird es schwierig.",
+                "Mein größtes Talent? Ich kann Nudelwasser anbrennen lassen.",
+                "Suche jemanden, der meine Zimmerpflanzen gießt, wenn ich weg bin.",
+                "Eigentlich bin ich nur wegen der lustigen Profile hier.",
+                "Ich mag Leute, die pünktlich sind (ich bin es nämlich nie).",
+                "Bitte keine Bilder, auf denen du einen toten Fisch in der Hand hältst.",
+                "Spieleabend oder Club? Bin für beides zu faul, lass uns bestellen.",
+                "Mein Lieblingstier ist ganz klar der innere Schweinehund.",
+                "Ich swipe nur nach rechts, wenn du Snacks dabei hast.",
+                "Bist du heute Abend auch so chronisch unmotiviert wie ich?",
+                "Ich suche meinen Player 2 fürs Leben.",
+                "Mein absolutes Lieblings-Hobby: Pläne machen und dann doch absagen.",
+                "Wenn wir matchen, schuldest du mir theoretisch schon einen Drink.",
+                "Betrachte dies als mein offizielles Bewerbungsschreiben."
+            ]
+        };
 
         // Daten anreichern und verschönern
         const enrichedStack = stack.map(h => {
             const catKey = h.categoryId ? h.categoryId.toLowerCase() : 'default';
-            
+
             // 1. Schöner Name für die Kategorie (oder Fallback auf Original mit Großbuchstaben)
             const niceCategory = categoryMap[catKey] || (catKey.charAt(0).toUpperCase() + catKey.slice(1));
 
@@ -7540,7 +7727,7 @@ app.post('/api/tinda/swipe', isAuthenticated, async (req, res) => {
 
         if (isMatch) {
             const human = await humansCollection.findOne({ _id: hIdObj });
-            
+
             // Chat erstellen (Typ 'tinda')
             // WICHTIG: Wir nutzen humanId als Pseudo-Partner
             const newChat = {
@@ -7553,13 +7740,13 @@ app.post('/api/tinda/swipe', isAuthenticated, async (req, res) => {
                 lastMessagePreview: "Es ist ein Match!",
                 lastMessageTimestamp: new Date()
             };
-            
+
             // Prüfen ob Chat schon existiert (Reset Logik optional)
             const existingChat = await limChatsCollection.findOne({ type: 'tinda', participants: userId, tindaPartnerId: hIdObj });
-            
+
             if (!existingChat) {
                 await limChatsCollection.insertOne(newChat);
-                
+
                 // Erste Nachricht von der KI generieren lassen (Initialer Gruß)
                 // Wir rufen die KI Funktion asynchron auf, ohne auf Antwort zu warten
                 triggerAiResponse(userId, hIdObj, newChat._id, "Generiere einen kurzen, flirty Anmachspruch.");
@@ -7583,7 +7770,7 @@ app.post('/api/tinda/chat/:chatId/message', isAuthenticated, isChatParticipant, 
     const userId = new ObjectId(req.session.userId);
     const chat = req.chat; // Kommt aus Middleware
 
-    if(chat.type !== 'tinda') return res.status(400).json({error: "Kein Tinda Chat."});
+    if (chat.type !== 'tinda') return res.status(400).json({ error: "Kein Tinda Chat." });
 
     // 1. User Nachricht speichern
     const userMsg = {
@@ -7591,10 +7778,10 @@ app.post('/api/tinda/chat/:chatId/message', isAuthenticated, isChatParticipant, 
         content, timestamp: new Date()
     };
     await limMessagesCollection.insertOne(userMsg);
-    
+
     // Chat updaten
-    await limChatsCollection.updateOne({_id: chatId}, {
-        $set: { lastMessagePreview: content.substring(0,30), updatedAt: new Date() }
+    await limChatsCollection.updateOne({ _id: chatId }, {
+        $set: { lastMessagePreview: content.substring(0, 30), updatedAt: new Date() }
     });
 
     res.json({ message: "Gesendet", sentMessage: userMsg });
@@ -7613,7 +7800,7 @@ async function triggerAiResponse(userId, humanId, chatId, userMessage) {
         }
 
         const human = await humansCollection.findOne({ _id: new ObjectId(humanId) });
-        if(!human) return;
+        if (!human) return;
 
         // Prompt Engineering
         const systemPrompt = `Du bist ${human.name}. Dies ist ein fiktives Roleplay in einer Dating-App namens Tinda.
@@ -7655,16 +7842,16 @@ async function triggerAiResponse(userId, humanId, chatId, userMessage) {
                 isAi: true
             };
             await limMessagesCollection.insertOne(aiMsg);
-            
+
             // Chat updaten (Polling Trigger für das Frontend)
-            await limChatsCollection.updateOne({_id: new ObjectId(chatId)}, {
-                $set: { 
-                    lastMessagePreview: aiText.substring(0,30), 
+            await limChatsCollection.updateOne({ _id: new ObjectId(chatId) }, {
+                $set: {
+                    lastMessagePreview: aiText.substring(0, 30),
                     updatedAt: new Date(),
                     lastMessageTimestamp: new Date()
                 }
             });
-            
+
             if (typeof updateDataVersion === 'function') updateDataVersion('chat'); // Smart Polling anstoßen
         }
     } catch (err) {
@@ -7695,10 +7882,10 @@ app.delete('/api/tinda/chat/:chatId', isAuthenticated, isChatParticipant, async 
         await limChatsCollection.deleteOne({ _id: chatId });
         // Nachrichten auch löschen (sauberer)
         await limMessagesCollection.deleteMany({ chatId: chatId });
-        
+
         // Optional: Swipe auch löschen, damit man die Person wieder matchen könnte?
         // Hier lassen wir es erstmal so, Chat weg ist weg.
-        
+
         res.json({ message: "Chat gelöscht." });
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Löschen." });
@@ -7712,8 +7899,8 @@ app.get('/api/tinda/search', isAuthenticated, async (req, res) => {
 
     try {
         // 1. Rohe Daten suchen
-        const rawResults = await humansCollection.find({ 
-            name: { $regex: q, $options: 'i' } 
+        const rawResults = await humansCollection.find({
+            name: { $regex: q, $options: 'i' }
         }).limit(10).project({ name: 1, categoryId: 1, image_url: 1 }).toArray();
 
         // 2. Mapping für schöne Kategorienamen (identisch zum Stack)
@@ -7729,7 +7916,7 @@ app.get('/api/tinda/search', isAuthenticated, async (req, res) => {
             const catKey = h.categoryId ? h.categoryId.toLowerCase() : 'default';
             // Versuche Mapping, sonst nimm das Original mit großem Anfangsbuchstaben
             const niceCategory = categoryMap[catKey] || (catKey.charAt(0).toUpperCase() + catKey.slice(1));
-            
+
             return {
                 ...h,
                 categoryId: niceCategory // Hier wird "schler" zu "Schüler 🎒"
@@ -7755,7 +7942,7 @@ app.post('/api/tinda/match/direct', isAuthenticated, async (req, res) => {
         if (existing) return res.json({ success: true, chat: existing, message: "Chat existiert schon." });
 
         const human = await humansCollection.findOne({ _id: hIdObj });
-        if(!human) return res.status(404).json({error: "Person nicht gefunden."});
+        if (!human) return res.status(404).json({ error: "Person nicht gefunden." });
 
         // Neuen Chat erstellen
         const newChat = {
@@ -7793,31 +7980,31 @@ app.post('/api/tinda/match/direct', isAuthenticated, async (req, res) => {
 
 // DEFINITION: Der Exklusive Delta-Shop
 const DELTA_SHOP_ITEMS = [
-    { 
-        id: 'tax_shield', 
-        name: 'Steuerschutz-Zertifikat 🛡️', 
-        cost: 1, 
+    {
+        id: 'tax_shield',
+        name: 'Steuerschutz-Zertifikat 🛡️',
+        cost: 1,
         desc: 'Verhindert einmalig, dass das Finanzamt dir Geld abzieht.',
         type: 'item' // Fügt Item ins Inventar
     },
-    { 
-        id: 'badge_hunter', 
-        name: 'Badge: Bug Hunter 🐛', 
-        cost: 3, 
+    {
+        id: 'badge_hunter',
+        name: 'Badge: Bug Hunter 🐛',
+        cost: 3,
         desc: 'Ein exklusives Abzeichen für dein Profil.',
         type: 'badge' // Fügt Achievement hinzu
     },
-    { 
-        id: 'job_reset', 
-        name: 'Energy Drink ⚡', 
-        cost: 1, 
+    {
+        id: 'job_reset',
+        name: 'Energy Drink ⚡',
+        cost: 1,
         desc: 'Setzt sofort deinen Arbeits-Cooldown im Jobcenter zurück.',
         type: 'effect_job' // Sofortiger Effekt
     },
-    { 
-        id: 'crime_cleaner', 
-        name: 'Gefälschter Pass 🕵️', 
-        cost: 2, 
+    {
+        id: 'crime_cleaner',
+        name: 'Gefälschter Pass 🕵️',
+        cost: 2,
         desc: 'Setzt deinen Überfall-Cooldown (Crime) sofort zurück.',
         type: 'effect_crime' // Sofortiger Effekt
     }
@@ -7857,7 +8044,7 @@ app.get('/api/admin/bugs', isAuthenticated, isAdmin, async (req, res) => {
 
 // 3. Admin: Status ändern & Delta-Coin vergeben (ANGEPASST)
 app.post('/api/admin/bugs/:id/resolve', isAuthenticated, isAdmin, async (req, res) => {
-    const { status, giveReward } = req.body; 
+    const { status, giveReward } = req.body;
     const reportId = new ObjectId(req.params.id);
 
     try {
@@ -7869,11 +8056,11 @@ app.post('/api/admin/bugs/:id/resolve', isAuthenticated, isAdmin, async (req, re
 
         // WENN GENEHMIGT UND BELOHNUNG AKTIV:
         if (status === 'resolved' && giveReward && !report.rewardGiven) {
-            
+
             // Gib dem User genau 1 Delta Coin
             await usersCollection.updateOne(
                 { _id: report.userId },
-                { $inc: { deltaCoins: 1 } } 
+                { $inc: { deltaCoins: 1 } }
             );
 
             updateData.rewardGiven = true;
@@ -7893,8 +8080,8 @@ app.post('/api/admin/bugs/:id/resolve', isAuthenticated, isAdmin, async (req, re
 app.get('/api/bug-bounty/shop', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
     const user = await usersCollection.findOne({ _id: userId }, { projection: { deltaCoins: 1 } });
-    
-    res.json({ 
+
+    res.json({
         deltaCoins: user.deltaCoins || 0,
         items: DELTA_SHOP_ITEMS
     });
@@ -7991,7 +8178,7 @@ async function getHeistState() {
         fwSetting = { id: 'heist_firewall', integrity: 100.00, openUntil: 0 };
         await systemSettingsCollection.insertOne(fwSetting);
     }
-    
+
     // Prüfen ob Zeitfenster abgelaufen
     if (fwSetting.integrity <= 0 && Date.now() > fwSetting.openUntil) {
         // Reset
@@ -8002,12 +8189,12 @@ async function getHeistState() {
     }
 
     const treasury = await getStateTreasuryBalance();
-    
-    return { 
-        integrity: fwSetting.integrity, 
+
+    return {
+        integrity: fwSetting.integrity,
         isOpen: fwSetting.integrity <= 0,
         openUntil: fwSetting.openUntil,
-        treasuryBalance: treasury 
+        treasuryBalance: treasury
     };
 }
 
@@ -8027,7 +8214,7 @@ app.post('/api/heist/hack', isAuthenticated, async (req, res) => {
     try {
         await session.withTransaction(async () => {
             const user = await usersCollection.findOne({ _id: userId }, { session });
-            
+
             // A. Cooldown prüfen
             const now = Date.now();
             const lastHack = user.lastHackAt ? new Date(user.lastHackAt).getTime() : 0;
@@ -8043,14 +8230,14 @@ app.post('/api/heist/hack', isAuthenticated, async (req, res) => {
 
             // B. Geld abziehen & Timestamp setzen
             await usersCollection.updateOne(
-                { _id: userId }, 
-                { 
+                { _id: userId },
+                {
                     $inc: { balance: -COST },
                     $set: { lastHackAt: new Date() } // WICHTIG: Zeit speichern
-                }, 
+                },
                 { session }
             );
-            
+
             // C. Schaden berechnen (1.5% bis 4.0%)
             const damage = (Math.random() * 2.5) + 1.5;
             let newIntegrity = currentState.integrity - damage;
@@ -8059,7 +8246,7 @@ app.post('/api/heist/hack', isAuthenticated, async (req, res) => {
             if (newIntegrity <= 0) {
                 newIntegrity = 0;
                 openUntil = Date.now() + (60 * 60 * 1000); // 60 Min offen
-                
+
                 // News Broadcast
                 await newsCollection.insertOne({
                     headline: "FIREWALL DOWN! 🔓",
@@ -8089,7 +8276,7 @@ app.post('/api/heist/hack', isAuthenticated, async (req, res) => {
 // 3. ZUGRIFF (Der Raub - Nur wenn offen)
 app.post('/api/heist/start', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
-    
+
     // Großer Raub kostet mehr Equipment
     const COST = 2000;
 
@@ -8117,7 +8304,7 @@ app.post('/api/heist/start', isAuthenticated, async (req, res) => {
             await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -COST } }, { session });
 
             // CHANCE: Wenn offen -> 60% Erfolg!
-            const isSuccess = Math.random() < 0.60; 
+            const isSuccess = Math.random() < 0.60;
 
             if (isSuccess) {
                 // Beute: 5% bis 10% des AKTUELLEN Pots (damit für andere was übrig bleibt)
@@ -8126,8 +8313,8 @@ app.post('/api/heist/start', isAuthenticated, async (req, res) => {
 
                 await systemSettingsCollection.updateOne({ id: 'state_treasury' }, { $inc: { balance: -loot } }, { session });
                 await usersCollection.updateOne(
-                    { _id: userId }, 
-                    { $inc: { balance: loot }, $set: { lastHeistAt: new Date() } }, 
+                    { _id: userId },
+                    { $inc: { balance: loot }, $set: { lastHeistAt: new Date() } },
                     { session }
                 );
                 result = { success: true, message: `TREFFER! Du hast $${loot.toLocaleString()} erbeutet!` };
@@ -8135,13 +8322,13 @@ app.post('/api/heist/start', isAuthenticated, async (req, res) => {
                 // Erwischt: Kleine Strafe
                 const fine = 5000;
                 await usersCollection.updateOne(
-                    { _id: userId }, 
-                    { $inc: { balance: -fine }, $set: { lastHeistAt: new Date() } }, 
+                    { _id: userId },
+                    { $inc: { balance: -fine }, $set: { lastHeistAt: new Date() } },
                     { session }
                 );
                 // Strafe in den Pot
                 await systemSettingsCollection.updateOne({ id: 'state_treasury' }, { $inc: { balance: fine } }, { session });
-                
+
                 result = { success: false, message: `ALARM! Du musstest fliehen und $${fine} Bestechungsgeld zahlen.` };
             }
         });
@@ -8169,11 +8356,11 @@ app.get('/api/admin/chat/tinda-conversations', isAuthenticated, isAdmin, async (
         // Wir holen uns noch die Usernamen der echten User dazu (nicht der KI)
         // In Tinda Chats ist participants[0] meist der echte User
         const enrichedChats = [];
-        
+
         for (const chat of chats) {
-            const realUserId = chat.participants[0]; 
+            const realUserId = chat.participants[0];
             const realUser = await usersCollection.findOne({ _id: realUserId }, { projection: { username: 1 } });
-            
+
             enrichedChats.push({
                 chatId: chat._id,
                 user: realUser ? realUser.username : "Unbekannt",
@@ -8222,7 +8409,7 @@ app.get('/api/admin/chat/messages', isAuthenticated, isAdmin, async (req, res) =
 // 3. Als Admin in einen Chat schreiben
 app.post('/api/admin/chat/send', isAuthenticated, isAdmin, async (req, res) => {
     const { chatId, content } = req.body;
-    
+
     if (!chatId || !content) return res.status(400).json({ error: "Fehlende Daten." });
 
     const cId = new ObjectId(chatId);
@@ -8234,7 +8421,7 @@ app.post('/api/admin/chat/send', isAuthenticated, isAdmin, async (req, res) => {
             chatId: cId,
             senderId: new ObjectId(req.session.userId),
             // WICHTIG: Wir setzen einen Prefix, damit der User es checkt (oder du lässt es weg für Pranks)
-            senderUsername: `[ADMIN] ${adminName}`, 
+            senderUsername: `[ADMIN] ${adminName}`,
             content: content.trim(),
             timestamp: new Date(),
             isAdminMessage: true // Markierung für internes Styling
@@ -8245,15 +8432,15 @@ app.post('/api/admin/chat/send', isAuthenticated, isAdmin, async (req, res) => {
         // Chat updaten (damit es beim User als "neu" angezeigt wird)
         await limChatsCollection.updateOne(
             { _id: cId },
-            { 
-                $set: { 
-                    lastMessagePreview: `[ADMIN]: ${content.substring(0, 20)}...`, 
+            {
+                $set: {
+                    lastMessagePreview: `[ADMIN]: ${content.substring(0, 20)}...`,
                     updatedAt: new Date(),
                     lastMessageTimestamp: new Date()
-                } 
+                }
             }
         );
-        
+
         // Polling Trigger für den User
         updateDataVersion('chat');
 
@@ -8334,7 +8521,7 @@ app.post('/api/restaurant/order', isAuthenticated, async (req, res) => {
         for (const id of itemIds) {
             const food = RESTAURANT_MENU.find(i => i.id === id);
             if (!food) throw new Error(`Gericht '${id}' steht nicht auf der Karte.`);
-            
+
             totalPrice += food.price;
             totalEnergy += food.energy;
             itemNames.push(food.name);
@@ -8343,14 +8530,14 @@ app.post('/api/restaurant/order', isAuthenticated, async (req, res) => {
 
         await session.withTransaction(async () => {
             const user = await usersCollection.findOne({ _id: userId }, { session });
-            
+
             if (user.balance < totalPrice) {
                 throw new Error(`Nicht genug Geld! Das Menü kostet $${totalPrice.toFixed(2)}.`);
             }
 
             // --- EFFEKT ---
             let newLastWorkedAt = user.lastWorkedAt || 0;
-            const reductionMs = totalEnergy * 60 * 1000; 
+            const reductionMs = totalEnergy * 60 * 1000;
 
             if (newLastWorkedAt > 0) {
                 const oldDate = new Date(newLastWorkedAt).getTime();
@@ -8361,12 +8548,12 @@ app.post('/api/restaurant/order', isAuthenticated, async (req, res) => {
             // A. User Update
             await usersCollection.updateOne(
                 { _id: userId },
-                { 
-                    $inc: { 
+                {
+                    $inc: {
                         balance: -totalPrice,
-                        "stats.foodEaten": itemIds.length 
+                        "stats.foodEaten": itemIds.length
                     },
-                    $set: { lastWorkedAt: newLastWorkedAt } 
+                    $set: { lastWorkedAt: newLastWorkedAt }
                 },
                 { session }
             );
@@ -8383,13 +8570,13 @@ app.post('/api/restaurant/order', isAuthenticated, async (req, res) => {
         });
 
         const updatedUser = await usersCollection.findOne({ _id: userId }, { projection: { balance: 1 } });
-        
+
         console.log(`${LOG_PREFIX_REST} User ${req.session.username} bestellte: ${itemNames.join(", ")}.`);
-        
+
         let msg = `Guten Appetit! Du hast ${itemNames.length} Teile verdrückt ($${totalPrice.toFixed(2)}).`;
         if (itemNames.length <= 3) msg = `Lecker: ${itemNames.join(" + ")}! ($${totalPrice.toFixed(2)})`;
 
-        res.json({ 
+        res.json({
             message: `${msg} Energie regeneriert!`,
             newBalance: updatedUser.balance,
             energyGain: totalEnergy,
@@ -8407,14 +8594,14 @@ app.post('/api/restaurant/order', isAuthenticated, async (req, res) => {
 // 3. Status abrufen (Energie & Historie-Vorschau)
 app.get('/api/restaurant/status', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
-    
+
     try {
         const user = await usersCollection.findOne({ _id: userId });
-        
+
         // --- ENERGIE BERECHNUNG ---
         let energyPercent = 100;
         let statusText = "Volle Energie! Geh arbeiten.";
-        
+
         if (user.job) {
             const jobDef = JOB_LIST.find(j => j.id === user.job);
             if (jobDef && user.lastWorkedAt) {
@@ -8439,7 +8626,7 @@ app.get('/api/restaurant/status', isAuthenticated, async (req, res) => {
             .limit(5)
             .toArray();
 
-        res.json({ 
+        res.json({
             energy: energyPercent,
             statusText: statusText,
             job: user.job || "Arbeitslos",
@@ -8459,7 +8646,7 @@ app.get('/api/restaurant/history', isAuthenticated, async (req, res) => {
         .sort({ date: -1 })
         .limit(50) // Die letzten 50 Mahlzeiten
         .toArray();
-        
+
     res.json({ history });
 });
 
@@ -8502,9 +8689,9 @@ app.post('/api/limterest/pin', isAuthenticated, async (req, res) => {
         };
 
         await limterestCollection.insertOne(newPin);
-        
+
         // Achievement Check: "Influencer" oder so könnte man hier triggern
-        
+
         console.log(`${LOG_PREFIX_PIN} Neuer Pin von ${username}: ${title}`);
         res.status(201).json({ message: "Gepinnt!", pin: newPin });
 
@@ -8569,7 +8756,7 @@ app.get('/api/limterest/feed', async (req, res) => {
             { $sort: { createdAt: -1 } },
             { $limit: 50 } // Pagination könnte man hier noch erweitern
         ]).toArray();
-        
+
         res.json({ pins });
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Laden." });
@@ -8588,7 +8775,7 @@ app.get('/api/limterest/user/:targetUsername', isAuthenticated, async (req, res)
         // Stats berechnen
         const pinCount = await limterestCollection.countDocuments({ username: targetUsername });
         const followersCount = (user.followers || []).length;
-        
+
         // Folge ich ihm schon?
         const isFollowing = user.followers && user.followers.some(id => id.equals(myId));
 
@@ -8642,7 +8829,7 @@ app.post('/api/limterest/pin/:id/save', isAuthenticated, async (req, res) => {
         // Wir speichern die gemerkten Pin-IDs im User-Dokument
         const user = await usersCollection.findOne({ _id: userId });
         const saved = user.savedPins || [];
-        
+
         // Toggle Logik (Merken / Entmerken)
         const isSaved = saved.some(id => id.equals(pinId));
 
@@ -8674,7 +8861,7 @@ app.post('/api/limterest/pin/:id/report', isAuthenticated, async (req, res) => {
             timestamp: new Date(),
             status: 'open'
         };
-        
+
         // Speichern in einer allgemeinen Admin-Liste (nutze SystemSettings oder eine neue Collection)
         // Hier erstellen wir kurzentschlossen eine 'reportsCollection' dynamisch
         await db.collection('reports').insertOne(reportEntry);
@@ -8703,10 +8890,10 @@ app.get('/api/limterest/pin/:id/is-saved', isAuthenticated, async (req, res) => 
 // 7. Alle gemerkten Pins laden
 app.get('/api/limterest/my-saved', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
-    
+
     try {
         const user = await usersCollection.findOne({ _id: userId }, { projection: { savedPins: 1 } });
-        
+
         if (!user.savedPins || user.savedPins.length === 0) {
             return res.json({ pins: [] });
         }
@@ -8744,11 +8931,11 @@ const ACHIEVEMENT_MARKET_PRICES = {
 app.get('/api/yakuza/catalog', isAuthenticated, async (req, res) => {
     try {
         const userId = new ObjectId(req.session.userId);
-        
+
         // 1. User Besitz laden
         const user = await usersCollection.findOne({ _id: userId });
         const owned = [
-            ...(user.achievements || []), 
+            ...(user.achievements || []),
             ...(user.badges || [])
         ];
 
@@ -8761,7 +8948,7 @@ app.get('/api/yakuza/catalog', isAuthenticated, async (req, res) => {
             // Bug Hunter auch hier als Exclusive definieren, damit der Preis stimmt (1 Mrd)
             { id: 'badge_hunter', title: 'Bug Hunter', icon: '🐛', desc: 'Elite.', price: 1000000000 }
         ];
-        
+
         // Liste der IDs erstellen, die wir schon haben (um Duplikate zu vermeiden)
         const exclusiveIds = exclusives.map(e => e.id);
 
@@ -8769,16 +8956,16 @@ app.get('/api/yakuza/catalog', isAuthenticated, async (req, res) => {
         const regular = ACHIEVEMENT_DEFINITIONS
             .filter(ach => !exclusiveIds.includes(ach.id)) // <--- HIER IST DER FIX
             .map(ach => ({
-                id: ach.id, 
-                title: ach.title, 
-                icon: ach.icon, 
+                id: ach.id,
+                title: ach.title,
+                icon: ach.icon,
                 desc: ach.desc,
                 price: ACHIEVEMENT_MARKET_PRICES[ach.id] || 15000000 // 15 Mio Standard
             }));
 
-        res.json({ 
+        res.json({
             catalog: [...exclusives, ...regular],
-            owned: owned 
+            owned: owned
         });
 
     } catch (e) {
@@ -8817,24 +9004,24 @@ app.post('/api/yakuza/buy', isAuthenticated, async (req, res) => {
 
         // --- 3. LOGIK FÜR FAKE ID (Cooldown Reset) ---
         if (service === 'fakeid') {
-             
-             await usersCollection.updateOne({ _id: userId }, { 
+
+            await usersCollection.updateOne({ _id: userId }, {
                 $inc: { balance: -price },
-                
+
                 // HIER IST DER FIX: Die korrekten Feldnamen aus deinem Log!
-                $unset: { 
+                $unset: {
                     "lastRobberyAt": "",  // Weg mit dem Raub-Cooldown
                     "lastHeistAt": "",    // Weg mit dem Heist-Cooldown
                     "lastHackAt": "",     // Weg mit dem Hack-Cooldown
                     "lastWorkedAt": "",   // Weg mit der Job-Sperre (Bonus)
                     "lastDaily": ""       // Optional: Daily Reward Reset (falls du das willst)
-                } 
+                }
             });
 
-            return res.json({ 
-                success: true, 
-                message: "Identität bereinigt. Alle Fahndungs-Timer wurden geschreddert.", 
-                newBalance: user.balance - price 
+            return res.json({
+                success: true,
+                message: "Identität bereinigt. Alle Fahndungs-Timer wurden geschreddert.",
+                newBalance: user.balance - price
             });
         }
 
@@ -8843,10 +9030,10 @@ app.post('/api/yakuza/buy', isAuthenticated, async (req, res) => {
             const v = await usersCollection.findOne({ username: target }, { projection: { password: 0, sessions: 0, "2fa_secret": 0 } });
             if (!v) return res.status(404).json({ error: "User nicht gefunden." });
             await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -price } });
-            
+
             const invCount = await inventoriesCollection.countDocuments({ userId: v._id });
             const rareItems = await inventoriesCollection.find({ userId: v._id, "productDetails.price": { $gt: 1000 } }).toArray();
-            
+
             const leakData = {
                 _id: v._id, username: v.username, role: v.isAdmin ? "ADMIN" : "User",
                 balance: v.balance, tokens: v.tokens || 0, infinity: v.infinityMoney || false,
@@ -8863,7 +9050,7 @@ app.post('/api/yakuza/buy', isAuthenticated, async (req, res) => {
 // === ⚖️ LIMO COURT SYSTEM (UPDATED) ===
 // =========================================================
 
-const COURT_FEE = 5000; 
+const COURT_FEE = 5000;
 const BASE_DURATION = 24 * 60 * 60 * 1000; // 24 Stunden Standard
 const MAX_DURATION = 120 * 60 * 60 * 1000; // 5 Tage Maximum (Hard Limit)
 const MIN_VOTES = 3;                       // Mindestens 3 Stimmen für reguläres Ende
@@ -8884,7 +9071,7 @@ app.get('/api/court/status', isAuthenticated, async (req, res) => {
             const gCount = (activeCase.votes_guilty || []).length;
             const iCount = (activeCase.votes_innocent || []).length;
             const total = gCount + iCount;
-            
+
             // Check Vote Status User
             let myVote = null;
             if (activeCase.votes_guilty?.map(id => id.toString()).includes(userId.toString())) myVote = 'guilty';
@@ -8893,22 +9080,22 @@ app.get('/api/court/status', isAuthenticated, async (req, res) => {
             // --- ZEIT & ENDE LOGIK ---
             const now = new Date();
             const created = new Date(activeCase.createdAt);
-            
+
             // Wann wäre das reguläre Ende?
             let endsAt = new Date(created.getTime() + BASE_DURATION);
             const hardLimit = new Date(created.getTime() + MAX_DURATION);
-            
+
             let isOvertime = false;
 
             // Ist die reguläre Zeit abgelaufen?
             if (now > endsAt) {
                 // Haben wir GENUG Stimmen ODER ist das Hard Limit erreicht?
                 if (total >= MIN_VOTES || now > hardLimit) {
-                    
+
                     // === FALL SCHLIESSEN ===
                     const verdict = gCount > iCount ? 'guilty' : 'innocent';
                     // Bei Gleichstand im Hard Limit: Freispruch (In dubio pro reo)
-                    if(gCount === iCount) verdict = 'innocent'; 
+                    if (gCount === iCount) verdict = 'innocent';
 
                     await db.collection('courtCases').updateOne(
                         { _id: activeCase._id },
@@ -8917,12 +9104,12 @@ app.get('/api/court/status', isAuthenticated, async (req, res) => {
 
                     // Strafe vollstrecken
                     if (verdict === 'guilty') {
-                         await usersCollection.updateOne(
+                        await usersCollection.updateOne(
                             { username: activeCase.accusedName },
                             { $mul: { balance: 0.9 } } // 10% Strafe
                         );
                     }
-                    
+
                     return res.redirect('/api/court/status'); // Reload für nächsten Fall
 
                 } else {
@@ -8962,7 +9149,7 @@ app.get('/api/court/status', isAuthenticated, async (req, res) => {
             .limit(5)
             .toArray();
 
-        res.json({ 
+        res.json({
             activeCase: caseData,
             archive: archive.map(c => ({
                 id: c._id,
@@ -9027,7 +9214,7 @@ app.post('/api/court/vote', isAuthenticated, async (req, res) => {
     try {
         const { caseId, verdict } = req.body;
         const userId = new ObjectId(req.session.userId);
-        
+
         if (!['guilty', 'innocent'].includes(verdict)) return res.status(400).json({ error: "Ungültiges Urteil." });
 
         // --- 🛡️ DEVICE FINGERPRINT LOGIK (Das Cookie auslesen) ---
@@ -9041,11 +9228,11 @@ app.post('/api/court/vote', isAuthenticated, async (req, res) => {
             }, {});
             deviceId = cookies['limo_device_id'];
         }
-        
+
         // Wenn das Gerät noch kein Cookie hat, generieren wir ein neues und heften es an den Browser
         if (!deviceId) {
             deviceId = uuidv4();
-            res.cookie('limo_device_id', deviceId, { 
+            res.cookie('limo_device_id', deviceId, {
                 maxAge: 365 * 24 * 60 * 60 * 1000, // 1 Jahr gültig!
                 httpOnly: true, // Kann nicht von bösartigen Scripts ausgelesen werden
                 secure: process.env.NODE_ENV === 'production',
@@ -9055,11 +9242,11 @@ app.post('/api/court/vote', isAuthenticated, async (req, res) => {
         // -----------------------------------------------------------
 
         const user = await usersCollection.findOne({ _id: userId });
-        
+
         // 🛡️ ANTI-SMURF 1: Account-Alter (24h)
         const accountAgeMs = Date.now() - new Date(user._id.getTimestamp()).getTime();
         const ONE_DAY_MS = 24 * 60 * 60 * 1000;
-        
+
         if (accountAgeMs < ONE_DAY_MS && !user.isAdmin) {
             return res.status(403).json({ error: "Dein Account muss mindestens 24 Stunden alt sein, um abzustimmen." });
         }
@@ -9074,13 +9261,13 @@ app.post('/api/court/vote', isAuthenticated, async (req, res) => {
 
         // 🛡️ ANTI-SMURF 3: GERÄTE SPERRE (Max 1 Stimme pro Gerät!)
         const votedDevices = courtCase.voted_devices || [];
-        
+
         if (votedDevices.includes(deviceId) && !user.isAdmin) {
             return res.status(403).json({ error: "Von diesem Gerät wurde bereits abgestimmt! Das Wechseln des Accounts ist verboten." });
         }
 
         // Hat DIESER User (ID) schon abgestimmt?
-        const alreadyVoted = 
+        const alreadyVoted =
             (courtCase.votes_guilty || []).some(id => id.toString() === userId.toString()) ||
             (courtCase.votes_innocent || []).some(id => id.toString() === userId.toString());
 
@@ -9090,11 +9277,11 @@ app.post('/api/court/vote', isAuthenticated, async (req, res) => {
         const field = verdict === 'guilty' ? 'votes_guilty' : 'votes_innocent';
         await db.collection('courtCases').updateOne(
             { _id: new ObjectId(caseId) },
-            { 
-                $push: { 
+            {
+                $push: {
                     [field]: userId,
                     voted_devices: deviceId // Das Gerät wird für diesen Fall gesperrt
-                } 
+                }
             }
         );
 
@@ -9145,12 +9332,12 @@ app.get('/api/gangs/dashboard', isAuthenticated, async (req, res) => {
         // D) Zonen Status (Territory Control)
         const zonesRaw = await db.collection('zones').find({}).toArray();
         const zonesData = []; // Array für Frontend
-        
+
         for (const [key, val] of Object.entries(ZONES_CONFIG)) {
             const dbZone = zonesRaw.find(z => z._id === key);
             // Ist die Zone aktuell besetzt? (Zeit noch nicht abgelaufen)
             const isTaken = dbZone && new Date(dbZone.expiresAt) > new Date();
-            
+
             zonesData.push({
                 id: key,
                 name: val.name,
@@ -9211,7 +9398,7 @@ app.post('/api/gangs/create', isAuthenticated, async (req, res) => {
         // Validierung
         if (!name || name.length < 3 || name.length > 20) return res.status(400).json({ error: "Name ungültig (3-20 Zeichen)." });
         if (!tag || tag.length < 2 || tag.length > 4) return res.status(400).json({ error: "Tag ungültig (2-4 Zeichen)." });
-        
+
         // Hat er genug Geld?
         if (user.balance < GANG_CREATE_COST) return res.status(400).json({ error: `Du brauchst $${GANG_CREATE_COST.toLocaleString()}!` });
 
@@ -9257,7 +9444,7 @@ app.post('/api/gangs/join', isAuthenticated, async (req, res) => {
         // Checks
         const alreadyInGang = await db.collection('gangs').findOne({ members: userId });
         if (alreadyInGang) return res.status(400).json({ error: "Du bist schon in einer Gang." });
-        
+
         if (gang.members.length >= MAX_MEMBERS) return res.status(400).json({ error: "Gang ist voll." });
 
         // Join
@@ -9296,7 +9483,7 @@ app.post('/api/gangs/deposit', isAuthenticated, async (req, res) => {
         // Transaktion
         await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -val } });
         await db.collection('gangs').updateOne(
-            { _id: myGang._id }, 
+            { _id: myGang._id },
             { $inc: { balance: val } }
         );
 
@@ -9326,24 +9513,24 @@ app.post('/api/gangs/chat', isAuthenticated, async (req, res) => {
 
         if (type === 'private') {
             if (!myGang) return res.status(400).json({ error: "Du hast keine Gang für privaten Chat." });
-            
+
             // In das Gang-Dokument pushen (Array Limiting auf 50 Nachrichten)
             await db.collection('gangs').updateOne(
                 { _id: myGang._id },
-                { 
-                    $push: { 
-                        privateChat: { 
-                            $each: [msgObj], 
+                {
+                    $push: {
+                        privateChat: {
+                            $each: [msgObj],
                             $slice: -50 // Nur die letzten 50 behalten
-                        } 
-                    } 
+                        }
+                    }
                 }
             );
 
         } else {
             // Öffentlich: Jeder darf schreiben (auch ohne Gang, für Trash Talk)
             await db.collection('publicGangChat').insertOne(msgObj);
-            
+
             // Optional: Alte Nachrichten löschen (Cleanup)
             // await db.collection('publicGangChat').deleteMany({ createdAt: { $lt: ... } }) 
         }
@@ -9388,10 +9575,10 @@ app.post('/api/gangs/kick', isAuthenticated, async (req, res) => {
     try {
         const { targetId } = req.body;
         const userId = new ObjectId(req.session.userId);
-        
+
         const myGang = await db.collection('gangs').findOne({ leaderId: userId });
         if (!myGang) return res.status(403).json({ error: "Nur der Leader kann kicken." });
-        
+
         if (targetId === userId.toString()) return res.status(400).json({ error: "Du kannst dich nicht selbst kicken." });
 
         // Entfernen
@@ -9454,15 +9641,15 @@ app.post('/api/gangs/upgrade', isAuthenticated, async (req, res) => {
         // Kaufen
         await db.collection('gangs').updateOne(
             { _id: myGang._id },
-            { 
+            {
                 $inc: { balance: -upgrade.cost },
                 $set: { [`upgrades.${type}`]: true }
             }
         );
 
         // Chat Nachricht
-        await db.collection('gangs').updateOne({ _id: myGang._id }, { 
-            $push: { privateChat: { sender: "SYSTEM", msg: `${upgrade.name} wurde gekauft!`, time: new Date() } } 
+        await db.collection('gangs').updateOne({ _id: myGang._id }, {
+            $push: { privateChat: { sender: "SYSTEM", msg: `${upgrade.name} wurde gekauft!`, time: new Date() } }
         });
 
         res.json({ success: true, message: `${upgrade.name} installiert.` });
@@ -9515,7 +9702,7 @@ app.post('/api/gangs/attack', isAuthenticated, async (req, res) => {
         if (isWin) {
             // Beute berechnen (5% vom Gegner-Geld)
             let loot = Math.floor(enemyGang.balance * 0.05);
-            
+
             // Bunker Schutz?
             if (enemyGang.upgrades?.bunker) {
                 loot = Math.floor(loot * 0.5); // Bunker halbiert Verlust
@@ -9549,9 +9736,9 @@ app.post('/api/gangs/attack', isAuthenticated, async (req, res) => {
             res.json({ success: true, result: "LOSE", message: "Angriff gescheitert. Der Gegner war zu stark." });
         }
 
-    } catch (e) { 
+    } catch (e) {
         console.error(e);
-        res.status(500).json({ error: "Kriegs-Server offline." }); 
+        res.status(500).json({ error: "Kriegs-Server offline." });
     }
 });
 
@@ -9559,7 +9746,7 @@ app.post('/api/gangs/rent-zone', isAuthenticated, async (req, res) => {
     try {
         const { zoneId } = req.body;
         const userId = new ObjectId(req.session.userId);
-        
+
         if (!ZONES_CONFIG[zoneId]) return res.status(400).json({ error: "Zone existiert nicht." });
         const cost = ZONES_CONFIG[zoneId].cost;
 
@@ -9586,19 +9773,19 @@ app.post('/api/gangs/rent-zone', isAuthenticated, async (req, res) => {
 
         // KAUFEN / MIETEN
         await db.collection('gangs').updateOne({ _id: myGang._id }, { $inc: { balance: -cost } });
-        
+
         const expires = new Date(now.getTime() + (24 * 60 * 60 * 1000)); // +24h
 
         await db.collection('zones').updateOne(
             { _id: zoneId },
-            { 
-                $set: { 
-                    ownerGangId: myGang._id, 
+            {
+                $set: {
+                    ownerGangId: myGang._id,
                     ownerName: myGang.name,
                     ownerTag: myGang.tag,
                     rentedAt: now,
                     expiresAt: expires
-                } 
+                }
             },
             { upsert: true }
         );
@@ -9609,9 +9796,9 @@ app.post('/api/gangs/rent-zone', isAuthenticated, async (req, res) => {
 
         res.json({ success: true, message: `Gebiet gesichert! Kosten: $${cost.toLocaleString()}` });
 
-    } catch (e) { 
+    } catch (e) {
         console.error(e);
-        res.status(500).json({ error: "Fehler bei der Landnahme." }); 
+        res.status(500).json({ error: "Fehler bei der Landnahme." });
     }
 });
 
@@ -9624,39 +9811,37 @@ const ZONE_INCOME = {
     'bank': 500000     // $500k alle 10 Min ($3M/h)
 };
 
-setInterval(async () => {
-    try {
-        console.log("🔄 Payday: Verteile Gebiets-Einnahmen...");
-        const now = new Date();
+if (cluster.isPrimary) {
+    setInterval(async () => {
+        try {
+            console.log("🔄 Payday: Verteile Gebiets-Einnahmen...");
+            const now = new Date();
+            const activeZones = await db.collection('zones').find({ expiresAt: { $gt: now } }).toArray();
 
-        // 1. Suche alle aktiven Zonen (wo die Zeit noch nicht abgelaufen ist)
-        const activeZones = await db.collection('zones').find({ expiresAt: { $gt: now } }).toArray();
+            if (activeZones.length === 0) return;
 
-        if (activeZones.length === 0) return;
-
-        for (const zone of activeZones) {
-            const income = ZONE_INCOME[zone._id] || 10000; // Fallback
-            
-            // 2. Geld an die Gang überweisen
-            await db.collection('gangs').updateOne(
-                { _id: zone.ownerGangId },
-                { 
-                    $inc: { balance: income },
-                    // Optional: Nachricht in den Gang-Chat
-                    $push: { 
-                        privateChat: { 
-                            sender: "SYSTEM", 
-                            msg: `💰 Einnahmen aus ${zone.ownerName}: +$${income.toLocaleString()}`, 
-                            time: new Date() 
-                        } 
+            for (const zone of activeZones) {
+                const income = ZONE_INCOME[zone._id] || 10000; 
+                
+                await db.collection('gangs').updateOne(
+                    { _id: zone.ownerGangId },
+                    { 
+                        $inc: { balance: income },
+                        $push: { 
+                            privateChat: { 
+                                sender: "SYSTEM", 
+                                msg: `💰 Einnahmen aus ${zone.ownerName}: +$${income.toLocaleString()}`, 
+                                time: new Date() 
+                            } 
+                        }
                     }
-                }
-            );
+                );
+            }
+        } catch (e) {
+            console.error("Payday Fehler:", e);
         }
-    } catch (e) {
-        console.error("Payday Fehler:", e);
-    }
-}, PAYDAY_INTERVAL);
+    }, PAYDAY_INTERVAL);
+}
 
 // =========================================================
 // === 📈 LIMO EXCHANGE (CRYPTO & FINANCE) ===
@@ -9664,35 +9849,34 @@ setInterval(async () => {
 
 // 1. Die Coins Konfiguration
 let CRYPTO_MARKET = {
-    'limo': { name: "Limo Coin", symbol: "LIMO", price: 1.00, volatility: 0.02, history: [], lastChange: 0 }, 
-    'bitcoin': { name: "Bit-Limo", symbol: "BTC", price: 45000.00, volatility: 0.05, history: [], lastChange: 0 }, 
-    'doge': { name: "Doge Limo", symbol: "DOGE", price: 0.15, volatility: 0.10, history: [], lastChange: 0 }, 
-    'void': { name: "Dark Void", symbol: "VOID", price: 50.00, volatility: 0.25, history: [], lastChange: 0 } 
+    'limo': { name: "Limo Coin", symbol: "LIMO", price: 1.00, volatility: 0.02, history: [], lastChange: 0 },
+    'bitcoin': { name: "Bit-Limo", symbol: "BTC", price: 45000.00, volatility: 0.05, history: [], lastChange: 0 },
+    'doge': { name: "Doge Limo", symbol: "DOGE", price: 0.15, volatility: 0.10, history: [], lastChange: 0 },
+    'void': { name: "Dark Void", symbol: "VOID", price: 50.00, volatility: 0.25, history: [], lastChange: 0 }
 };
 
 // 2. Markt-Simulation (Preise ändern sich alle 30 Sekunden)
-setInterval(() => {
-    for (let key in CRYPTO_MARKET) {
-        const coin = CRYPTO_MARKET[key];
-        const change = (Math.random() - 0.5) * coin.volatility; // +/- % Änderung
-        let newPrice = coin.price * (1 + change);
-        
-        // Preis darf nicht 0 werden
-        if (newPrice < 0.01) newPrice = 0.01;
-        
-        CRYPTO_MARKET[key].price = parseFloat(newPrice.toFixed(2));
-        CRYPTO_MARKET[key].lastChange = parseFloat((change * 100).toFixed(2)); // Für Anzeige (+5%)
+if (cluster.isPrimary) {
+    setInterval(() => {
+        for (let key in CRYPTO_MARKET) {
+            const coin = CRYPTO_MARKET[key];
+            const change = (Math.random() - 0.5) * coin.volatility; 
+            let newPrice = coin.price * (1 + change);
+            
+            if (newPrice < 0.01) newPrice = 0.01;
+            
+            CRYPTO_MARKET[key].price = parseFloat(newPrice.toFixed(2));
+            CRYPTO_MARKET[key].lastChange = parseFloat((change * 100).toFixed(2)); 
 
-        // NEU: Historie speichern für die Charts!
-        if (!CRYPTO_MARKET[key].history) CRYPTO_MARKET[key].history = [];
-        CRYPTO_MARKET[key].history.push(newPrice);
-        
-        // Nur die letzten 20 Punkte behalten (spart Speicher)
-        if (CRYPTO_MARKET[key].history.length > 20) {
-            CRYPTO_MARKET[key].history.shift();
+            if (!CRYPTO_MARKET[key].history) CRYPTO_MARKET[key].history = [];
+            CRYPTO_MARKET[key].history.push(newPrice);
+            
+            if (CRYPTO_MARKET[key].history.length > 20) {
+                CRYPTO_MARKET[key].history.shift();
+            }
         }
-    }
-}, 30000);
+    }, 30000);
+}
 
 // 3. API: Markt-Daten abrufen (Coins + Portfolio)
 app.get('/api/finance/market', isAuthenticated, async (req, res) => {
@@ -9714,7 +9898,7 @@ app.post('/api/finance/trade', isAuthenticated, async (req, res) => {
     try {
         const { coinId, amount, type } = req.body; // type: 'buy' oder 'sell'
         const qty = parseFloat(amount); // Menge an Coins
-        
+
         if (!CRYPTO_MARKET[coinId]) return res.status(400).json({ error: "Coin existiert nicht." });
         if (qty <= 0) return res.status(400).json({ error: "Ungültige Menge." });
 
@@ -9728,7 +9912,7 @@ app.post('/api/finance/trade', isAuthenticated, async (req, res) => {
 
             await usersCollection.updateOne(
                 { _id: userId },
-                { 
+                {
                     $inc: { balance: -totalCost, [`cryptoWallet.${coinId}`]: qty },
                     $push: { notifications: `📈 KAUF: ${qty} ${CRYPTO_MARKET[coinId].symbol} für $${totalCost.toFixed(0)}` }
                 }
@@ -9740,7 +9924,7 @@ app.post('/api/finance/trade', isAuthenticated, async (req, res) => {
 
             await usersCollection.updateOne(
                 { _id: userId },
-                { 
+                {
                     $inc: { balance: totalCost, [`cryptoWallet.${coinId}`]: -qty },
                     $push: { notifications: `📉 VERKAUF: ${qty} ${CRYPTO_MARKET[coinId].symbol} für $${totalCost.toFixed(0)}` }
                 }
@@ -9801,7 +9985,7 @@ async function drawRandomCard() {
     }
 
     const cardsOfRarity = cachedTeachermonCards.filter(c => c.rarity === selectedRarity);
-    
+
     if (cardsOfRarity.length === 0) {
         const fallbackCards = cachedTeachermonCards.filter(c => c.rarity === "common");
         return fallbackCards[Math.floor(Math.random() * fallbackCards.length)];
@@ -9818,7 +10002,7 @@ app.get('/api/teachermon/album', isAuthenticated, async (req, res) => {
     try {
         // Alle Karten aus der Datenbank holen
         const allCards = await teachermonCardsCollection.find({}).toArray();
-        
+
         // Inventar des Users holen
         const userInventory = await teachermonInvCollection.find({ userId: userId }).toArray();
         const userInvMap = new Map(userInventory.map(item => [item.cardId, item]));
@@ -9867,8 +10051,8 @@ app.post('/api/teachermon/pack/buy', isAuthenticated, async (req, res) => {
             );
         }
 
-        res.json({ 
-            message: "Pack geöffnet!", 
+        res.json({
+            message: "Pack geöffnet!",
             cards: pulledCards,
             newBalance: user.balance - PACK_PRICE
         });
@@ -9881,7 +10065,7 @@ app.post('/api/teachermon/pack/buy', isAuthenticated, async (req, res) => {
 // C. Daily Card Pack (Kostenlos)
 app.post('/api/teachermon/pack/daily', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
-    
+
     try {
         const user = await usersCollection.findOne({ _id: userId });
         const now = new Date();
@@ -9918,7 +10102,7 @@ app.post('/api/teachermon/sell', isAuthenticated, async (req, res) => {
 
     try {
         const invItem = await teachermonInvCollection.findOne({ userId: userId, cardId: cardId });
-        
+
         if (!invItem || invItem.quantity <= 1) {
             return res.status(400).json({ error: "Du hast keine doppelten Exemplare dieser Karte im Inventar." });
         }
@@ -9934,9 +10118,9 @@ app.post('/api/teachermon/sell', isAuthenticated, async (req, res) => {
         await teachermonInvCollection.updateOne({ _id: invItem._id }, { $set: { quantity: 1 } });
         await usersCollection.updateOne({ _id: userId }, { $inc: { balance: totalSellPrice } });
 
-        res.json({ 
-            message: `${excess}x Karte für insgesamt $${totalSellPrice} verkauft!`, 
-            earned: totalSellPrice 
+        res.json({
+            message: `${excess}x Karte für insgesamt $${totalSellPrice} verkauft!`,
+            earned: totalSellPrice
         });
 
     } catch (e) {
@@ -9947,11 +10131,11 @@ app.post('/api/teachermon/sell', isAuthenticated, async (req, res) => {
 // D2. MASSEN-VERKAUF: Alle doppelten Karten im gesamten Inventar verkaufen
 app.post('/api/teachermon/sell-all', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
-    
+
     try {
         // Hole alle Karten, die man mehr als 1x hat
         const dupes = await teachermonInvCollection.find({ userId: userId, quantity: { $gt: 1 } }).toArray();
-        
+
         if (dupes.length === 0) {
             return res.status(400).json({ error: "Du hast aktuell keine doppelten Karten." });
         }
@@ -9970,7 +10154,7 @@ app.post('/api/teachermon/sell-all', isAuthenticated, async (req, res) => {
             if (card) {
                 const excess = item.quantity - 1;
                 const pricePerCard = TEACHERMON_RARITIES[card.rarity].sellPrice;
-                
+
                 totalEarned += (excess * pricePerCard);
                 totalSold += excess;
 
@@ -9990,9 +10174,9 @@ app.post('/api/teachermon/sell-all', isAuthenticated, async (req, res) => {
             await usersCollection.updateOne({ _id: userId }, { $inc: { balance: totalEarned } });
         }
 
-        res.json({ 
-            message: `Massenverkauf! ${totalSold} doppelte Karten für $${totalEarned} verkauft!`, 
-            earned: totalEarned 
+        res.json({
+            message: `Massenverkauf! ${totalSold} doppelte Karten für $${totalEarned} verkauft!`,
+            earned: totalEarned
         });
 
     } catch (e) {
@@ -10004,9 +10188,9 @@ app.post('/api/teachermon/sell-all', isAuthenticated, async (req, res) => {
 // E. Admin: Neue Karte hinzufügen
 app.post('/api/teachermon/admin/cards', isAuthenticated, isAdmin, async (req, res) => {
     const { name, rarity, kalterKaffee, skills, gequaelt, intelligenz, img } = req.body;
-    
+
     if (!name || !rarity || !img) return res.status(400).json({ error: "Name, Rarität und Bild/Emoji fehlen." });
-    
+
     try {
         const newId = 't_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
         const newCard = {
@@ -10021,11 +10205,15 @@ app.post('/api/teachermon/admin/cards', isAuthenticated, isAdmin, async (req, re
         };
 
         await teachermonCardsCollection.insertOne(newCard);
-        
-        // CACHE LEEREN: Damit beim nächsten Kauf die neue Karte verfügbar ist
-        cachedTeachermonCards = null; 
-        
+
+        // CACHE LEEREN & ANDERE WORKER INFORMIEREN
+        cachedTeachermonCards = null;
+        if (global.redisPub) {
+            global.redisPub.publish('sync-teachermon-cache', 'update');
+        }
+
         res.status(201).json({ message: "Neue Karte erfolgreich zum Spiel hinzugefügt!", card: newCard });
+
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Erstellen der Karte." });
     }
@@ -10113,7 +10301,7 @@ app.post('/api/teachermon/trades/accept/:tradeId', isAuthenticated, async (req, 
             await teachermonInvCollection.updateOne({ userId: acceptorId, cardId: trade.offerCardId }, { $inc: { quantity: 1 } }, { upsert: true, session });
             // 3. Dem Ersteller die Want-Karte geben (Offer-Karte wurde ja bei Erstellung schon abgezogen)
             await teachermonInvCollection.updateOne({ userId: trade.offererId, cardId: trade.wantCardId }, { $inc: { quantity: 1 } }, { upsert: true, session });
-            
+
             // 4. Trade löschen
             await teachermonTradesCollection.deleteOne({ _id: trade._id }, { session });
         });
@@ -10135,9 +10323,9 @@ app.delete('/api/teachermon/trades/:tradeId', isAuthenticated, async (req, res) 
         await session.withTransaction(async () => {
             const trade = await teachermonTradesCollection.findOne({ _id: tradeId }, { session });
             if (!trade) throw new Error("Angebot nicht gefunden.");
-            
+
             // Nur der Ersteller (oder Admin) darf abbrechen
-            const user = await usersCollection.findOne({_id: userId}, {session});
+            const user = await usersCollection.findOne({ _id: userId }, { session });
             if (!trade.offererId.equals(userId) && !user.isAdmin) {
                 throw new Error("Nicht deine Rechte.");
             }
@@ -10196,7 +10384,7 @@ app.post('/api/teachermon/pack/buy-multi', isAuthenticated, async (req, res) => 
 app.delete('/api/teachermon/admin/cards/:id', isAuthenticated, isAdmin, async (req, res) => {
     const cardIdStr = req.params.id;
     const session = client.startSession();
-    
+
     try {
         await session.withTransaction(async () => {
             const card = await teachermonCardsCollection.findOne({ id: cardIdStr }, { session });
@@ -10221,8 +10409,8 @@ app.delete('/api/teachermon/admin/cards/:id', isAuthenticated, isAdmin, async (r
 
             await teachermonInvCollection.deleteMany({ cardId: cardIdStr }, { session });
 
-            const affectedTrades = await teachermonTradesCollection.find({ 
-                $or: [{ offerCardId: cardIdStr }, { wantCardId: cardIdStr }] 
+            const affectedTrades = await teachermonTradesCollection.find({
+                $or: [{ offerCardId: cardIdStr }, { wantCardId: cardIdStr }]
             }, { session }).toArray();
 
             for (const trade of affectedTrades) {
@@ -10230,22 +10418,25 @@ app.delete('/api/teachermon/admin/cards/:id', isAuthenticated, isAdmin, async (r
                     await usersCollection.updateOne({ _id: trade.offererId }, { $inc: { balance: sellPrice } }, { session });
                 } else {
                     await teachermonInvCollection.updateOne(
-                        { userId: trade.offererId, cardId: trade.offerCardId }, 
-                        { $inc: { quantity: 1 } }, 
+                        { userId: trade.offererId, cardId: trade.offerCardId },
+                        { $inc: { quantity: 1 } },
                         { upsert: true, session }
                     );
                 }
             }
-            
+
             await teachermonTradesCollection.deleteMany({
-                $or: [{ offerCardId: cardIdStr }, { wantCardId: cardIdStr }] 
+                $or: [{ offerCardId: cardIdStr }, { wantCardId: cardIdStr }]
             }, { session });
 
             await teachermonCardsCollection.deleteOne({ id: cardIdStr }, { session });
         });
 
-        // CACHE LEEREN: Damit die gelöschte Karte nicht mehr gezogen werden kann
+        // CACHE LEEREN & ANDERE WORKER INFORMIEREN
         cachedTeachermonCards = null;
+        if (global.redisPub) {
+            global.redisPub.publish('sync-teachermon-cache', 'update');
+        }
 
         res.json({ message: "Karte vernichtet! Alle Besitzer wurden finanziell entschädigt." });
     } catch (e) {
@@ -10352,7 +10543,7 @@ app.post('/api/teachermon/battles/accept/:id', isAuthenticated, async (req, res)
                 winnerId = userId;
                 isWinner = true;
                 resultMessage = `GEWONNEN! Dein ${acceptorCard.name} (${val2}) schlägt ${challengerCard.name} (${val1}). Du erhältst beide Karten!`;
-                
+
                 // Beide Karten an Annehmenden
                 await teachermonInvCollection.updateOne({ userId, cardId: acceptorCard.id }, { $inc: { quantity: 1 } }, { upsert: true, session });
                 await teachermonInvCollection.updateOne({ userId, cardId: challengerCard.id }, { $inc: { quantity: 1 } }, { upsert: true, session });
@@ -10361,7 +10552,7 @@ app.post('/api/teachermon/battles/accept/:id', isAuthenticated, async (req, res)
                 winnerId = battle.challengerId;
                 isWinner = false;
                 resultMessage = `VERLOREN! Dein ${acceptorCard.name} (${val2}) unterliegt ${challengerCard.name} (${val1}). Deine Karte ist weg!`;
-                
+
                 // Beide Karten an Herausforderer
                 await teachermonInvCollection.updateOne({ userId: battle.challengerId, cardId: challengerCard.id }, { $inc: { quantity: 1 } }, { upsert: true, session });
                 await teachermonInvCollection.updateOne({ userId: battle.challengerId, cardId: acceptorCard.id }, { $inc: { quantity: 1 } }, { upsert: true, session });
