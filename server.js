@@ -9966,10 +9966,19 @@ async function seedTeachermonCards() {
 }
 
 // Hilfsfunktion: Karte ziehen basierend auf Wahrscheinlichkeit
-async function drawRandomCard() {
+async function drawRandomCard(requestedUniverse = 'teachermon') {
     // Nur einmal aus der DB laden und cachen
     if (!cachedTeachermonCards) {
         cachedTeachermonCards = await teachermonCardsCollection.find({}).toArray();
+    }
+
+    // WICHTIG: Filtere den Cache nach dem gewünschten Universum!
+    const universeCards = cachedTeachermonCards.filter(c => (c.universe || 'teachermon') === requestedUniverse);
+    
+    // Fallback, falls das Universum leer ist (damit der Server nicht crasht)
+    if (universeCards.length === 0) {
+        console.warn(`Universum ${requestedUniverse} ist leer. Falle auf teachermon zurück.`);
+        return drawRandomCard('teachermon');
     }
 
     const rand = Math.random();
@@ -9984,10 +9993,10 @@ async function drawRandomCard() {
         }
     }
 
-    const cardsOfRarity = cachedTeachermonCards.filter(c => c.rarity === selectedRarity);
+    const cardsOfRarity = universeCards.filter(c => c.rarity === selectedRarity);
 
     if (cardsOfRarity.length === 0) {
-        const fallbackCards = cachedTeachermonCards.filter(c => c.rarity === "common");
+        const fallbackCards = universeCards.filter(c => c.rarity === "common");
         return fallbackCards[Math.floor(Math.random() * fallbackCards.length)];
     }
 
@@ -10023,10 +10032,11 @@ app.get('/api/teachermon/album', isAuthenticated, async (req, res) => {
     }
 });
 
-// B. Karten-Pack öffnen (Kaufen)
 app.post('/api/teachermon/pack/buy', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
-    const PACK_PRICE = 250; // Preis für ein Pack anpassen!
+    const { universe } = req.body; // <--- NEU
+    const selectedUniverse = universe || 'teachermon'; // Fallback
+    const PACK_PRICE = 250; 
 
     try {
         const user = await usersCollection.findOne({ _id: userId });
@@ -10034,16 +10044,13 @@ app.post('/api/teachermon/pack/buy', isAuthenticated, async (req, res) => {
             return res.status(400).json({ error: `Ein Pack kostet $${PACK_PRICE}. Du bist zu arm!` });
         }
 
-        // Geld abziehen
         await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -PACK_PRICE } });
 
-        // 3 Karten pro Pack generieren
         const pulledCards = [];
         for (let i = 0; i < 3; i++) {
-            const card = await drawRandomCard();
+            const card = await drawRandomCard(selectedUniverse); // <--- HIER übergeben
             pulledCards.push(card);
 
-            // Ins Inventar einfügen (oder Anzahl erhöhen)
             await teachermonInvCollection.updateOne(
                 { userId: userId, cardId: card.id },
                 { $inc: { quantity: 1 } },
@@ -10187,22 +10194,38 @@ app.post('/api/teachermon/sell-all', isAuthenticated, async (req, res) => {
 
 // E. Admin: Neue Karte hinzufügen
 app.post('/api/teachermon/admin/cards', isAuthenticated, isAdmin, async (req, res) => {
-    const { name, rarity, kalterKaffee, skills, gequaelt, intelligenz, img } = req.body;
+    // NEU: cardType, universe und stats (als Objekt für dynamische Werte) hinzugefügt
+    const { name, rarity, cardType, universe, stats, kalterKaffee, skills, gequaelt, intelligenz, img, effectText } = req.body;
 
     if (!name || !rarity || !img) return res.status(400).json({ error: "Name, Rarität und Bild/Emoji fehlen." });
 
     try {
-        const newId = 't_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
+        const currentCardType = cardType || 'teacher';
+        const currentUniverse = universe || 'teachermon'; // Standard-Universum
+        
+        const prefix = currentCardType === 'teacher' ? 't_' : 'u_';
+        const newId = prefix + Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
+        
         const newCard = {
             id: newId,
             name: name.trim(),
-            rarity,
-            kalterKaffee: parseInt(kalterKaffee) || 0,
-            skills: skills.trim() || "-",
-            gequaelt: parseInt(gequaelt) || 0,
-            intelligenz: parseInt(intelligenz) || 0,
+            rarity: rarity,
+            cardType: currentCardType, // z.B. 'teacher', 'character', 'item'
+            universe: currentUniverse, // z.B. 'teachermon', 'family_guy'
+            effectText: effectText || null,
+            skills: skills?.trim() || "-",
             img: img.trim()
         };
+
+        // Werte zuweisen (Abwärtskompatibilität für Teachermon + flexibel für Neues)
+        if (currentUniverse === 'teachermon') {
+            newCard.kalterKaffee = parseInt(kalterKaffee) || 0;
+            newCard.gequaelt = parseInt(gequaelt) || 0;
+            newCard.intelligenz = parseInt(intelligenz) || 0;
+        } else {
+            // Speichert dynamische Werte z.B. { "humor": 90, "einfluss": 50 }
+            newCard.customStats = typeof stats === 'object' ? stats : {};
+        }
 
         await teachermonCardsCollection.insertOne(newCard);
 
@@ -10212,7 +10235,7 @@ app.post('/api/teachermon/admin/cards', isAuthenticated, isAdmin, async (req, re
             global.redisPub.publish('sync-teachermon-cache', 'update');
         }
 
-        res.status(201).json({ message: "Neue Karte erfolgreich zum Spiel hinzugefügt!", card: newCard });
+        res.status(201).json({ message: `Neue Karte in Universum '${currentUniverse}' erstellt!`, card: newCard });
 
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Erstellen der Karte." });
@@ -10346,6 +10369,9 @@ app.delete('/api/teachermon/trades/:tradeId', isAuthenticated, async (req, res) 
 // C2. 10x Karten-Pack kaufen
 app.post('/api/teachermon/pack/buy-multi', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
+    const { universe } = req.body; // Das Universum aus dem Frontend holen
+    const selectedUniverse = universe || 'teachermon'; // Fallback
+    
     const PACK_PRICE = 250;
     const MULTIPLIER = 10;
     const TOTAL_COST = PACK_PRICE * MULTIPLIER;
@@ -10354,15 +10380,17 @@ app.post('/api/teachermon/pack/buy-multi', isAuthenticated, async (req, res) => 
         const user = await usersCollection.findOne({ _id: userId });
         if (user.balance < TOTAL_COST) return res.status(400).json({ error: `10 Packs kosten $${TOTAL_COST}.` });
 
+        // Geld abziehen
         await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -TOTAL_COST } });
 
         const pulledCards = [];
         const bulkOps = [];
 
-        // 30 Karten generieren (10 Packs a 3 Karten)
+        // 30 Karten generieren (10 Packs a 3 Karten) aus dem gewählten Universum
         for (let i = 0; i < (3 * MULTIPLIER); i++) {
-            const card = await drawRandomCard();
+            const card = await drawRandomCard(selectedUniverse); // Hier wird das Universum übergeben
             pulledCards.push(card);
+            
             bulkOps.push({
                 updateOne: {
                     filter: { userId: userId, cardId: card.id },
@@ -10372,10 +10400,16 @@ app.post('/api/teachermon/pack/buy-multi', isAuthenticated, async (req, res) => 
             });
         }
 
+        // BulkWrite für Performance
         if (bulkOps.length > 0) await teachermonInvCollection.bulkWrite(bulkOps);
 
-        res.json({ message: "10 Packs geöffnet!", cards: pulledCards, newBalance: user.balance - TOTAL_COST });
+        res.json({ 
+            message: `10 Packs geöffnet!`, 
+            cards: pulledCards, 
+            newBalance: user.balance - TOTAL_COST 
+        });
     } catch (e) {
+        console.error(`${LOG_PREFIX_TEACHERMON} Fehler beim Massen-Öffnen:`, e);
         res.status(500).json({ error: "Fehler beim Massen-Öffnen." });
     }
 });
@@ -10455,9 +10489,6 @@ app.post('/api/teachermon/battles/create', isAuthenticated, async (req, res) => 
     const { cardId, stat } = req.body;
     const userId = new ObjectId(req.session.userId);
 
-    const validStats = ['kalterKaffee', 'gequaelt', 'intelligenz'];
-    if (!validStats.includes(stat)) return res.status(400).json({ error: "Ungültiger Stat." });
-
     const session = client.startSession();
     try {
         await session.withTransaction(async () => {
@@ -10467,22 +10498,43 @@ app.post('/api/teachermon/battles/create', isAuthenticated, async (req, res) => 
                 throw new Error("Du besitzt diese Karte nicht.");
             }
 
-            // 2. Karte als Einsatz abziehen (Einsatz!)
+            // 2. Kartendetails holen für Typ & Universum
+            const cardDetails = await teachermonCardsCollection.findOne({ id: cardId }, { session });
+            if (!cardDetails) throw new Error("Karte existiert nicht in der Datenbank.");
+            
+            const type = cardDetails.cardType || 'teacher';
+            if (type === 'item' || type === 'event') {
+                throw new Error("Sonderkarten können nicht in der Arena kämpfen!");
+            }
+
+            const universe = cardDetails.universe || 'teachermon';
+
+            // 3. Stat validieren je nach Universum
+            if (universe === 'teachermon') {
+                const validStats = ['kalterKaffee', 'gequaelt', 'intelligenz'];
+                if (!validStats.includes(stat)) throw new Error("Ungültiger Stat für Teachermon.");
+            } else {
+                // Prüfen ob der geforderte Stat in den customStats dieser Karte existiert
+                if (!cardDetails.customStats || typeof cardDetails.customStats[stat] === 'undefined') {
+                    throw new Error(`Ungültiger Stat '${stat}' für das Universum '${universe}'.`);
+                }
+            }
+
+            // 4. Karte als Einsatz abziehen
             await teachermonInvCollection.updateOne(
                 { _id: invItem._id },
                 { $inc: { quantity: -1 } },
                 { session }
             );
-
-            // 3. Wenn quantity auf 0 fällt, löschen, damit sie im Album ausgraut
             await teachermonInvCollection.deleteMany({ userId, quantity: { $lte: 0 } }, { session });
 
-            // 4. Kampf erstellen
+            // 5. Kampf erstellen
             await teachermonBattlesCollection.insertOne({
                 challengerId: userId,
                 challengerUsername: req.session.username,
                 challengerCardId: cardId,
                 stat: stat,
+                universe: universe, // WICHTIG: Kampf ist auf dieses Universum gelockt!
                 status: 'open',
                 createdAt: new Date()
             }, { session });
@@ -10506,7 +10558,7 @@ app.get('/api/teachermon/battles', isAuthenticated, async (req, res) => {
 // L. Arena: Herausforderung annehmen & Auswerten!
 app.post('/api/teachermon/battles/accept/:id', isAuthenticated, async (req, res) => {
     const battleId = new ObjectId(req.params.id);
-    const { cardId } = req.body; // Die Karte des Herausgeforderten
+    const { cardId } = req.body; 
     const userId = new ObjectId(req.session.userId);
 
     const session = client.startSession();
@@ -10523,48 +10575,63 @@ app.post('/api/teachermon/battles/accept/:id', isAuthenticated, async (req, res)
             const invItem = await teachermonInvCollection.findOne({ userId, cardId }, { session });
             if (!invItem || invItem.quantity < 1) throw new Error("Du besitzt diese Karte nicht.");
 
-            // 2. Karte abziehen
+            // 2. Kartendetails des Annehmenden holen
+            const acceptorCard = await teachermonCardsCollection.findOne({ id: cardId }, { session });
+            if (!acceptorCard) throw new Error("Karte existiert nicht.");
+            
+            const acceptorUniverse = acceptorCard.universe || 'teachermon';
+            
+            // WICHTIG: Cross-Universe Kämpfe blockieren!
+            if (acceptorUniverse !== battle.universe) {
+                throw new Error(`Dieser Kampf ist nur für Karten aus dem Universum '${battle.universe}'. Deine Karte ist aus '${acceptorUniverse}'.`);
+            }
+
+            // 3. Karte abziehen
             await teachermonInvCollection.updateOne({ _id: invItem._id }, { $inc: { quantity: -1 } }, { session });
             await teachermonInvCollection.deleteMany({ userId, quantity: { $lte: 0 } }, { session });
 
-            // 3. KARTEN VERGLEICHEN
+            // 4. KARTEN VERGLEICHEN
             const challengerCard = await teachermonCardsCollection.findOne({ id: battle.challengerCardId }, { session });
-            const acceptorCard = await teachermonCardsCollection.findOne({ id: cardId }, { session });
-
             const statToCompare = battle.stat;
-            const val1 = challengerCard[statToCompare] || 0;
-            const val2 = acceptorCard[statToCompare] || 0;
+
+            let val1 = 0; // Herausforderer
+            let val2 = 0; // Annehmender
+
+            if (battle.universe === 'teachermon') {
+                val1 = challengerCard[statToCompare] || 0;
+                val2 = acceptorCard[statToCompare] || 0;
+            } else {
+                // Dynamische Werte lesen
+                val1 = (challengerCard.customStats && challengerCard.customStats[statToCompare]) || 0;
+                val2 = (acceptorCard.customStats && acceptorCard.customStats[statToCompare]) || 0;
+            }
 
             let winnerId = null;
 
             // Logik: Höherer Wert gewinnt
             if (val2 > val1) {
-                // ANNEHMENDER GEWINNT
                 winnerId = userId;
                 isWinner = true;
                 resultMessage = `GEWONNEN! Dein ${acceptorCard.name} (${val2}) schlägt ${challengerCard.name} (${val1}). Du erhältst beide Karten!`;
 
-                // Beide Karten an Annehmenden
                 await teachermonInvCollection.updateOne({ userId, cardId: acceptorCard.id }, { $inc: { quantity: 1 } }, { upsert: true, session });
                 await teachermonInvCollection.updateOne({ userId, cardId: challengerCard.id }, { $inc: { quantity: 1 } }, { upsert: true, session });
             } else if (val1 > val2) {
-                // HERAUSFORDERER GEWINNT
                 winnerId = battle.challengerId;
                 isWinner = false;
                 resultMessage = `VERLOREN! Dein ${acceptorCard.name} (${val2}) unterliegt ${challengerCard.name} (${val1}). Deine Karte ist weg!`;
 
-                // Beide Karten an Herausforderer
                 await teachermonInvCollection.updateOne({ userId: battle.challengerId, cardId: challengerCard.id }, { $inc: { quantity: 1 } }, { upsert: true, session });
                 await teachermonInvCollection.updateOne({ userId: battle.challengerId, cardId: acceptorCard.id }, { $inc: { quantity: 1 } }, { upsert: true, session });
             } else {
-                // UNENTSCHIEDEN -> Beide bekommen ihre Karte zurück
                 isWinner = false;
                 resultMessage = `UNENTSCHIEDEN! Beide haben ${val1}. Jeder behält seine Karte.`;
+                
                 await teachermonInvCollection.updateOne({ userId: battle.challengerId, cardId: challengerCard.id }, { $inc: { quantity: 1 } }, { upsert: true, session });
                 await teachermonInvCollection.updateOne({ userId, cardId: acceptorCard.id }, { $inc: { quantity: 1 } }, { upsert: true, session });
             }
 
-            // 4. Kampf schließen
+            // 5. Kampf schließen
             await teachermonBattlesCollection.updateOne(
                 { _id: battleId },
                 { $set: { status: 'resolved', acceptorId: userId, acceptorUsername: req.session.username, acceptorCardId: cardId, winnerId: winnerId, resolvedAt: new Date() } },
