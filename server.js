@@ -6032,9 +6032,11 @@ function updateDataVersion(key) {
 }
 
 // Der Endpoint, den das Frontend alle paar Sekunden fragt
-// Antwort ist winzig (< 1KB), spart massiv Bandbreite!
 app.get('/api/status/versions', (req, res) => {
-    res.json(dataVersions);
+    res.json({
+        ...dataVersions,
+        workerPid: process.pid
+    });
 });
 
 // =========================================================
