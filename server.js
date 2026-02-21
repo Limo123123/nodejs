@@ -4929,16 +4929,16 @@ async function getLastNewsTime(update = false) {
     return lastRun;
 }
 
-// Hauptfunktion: Kontext sammeln (VIELE DATENQUELLEN & ZEITFILTER)
+// Hauptfunktion: Kontext sammeln
 async function gatherSmartNewsContext(lastRun) {
     console.log(`${LOG_PREFIX_SERVER} [LNN] Sammle Daten seit: ${lastRun.toLocaleTimeString()}`);
 
-    // 1. Don't Blame Me (Nur NEUE Posts)
+    // 1. Don't Blame Me (Beichten)
     const newConfessions = await dontBlameMeCollection.find({
         createdAt: { $gt: lastRun }
     }).limit(3).toArray();
 
-    // 2. Shop / Economy (Große Käufe)
+    // 2. Shop / Wirtschaft (Große Käufe)
     const bigOrders = await ordersCollection.find({
         date: { $gt: lastRun },
         total: { $gt: 500 }
@@ -4953,139 +4953,99 @@ async function gatherSmartNewsContext(lastRun) {
         }).sort({ amountLost: -1 }).limit(2).toArray();
     }
 
-    // 4. Auktionen (Beendete Auktionen)
+    // 4. Auktionen (Verkäufe)
     const endedAuctions = await auctionsCollection.find({
         status: 'ended_sold',
         endTime: { $gt: lastRun }
     }).sort({ currentBid: -1 }).limit(1).toArray();
 
-    // 5. Tinda Matches
+    // 5. Tinda (Matches)
     const tindaMatches = await limChatsCollection.countDocuments({
         type: 'tinda',
         createdAt: { $gt: lastRun }
     });
 
-    // 6. STONKS FIX: Suche nur nach Aktien, die sich in den LETZTEN MINUTEN stark verändert haben!
-    let volatileStockContext = null;
-    try {
-        // Wir holen alle normalen Aktien
-        const allStocks = await productsCollection.find({ isTokenCard: { $ne: true } }).toArray();
-        let maxPercentChange = 0;
+    // 6. Neu: Heist Status (Falls die Firewall gerade gefallen ist)
+    const firewall = await systemSettingsCollection.findOne({ id: 'heist_firewall' });
+    const heistOpen = firewall && firewall.integrity <= 0 && Date.now() < firewall.openUntil;
 
-        for (const stock of allStocks) {
-            // Wir brauchen eine Historie, um einen Trend zu erkennen
-            if (!stock.priceHistory || stock.priceHistory.length < 2) continue;
-
-            // Vergleich: Aktueller Preis vs. Ältester Preis in der Historie (max. 30 Min alt)
-            const currentPrice = stock.priceHistory[stock.priceHistory.length - 1].price;
-            const oldestPrice = stock.priceHistory[0].price;
-
-            // Prozentuale Veränderung im letzten Intervall berechnen
-            const percentChange = Math.abs((currentPrice - oldestPrice) / oldestPrice) * 100;
-
-            // Nur interessant, wenn die Aktie sich um mehr als 5% bewegt hat!
-            if (percentChange > 5 && percentChange > maxPercentChange) {
-                maxPercentChange = percentChange;
-                const direction = currentPrice > oldestPrice ? "gestiegen 📈" : "gefallen 📉";
-                volatileStockContext = `- Börse: Die Aktie "${stock.name}" ist in den letzten 30 Minuten extrem volatil! Sie ist um ${percentChange.toFixed(1)}% ${direction} auf $${currentPrice.toFixed(2)}.`;
-            }
-        }
-    } catch (e) { console.error("Stock News Error:", e); }
-
-
-    // --- ZUSAMMENBAU DES KONTEXTS FÜR DIE KI ---
+    // --- KONTEXT BAUEN (Ohne Aktien!) ---
     let contextParts = [];
 
     if (newConfessions.length > 0) {
-        const texts = newConfessions.map(c => `"${c.reason}"`).join(", ");
-        contextParts.push(`- Gerüchteküche ('Don't Blame Me'): Neue Beichten: ${texts}.`);
+        const texts = newConfessions.map(c => `"${c.reason}" (von ${c.username})`).join(", ");
+        contextParts.push(`- Beichten: Neue schmutzige Geheimnisse: ${texts}.`);
     }
 
     if (bigOrders.length > 0) {
-        const buyers = bigOrders.map(o => `${o.username} ($${o.total.toFixed(0)})`).join(", ");
-        contextParts.push(`- Wirtschaft: Der Konsum brummt! Große Einkäufe von: ${buyers}.`);
+        const buyers = bigOrders.map(o => `${o.username} hat heftig geshoppt ($${o.total.toFixed(0)})`).join(", ");
+        contextParts.push(`- Konsum: Diese User lassen das Geld fließen: ${buyers}.`);
     }
 
     if (crimeNews.length > 0) {
         const heist = crimeNews[0];
-        contextParts.push(`- BLAULICHT: Ein Überfall fand statt! ${heist.attackerName} hat $${heist.amountLost.toFixed(2)} von einem Opfer erbeutet.`);
+        contextParts.push(`- Kriminalität: ${heist.attackerName} hat erfolgreich zugeschlagen und $${heist.amountLost.toFixed(2)} erbeutet!`);
     }
 
     if (endedAuctions.length > 0) {
         const auc = endedAuctions[0];
-        contextParts.push(`- Auktionshaus: "${auc.productName}" wurde für sagenhafte $${auc.currentBid} an ${auc.highestBidderUsername} versteigert.`);
+        contextParts.push(`- Auktion: "${auc.productName}" ging für kranke $${auc.currentBid} an ${auc.highestBidderUsername}.`);
     }
 
     if (tindaMatches > 0) {
-        contextParts.push(`- Liebe liegt in der Luft: Es gab ${tindaMatches} neue Tinda-Matches!`);
+        contextParts.push(`- Dating: Es gab ${tindaMatches} neue Matches auf Tinda. Limazon wird wieder horny.`);
     }
 
-    // Die Börsen-News nur einfügen, wenn es WIRKLICH eine Änderung gab
-    if (volatileStockContext) {
-        contextParts.push(volatileStockContext);
+    if (heistOpen) {
+        contextParts.push(`- EILMELDUNG: Die Firewall der Staatskasse ist momentan deaktiviert! Diebstahl für alle!`);
     }
 
-    // Wenn NICHTS passiert ist -> null
-    if (contextParts.length === 0) {
-        return null;
-    }
+    if (contextParts.length === 0) return null;
 
     return contextParts.join("\n");
 }
 
 // Hauptfunktion: News generieren
 async function generateAiNews(force = false) {
-    if (!GEMINI_API_KEY) {
-        console.warn(`${LOG_PREFIX_SERVER} [LNN] Kein Gemini API Key gefunden.`);
-        return;
-    }
+    if (!GEMINI_API_KEY) return;
 
-    // 1. Zeitfenster bestimmen (Wann liefen wir zuletzt?)
     const lastRun = await getLastNewsTime();
-
-    // 2. Daten sammeln (Nur Dinge, die NACH lastRun passiert sind)
     const contextData = await gatherSmartNewsContext(lastRun);
 
-    // ABBRUCHBEDINGUNG: Wenn keine neuen Daten da sind, nicht posten!
     if (!contextData && !force) {
-        console.log(`${LOG_PREFIX_SERVER} [LNN] Nichts Neues passiert. Bot hält den Mund.`);
-        // Zeitstempel wird NICHT aktualisiert, damit Daten sich für den nächsten Lauf weiter ansammeln.
+        console.log(`${LOG_PREFIX_SERVER} [LNN] Nichts Relevantes passiert.`);
         return null;
     }
 
-    // Wir holen die Headline der LETZTEN News aus der DB, damit die KI sich nicht wiederholt
     let lastHeadline = "Keine";
     try {
         const lastNews = await newsCollection.find().sort({ createdAt: -1 }).limit(1).toArray();
         if (lastNews.length > 0) lastHeadline = lastNews[0].headline;
     } catch (e) { }
 
-    const promptData = contextData || "Es ist gerade sehr ruhig in Limazon. Die Bank hat geöffnet, die Vögel zwitschern.";
+    const promptData = contextData || "Es ist verdächtig ruhig. Die User planen wohl gerade den nächsten großen Coup.";
 
-    console.log(`${LOG_PREFIX_SERVER} [LNN] Generiere News mit Kontext...`);
-
-    const modelName = "gemini-2.5-flash";
+    const modelName = "gemini-2.0-flash"; // Nutze das aktuellste Modell
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
 
-    // NEUER PROMPT: Zwingt die KI, NICHT das Gleiche wie beim letzten Mal zu schreiben
     const prompt = `
-    Du bist der sarkastische Chefredakteur des "Limo News Network" (LNN).
-    Hier sind die frischen Fakten aus unserer Community:
+    Du bist der zynische und leicht soziopathische Chefredakteur des "Limo News Network" (LNN). 
+    Dein Job ist es, das Leben der User in Limazon durch den Dreck zu ziehen oder Helden zu feiern.
+
+    EVENTS DER LETZTEN STUNDE:
     ${promptData}
 
-    WICHTIG: Die LETZTE Schlagzeile war "${lastHeadline}". 
-    Regel 1: Wiederhole DIESES THEMA NICHT! Such dir einen ANDEREN Fakt aus der Liste oben aus.
-    Regel 2: Wenn es nur um Börse geht, fokussiere dich auf ein anderes Detail als beim letzten Mal.
-    
-    AUFGABE:
-    Schreibe EINEN kurzen, reißerischen Zeitungsartikel (max. 40-50 Wörter).
-    Stil: Boulevard-Presse, dramatisch, witzig, sarkastisch.
-    Erwähne Usernamen.
-    
-    Antworte NUR im JSON-Format:
+    WICHTIGE REGELN:
+    1. Erwähne NIEMALS Aktien, Kurse, Stonks oder die Börse. Das ist langweilig und verboten.
+    2. Konzentriere dich auf Beichten, Raubüberfälle, Dating-Drama oder Reichtum einzelner User.
+    3. Sei extrem sarkastisch, humorvoll und reißerisch (Boulevard-Stil).
+    4. Die letzte Schlagzeile war "${lastHeadline}". Wiederhole dich nicht!
+    5. Länge: Max. 45 Wörter.
+
+    Antworte NUR als JSON:
     {
-      "headline": "Deine krasse Schlagzeile",
-      "content": "Dein Artikeltext"
+      "headline": "Reißerische Headline",
+      "content": "Sarkastischer Artikeltext"
     }
     `;
 
@@ -5094,22 +5054,13 @@ async function generateAiNews(force = false) {
             contents: [{ parts: [{ text: prompt }] }]
         });
 
-        if (!response.data || !response.data.candidates || !response.data.candidates[0]) {
-            throw new Error("Keine Antwort von Gemini.");
-        }
+        if (!response.data || !response.data.candidates[0]) throw new Error("API Error");
 
         let textResponse = response.data.candidates[0].content.parts[0].text;
         textResponse = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
 
-        let article;
-        try {
-            article = JSON.parse(textResponse);
-        } catch (jsonErr) {
-            console.warn(`${LOG_PREFIX_SERVER} [LNN] JSON Parse Fehler. Nutze Raw Text.`);
-            article = { headline: "LNN Eilmeldung", content: textResponse };
-        }
+        const article = JSON.parse(textResponse);
 
-        // Speichern
         const newEntry = {
             headline: article.headline,
             content: article.content,
@@ -5118,19 +5069,16 @@ async function generateAiNews(force = false) {
             createdAt: new Date(),
             likes: 0
         };
+
         await newsCollection.insertOne(newEntry);
-
-        // WICHTIG: Zeitstempel JETZT aktualisieren, da erfolgreich gepostet wurde
         await getLastNewsTime(true);
+        updateDataVersion('news');
 
-        // Frontend informieren (Polling Trigger)
-        if (typeof updateDataVersion === 'function') updateDataVersion('news');
-
-        console.log(`${LOG_PREFIX_SERVER} [LNN] News veröffentlicht: "${article.headline}"`);
+        console.log(`${LOG_PREFIX_SERVER} [LNN] News ohne Aktien-Gelaber gepostet: "${article.headline}"`);
         return newEntry;
 
     } catch (apiErr) {
-        console.error(`${LOG_PREFIX_SERVER} [LNN] API Fehler:`, apiErr.message);
+        console.error(`${LOG_PREFIX_SERVER} [LNN] Fehler:`, apiErr.message);
         return null;
     }
 }
