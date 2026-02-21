@@ -10874,25 +10874,50 @@ app.get('/api/lottery/status', isAuthenticated, async (req, res) => {
 app.post('/api/lottery/buy', isAuthenticated, async (req, res) => {
     const { count } = req.body;
     const userId = new ObjectId(req.session.userId);
-    const amount = parseInt(count) || 1;
+    
+    // Sicherheit: Minimum 1, Maximum 100 Lose pro Kauf (um Spam zu vermeiden)
+    const amount = Math.min(Math.max(parseInt(count) || 1, 1), 100); 
     const totalCost = amount * TICKET_PRICE;
 
     try {
         const user = await usersCollection.findOne({ _id: userId });
-        if (user.balance < totalCost) return res.status(400).json({ error: "Zu wenig Geld für Lose!" });
+        if (!user || user.balance < totalCost) {
+            return res.status(400).json({ error: `Zu wenig Geld! ${amount} Lose kosten $${totalCost.toLocaleString()}.` });
+        }
 
-        // 1. Geld abziehen
+        // 1. Lose-Array korrekt erstellen (Jedes Los ist ein eigenes Objekt)
+        const ticketsToInsert = [];
+        for (let i = 0; i < amount; i++) {
+            ticketsToInsert.push({ 
+                userId: userId, 
+                username: user.username, 
+                createdAt: new Date() 
+            });
+        }
+
+        // 2. Transaktion: Geld abziehen & Lose einfügen
         await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -totalCost } });
+        await db.collection('lotteryTickets').insertMany(ticketsToInsert);
 
-        // 2. Lose in die DB (wir speichern jedes Los als einzelnen Eintrag für die Ziehung)
-        const tickets = Array(amount).fill({ userId: userId, username: user.username, createdAt: new Date() });
-        await db.collection('lotteryTickets').insertMany(tickets);
+        // 3. 50% des Ticketpreises wandern in den Jackpot
+        const potContribution = totalCost * 0.5;
+        await systemSettingsCollection.updateOne(
+            { id: 'lottery_state' }, 
+            { $inc: { pot: potContribution } },
+            { upsert: true }
+        );
 
-        // 3. 50% des Ticketpreises wandern AUCH in den Pot
-        await systemSettingsCollection.updateOne({ id: 'lottery_state' }, { $inc: { pot: totalCost * 0.5 } });
+        console.log(`${LOG_PREFIX_SERVER} 🎰 ${user.username} hat ${amount} Lose gekauft.`);
 
-        res.json({ message: `${amount} Lose gekauft!`, newBalance: user.balance - totalCost });
-    } catch (e) { res.status(500).json({ error: "Kauf fehlgeschlagen." }); }
+        res.json({ 
+            success: true,
+            message: `${amount} Lose erfolgreich gekauft!`, 
+            newBalance: user.balance - totalCost 
+        });
+    } catch (e) { 
+        console.error("Lotto Kauf Fehler:", e);
+        res.status(500).json({ error: "Kauf fehlgeschlagen." }); 
+    }
 });
 
 // C. Die Ziehung (Der Master-Job)
