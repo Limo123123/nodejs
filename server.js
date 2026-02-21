@@ -6383,16 +6383,23 @@ app.post('/api/casino/flip', isAuthenticated, async (req, res) => {
             updateFields.$inc["casinoStats.netProfit"] = balanceChange;
 
             message = `Gewonnen! Es war ${resultSide === 'heads' ? 'Kopf' : 'Zahl'}. Du erhältst $${winAmount.toFixed(2)}.`;
-        } else {
-            // VERLUST: Einsatz ist weg.
-            balanceChange = -betAmount;
+        // Innerhalb von app.post('/api/casino/flip', ...) im VERLUST-Fall:
+		} else {
+    		balanceChange = -betAmount;
+    		updateFields.$inc.balance = balanceChange;
+    		updateFields.$inc["casinoStats.losses"] = 1;
+    		updateFields.$inc["casinoStats.netProfit"] = balanceChange;
 
-            updateFields.$inc.balance = balanceChange;
-            updateFields.$inc["casinoStats.losses"] = 1;
-            updateFields.$inc["casinoStats.netProfit"] = balanceChange; // Wird negativ
+    		// --- NEU: GELD IN DEN LOTTO-POT ---
+    		await systemSettingsCollection.updateOne(
+        		{ id: 'lottery_state' },
+        		{ $inc: { pot: betAmount } },
+        		{ upsert: true }
+    		);
+    		// ----------------------------------
 
-            message = `Verloren! Es war ${resultSide === 'heads' ? 'Kopf' : 'Zahl'}. Dein Einsatz von $${betAmount.toFixed(2)} ist weg.`;
-        }
+    		message = `Verloren! Dein Einsatz von $${betAmount.toFixed(2)} floss in den wöchentlichen Lotto-Pot!`;
+		}
 
         // DB Update durchführen
         await usersCollection.updateOne({ _id: userId }, updateFields);
@@ -10798,16 +10805,16 @@ app.post('/api/bounty/place', isAuthenticated, async (req, res) => {
 
     try {
         const user = await usersCollection.findOne({ _id: userId });
-        if (user.balance < bountyAmount) return res.status(400).json({ error: "Nicht genug Geld." });
+        if (user.balance < bountyAmount) return res.status(400).json({ error: "Nicht genug Geld auf dem Konto." });
 
         const targetIdObj = new ObjectId(targetUserId);
         const targetUser = await usersCollection.findOne({ _id: targetIdObj });
         if (!targetUser) return res.status(404).json({ error: "Zielperson existiert nicht." });
 
-        // A. Geld vom Konto abziehen
+        // 1. Geld abziehen
         await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -bountyAmount } });
 
-        // B. Kopfgeld-Pool aktualisieren
+        // 2. Kopfgeld in der DB speichern/erhöhen
         await db.collection('bounties').updateOne(
             { targetUserId: targetIdObj },
             { 
@@ -10817,13 +10824,144 @@ app.post('/api/bounty/place', isAuthenticated, async (req, res) => {
             { upsert: true }
         );
 
+        // --- LNN TRIGGER: AUTOMATISCHE NEWS BEI HOHEM KOPFGELD ---
+        // Wenn das Gesamtkopfgeld jetzt über $10.000 ist, gibt es eine Meldung
+        const currentBounty = await db.collection('bounties').findOne({ targetUserId: targetIdObj });
+        
+        if (currentBounty.pool >= 10000) {
+            await newsCollection.insertOne({
+                headline: "FAHNDUNG AUSGEGEBEN! 📢",
+                content: `Ein anonymes Opfer hat ein massives Kopfgeld auf ${targetUser.username} ausgesetzt. Der Pool steht nun bei $${currentBounty.pool.toLocaleString()}! Jagd ihn!`,
+                author: "LNN Fahndungs-Ticker",
+                category: "Justiz",
+                createdAt: new Date(),
+                likes: 0
+            });
+            updateDataVersion('news'); // Smart Polling triggern
+        }
+
         console.log(`${LOG_PREFIX_SERVER} 🔫 Kopfgeld gesetzt: ${user.username} -> ${targetUser.username} ($${bountyAmount})`);
         res.json({ message: `Kopfgeld erfolgreich auf ${targetUser.username} gesetzt!`, newBalance: user.balance - bountyAmount });
 
     } catch (e) {
+        console.error(e);
         res.status(500).json({ error: "Serverfehler beim Kopfgeld." });
     }
 });
+
+// --- LOTTERY SYSTEM CONFIG ---
+const TICKET_PRICE = 1000; // Ein Los kostet $1000
+
+// A. Status abrufen (Pot, eigene Lose, Zeit)
+app.get('/api/lottery/status', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const lotto = await systemSettingsCollection.findOne({ id: 'lottery_state' }) || { pot: 0 };
+        const userTickets = await db.collection('lotteryTickets').countDocuments({ userId });
+        const totalTickets = await db.collection('lotteryTickets').countDocuments({});
+
+        res.json({
+            pot: lotto.pot || 0,
+            myTickets: userTickets,
+            totalTickets: totalTickets,
+            ticketPrice: TICKET_PRICE,
+            nextDraw: "Jeden Sonntag, 20:00 Uhr" // Rein informativ für das UI
+        });
+    } catch (e) { res.status(500).json({ error: "Lotto-Fehler." }); }
+});
+
+// B. Lose kaufen
+app.post('/api/lottery/buy', isAuthenticated, async (req, res) => {
+    const { count } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const amount = parseInt(count) || 1;
+    const totalCost = amount * TICKET_PRICE;
+
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        if (user.balance < totalCost) return res.status(400).json({ error: "Zu wenig Geld für Lose!" });
+
+        // 1. Geld abziehen
+        await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -totalCost } });
+
+        // 2. Lose in die DB (wir speichern jedes Los als einzelnen Eintrag für die Ziehung)
+        const tickets = Array(amount).fill({ userId: userId, username: user.username, createdAt: new Date() });
+        await db.collection('lotteryTickets').insertMany(tickets);
+
+        // 3. 50% des Ticketpreises wandern AUCH in den Pot
+        await systemSettingsCollection.updateOne({ id: 'lottery_state' }, { $inc: { pot: totalCost * 0.5 } });
+
+        res.json({ message: `${amount} Lose gekauft!`, newBalance: user.balance - totalCost });
+    } catch (e) { res.status(500).json({ error: "Kauf fehlgeschlagen." }); }
+});
+
+// C. Die Ziehung (Der Master-Job)
+async function runWeeklyLottery() {
+    console.log(`${LOG_PREFIX_SERVER} 🎰 DIE ZIEHUNG STARTET...`);
+    try {
+        const lotto = await systemSettingsCollection.findOne({ id: 'lottery_state' });
+        const pot = lotto ? lotto.pot : 0;
+        if (pot <= 0) return;
+
+        // Alle Lose holen
+        const allTickets = await db.collection('lotteryTickets').find({}).toArray();
+        if (allTickets.length < 3) {
+            console.log("Nicht genug Teilnehmer für eine Ziehung.");
+            return;
+        }
+
+        // Gewinner ziehen (Zufällig mischen und 3 nehmen)
+        const shuffled = allTickets.sort(() => 0.5 - Math.random());
+        const winners = [];
+        const seenUsers = new Set();
+
+        for (let t of shuffled) {
+            if (!seenUsers.has(t.userId.toString())) {
+                winners.push(t);
+                seenUsers.add(t.userId.toString());
+            }
+            if (winners.length === 3) break;
+        }
+
+        // Verteilung: 1. (60%), 2. (25%), 3. (15%)
+        const shares = [0.60, 0.25, 0.15];
+        let resultsText = "";
+
+        for (let i = 0; i < winners.length; i++) {
+            const prize = Math.floor(pot * shares[i]);
+            await usersCollection.updateOne({ _id: winners[i].userId }, { $inc: { balance: prize } });
+            resultsText += `${i + 1}. Platz: ${winners[i].username} ($${prize.toLocaleString()}) `;
+            
+            // Log in news
+            await newsCollection.insertOne({
+                headline: `LOTTO-GEWINNER: ${winners[i].username}! 🏆`,
+                content: `${winners[i].username} belegt den ${i + 1}. Platz in der Wochenziehung und räumt $${prize.toLocaleString()} ab!`,
+                author: "Limo Lottery",
+                category: "Wirtschaft",
+                createdAt: new Date(),
+                likes: 0
+            });
+        }
+
+        // Reset: Pot auf 0, Lose löschen
+        await systemSettingsCollection.updateOne({ id: 'lottery_state' }, { $set: { pot: 0, lastWinners: resultsText } });
+        await db.collection('lotteryTickets').deleteMany({});
+
+        console.log(`${LOG_PREFIX_SERVER} Ziehung beendet: ${resultsText}`);
+        updateDataVersion('news');
+    } catch (e) { console.error("Lotto-Ziehungsfehler:", e); }
+}
+
+// Intervall: Einmal pro Woche (z.B. Sonntag 20 Uhr) 
+if (cluster.isPrimary) {
+    // Check alle 1 Stunde ob Sonntag 20 Uhr ist
+    setInterval(() => {
+        const now = new Date();
+        if (now.getDay() === 0 && now.getHours() === 20 && now.getMinutes() === 0) {
+            runWeeklyLottery();
+        }
+    }, 60000); 
+}
 
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
