@@ -162,6 +162,7 @@ let teachermonTradesCollection;
 let teachermonBattlesCollection;
 let cachedTeachermonCards = null;
 let teachermonUniversesCollection;
+let propertiesCollection, ownedPropertiesCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -773,6 +774,22 @@ async function initCacheSystem() {
     await refreshProductCache();
 }
 
+// Standard-Immobilien Seeding
+async function seedProperties() {
+    const count = await propertiesCollection.countDocuments();
+    if (count === 0) {
+        const houses = [
+            { id: 'trailer', name: 'Altes Wohnmobil', price: 25000, maxRoommates: 1, rent: 250, protection: 0.10, energyBonus: 1.1, img: '🚐', desc: 'Eng, aber dein eigener Herr.' },
+            { id: 'apartment', name: 'Stadt-Appartement', price: 120000, maxRoommates: 2, rent: 800, protection: 0.25, energyBonus: 1.2, img: '🏢', desc: 'Mitten im Geschehen.' },
+            { id: 'suburb', name: 'Einfamilienhaus', price: 650000, maxRoommates: 3, rent: 2500, protection: 0.45, energyBonus: 1.3, img: '🏡', desc: 'Ruhige Lage, viel Platz.' },
+            { id: 'mansion', name: 'Limo-Villa', price: 4500000, maxRoommates: 5, rent: 10000, protection: 0.70, energyBonus: 1.5, img: '🏰', desc: 'Luxus pur für dich und deine Gang.' },
+            { id: 'penthouse', name: 'Sky-Penthouse', price: 25000000, maxRoommates: 5, rent: 45000, protection: 0.90, energyBonus: 2.0, img: '💎', desc: 'Der Gipfel des Erfolgs.' }
+        ];
+        await propertiesCollection.insertMany(houses);
+        console.log(`${LOG_PREFIX_SERVER} 🏠 Immobilienmarkt mit Standard-Objekten bestückt.`);
+    }
+}
+
 async function refreshProductCache() {
     try {
         // Hole ALLE Produkte aus der DB (ohne History für Speed)
@@ -901,6 +918,8 @@ MongoClient.connect(mongoUri)
         teachermonTradesCollection = db.collection('teachermonTrades');
         teachermonBattlesCollection = db.collection('teachermonBattles');
 		teachermonUniversesCollection = db.collection('teachermonUniverses');
+		propertiesCollection = db.collection('properties');
+		ownedPropertiesCollection = db.collection('ownedProperties');
 
         authCodesCollection = db.collection(authCodesCollectionName);
 
@@ -955,6 +974,7 @@ MongoClient.connect(mongoUri)
             await dontBlameMeCollection.createIndex({ userId: 1 });
             await auctionsCollection.createIndex({ sellerId: 1 });
 			await seedTeachermonUniverses();
+			await seedProperties();
 
             if (tokenTransactionsCollection) {
                 await tokenTransactionsCollection.createIndex({ userId: 1 });
@@ -6857,8 +6877,6 @@ app.post('/api/crime/rob', isAuthenticated, async (req, res) => {
         const victim = await usersCollection.findOne({ username: { $regex: new RegExp(`^${targetUsername.trim()}$`, 'i') } });
 
         if (!victim) return res.status(404).json({ error: "Ziel nicht gefunden." });
-
-        // Checks
         if (robber.balance < ROBBERY_MIN_BALANCE) return res.status(400).json({ error: "Du brauchst $500 Startkapital für Equipment." });
 
         const now = Date.now();
@@ -6868,49 +6886,49 @@ app.post('/api/crime/rob', isAuthenticated, async (req, res) => {
             return res.status(429).json({ error: `Polizei ist wachsam! Warte ${waitMin} Min.` });
         }
 
-        // Opfer Schutz-Checks
-        if (victim.isAdmin) return res.status(403).json({ error: "Admins sind unantastbar (Security Droid aktiv)." });
+        if (victim.isAdmin) return res.status(403).json({ error: "Admins sind unantastbar." });
         if (victim.balance < ROBBERY_PROTECTION_LIMIT) return res.status(400).json({ error: "Opfer ist zu arm (< $10k)." });
 
         // --- BERECHNUNG ---
         const successChance = await calculateRobberyChance(victim._id, victim.balance);
-        const roll = Math.random(); // 0.0 bis 1.0
-        const isSuccess = roll < successChance;
+        const isSuccess = Math.random() < successChance;
 
         let stolen = 0;
         let fine = 0;
-        let logMessage = "";
+        let protectionUsed = 0;
 
         if (isSuccess) {
-            // Erfolg: 2% bis 5% klauen
             const percent = (Math.random() * 0.03) + 0.02;
-            stolen = Math.floor(victim.balance * percent);
-            if (stolen > 100000) stolen = 100000; // Cap bei 100k pro Raub
+            let rawStolen = Math.floor(victim.balance * percent);
+            if (rawStolen > 100000) rawStolen = 100000;
 
-            // --- UPDATE BEIM OPFER (Geld weg + Achievement Zähler hoch) ---
+            // --- IMMOBILIEN SCHUTZ LOGIK ---
+            const victimHome = await ownedPropertiesCollection.findOne({ 
+                $or: [{ ownerId: victim._id }, { roommates: victim._id }] 
+            });
+
+            if (victimHome && victimHome.protection) {
+                protectionUsed = victimHome.protection;
+                // Reduziere Beute: Wenn protection 0.90 ist, bleiben nur 10% übrig
+                stolen = Math.floor(rawStolen * (1 - protectionUsed));
+            } else {
+                stolen = rawStolen;
+            }
+            // ------------------------------
+
             await usersCollection.updateOne(
                 { _id: victim._id },
-                {
-                    $inc: {
-                        balance: -stolen,
-                        "crimeStats.timesRobbed": 1 // <--- WICHTIG FÜR ACHIEVEMENT "OPFERLAMM"
-                    }
-                }
+                { $inc: { balance: -stolen, "crimeStats.timesRobbed": 1 } }
             );
 
-            // Update beim Räuber
             await usersCollection.updateOne({ _id: robberId }, {
                 $inc: { balance: stolen, "crimeStats.successfulRobberies": 1, "crimeStats.totalStolen": stolen },
                 $set: { lastRobberyAt: new Date() }
             });
-            logMessage = `Wurde von ${robberName} ausgeraubt.`;
 
         } else {
-            // FEHLSCHLAG: Strafe zahlen
-            const percentFine = (Math.random() * 0.05) + 0.05; // 5% bis 10%
+            const percentFine = (Math.random() * 0.05) + 0.05;
             fine = Math.floor(robber.balance * percentFine);
-
-            // Limits für Strafe
             if (fine > 2000000) fine = 2000000;
             if (fine < 500) fine = 500;
 
@@ -6919,29 +6937,33 @@ app.post('/api/crime/rob', isAuthenticated, async (req, res) => {
                 $set: { lastRobberyAt: new Date() }
             });
             await addToStateTreasury(fine);
-            logMessage = `Versuchter Überfall durch ${robberName} (abgewehrt).`;
         }
 
-        // --- LOGBUCH EINTRAG ---
+        // Logbucheintrag
         if (robberyLogsCollection) {
             await robberyLogsCollection.insertOne({
                 victimId: victim._id,
                 attackerName: robberName,
                 success: isSuccess,
                 amountLost: isSuccess ? stolen : 0,
+                protectionApplied: protectionUsed,
                 timestamp: new Date()
             });
         }
 
-        // Antwort an Räuber
         const updatedRobber = await usersCollection.findOne({ _id: robberId }, { projection: { balance: 1 } });
+
+        let resultMsg = isSuccess ? `Erfolg! $${stolen} erbeutet.` : `Erwischt! $${fine} Strafe gezahlt.`;
+        if (isSuccess && protectionUsed > 0) {
+            resultMsg += ` (Opfer hatte einen Tresor: -${Math.round(protectionUsed * 100)}% Beute)`;
+        }
 
         res.json({
             success: isSuccess,
             amount: isSuccess ? stolen : -fine,
             chanceWas: (successChance * 100).toFixed(1),
             newBalance: updatedRobber.balance,
-            message: isSuccess ? `Erfolg! $${stolen} erbeutet.` : `Erwischt! $${fine} Strafe gezahlt.`
+            message: resultMsg
         });
 
     } catch (err) {
@@ -8498,16 +8520,12 @@ app.get('/api/restaurant/menu', isAuthenticated, (req, res) => {
     res.json({ menu: RESTAURANT_MENU });
 });
 
-// 2. Essen bestellen (Reduziert Job-Cooldown!)
+// 2. Essen bestellen
 app.post('/api/restaurant/order', isAuthenticated, async (req, res) => {
-    // Erwartet body: { itemIds: ["burger", "fries", "dip_ketchup"] }
-    // Oder Legacy Support: { itemId: "burger" }
     let { itemIds, itemId } = req.body;
     const userId = new ObjectId(req.session.userId);
 
-    // Support für alte Aufrufe (falls du nur ein Item schickst)
     if (itemId && !itemIds) itemIds = [itemId];
-
     if (!itemIds || !Array.isArray(itemIds) || itemIds.length === 0) {
         return res.status(400).json({ error: "Der Teller ist leer. Wähle etwas aus!" });
     }
@@ -8516,39 +8534,40 @@ app.post('/api/restaurant/order', isAuthenticated, async (req, res) => {
 
     try {
         let totalPrice = 0;
-        let totalEnergy = 0;
+        let totalEnergyBase = 0; // Basis-Energie der Gerichte
         let itemNames = [];
-        let itemsDetails = []; // Für die Historie
+        let itemsDetails = [];
 
-        // Preise und Energie berechnen
         for (const id of itemIds) {
             const food = RESTAURANT_MENU.find(i => i.id === id);
             if (!food) throw new Error(`Gericht '${id}' steht nicht auf der Karte.`);
-
             totalPrice += food.price;
-            totalEnergy += food.energy;
+            totalEnergyBase += food.energy;
             itemNames.push(food.name);
             itemsDetails.push({ name: food.name, icon: food.icon });
         }
 
         await session.withTransaction(async () => {
             const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (user.balance < totalPrice) throw new Error(`Nicht genug Geld! Das Menü kostet $${totalPrice.toFixed(2)}.`);
 
-            if (user.balance < totalPrice) {
-                throw new Error(`Nicht genug Geld! Das Menü kostet $${totalPrice.toFixed(2)}.`);
-            }
+            // --- HAUS-BONUS LOGIK ---
+            const home = await ownedPropertiesCollection.findOne({ 
+                $or: [{ ownerId: userId }, { roommates: userId }] 
+            }, { session });
 
-            // --- EFFEKT ---
+            const multiplier = home ? (home.energyBonus || 1.0) : 1.0;
+            const finalEnergyGain = totalEnergyBase * multiplier;
+            // ------------------------
+
             let newLastWorkedAt = user.lastWorkedAt || 0;
-            const reductionMs = totalEnergy * 60 * 1000;
+            const reductionMs = finalEnergyGain * 60 * 1000;
 
             if (newLastWorkedAt > 0) {
                 const oldDate = new Date(newLastWorkedAt).getTime();
-                // Zeit zurückdrehen = Energie auffüllen
                 newLastWorkedAt = new Date(oldDate - reductionMs);
             }
 
-            // A. User Update
             await usersCollection.updateOne(
                 { _id: userId },
                 {
@@ -8561,28 +8580,32 @@ app.post('/api/restaurant/order', isAuthenticated, async (req, res) => {
                 { session }
             );
 
-            // B. NEU: Historie Eintrag speichern!
             await restaurantOrdersCollection.insertOne({
                 userId: userId,
                 username: req.session.username,
-                items: itemsDetails, // Was wurde gegessen?
+                items: itemsDetails,
                 cost: totalPrice,
-                energyGained: totalEnergy,
+                energyGained: finalEnergyGain, // Speichere den geboosteten Wert
+                multiplier: multiplier,
                 date: new Date()
             }, { session });
+
+            // Lokales Ergebnis für die Response außerhalb der Transaction speichern
+            res.locals.finalEnergy = finalEnergyGain;
+            res.locals.multiplier = multiplier;
         });
 
         const updatedUser = await usersCollection.findOne({ _id: userId }, { projection: { balance: 1 } });
 
-        console.log(`${LOG_PREFIX_REST} User ${req.session.username} bestellte: ${itemNames.join(", ")}.`);
-
-        let msg = `Guten Appetit! Du hast ${itemNames.length} Teile verdrückt ($${totalPrice.toFixed(2)}).`;
-        if (itemNames.length <= 3) msg = `Lecker: ${itemNames.join(" + ")}! ($${totalPrice.toFixed(2)})`;
+        let msg = `Guten Appetit! ($${totalPrice.toFixed(2)})`;
+        if (res.locals.multiplier > 1) {
+            msg += ` Haus-Bonus aktiv: x${res.locals.multiplier}!`;
+        }
 
         res.json({
-            message: `${msg} Energie regeneriert!`,
+            message: msg,
             newBalance: updatedUser.balance,
-            energyGain: totalEnergy,
+            energyGain: res.locals.finalEnergy,
             itemsEaten: itemNames
         });
 
@@ -10715,6 +10738,134 @@ app.delete('/api/teachermon/admin/universes/:id', isAuthenticated, isAdmin, asyn
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Löschen." });
     }
+});
+
+if (cluster.isPrimary) {
+    setInterval(async () => {
+        console.log(`${LOG_PREFIX_SERVER} 🏠 Miet-Einzug startet...`);
+        try {
+            const allOwned = await ownedPropertiesCollection.find({}).toArray();
+            for (const house of allOwned) {
+                if (!house.roommates || house.roommates.length === 0) continue;
+
+                for (const roommateId of house.roommates) {
+                    const rentAmount = house.rent || 500;
+                    
+                    // Versuche Miete abzubuchen
+                    const res = await usersCollection.updateOne(
+                        { _id: roommateId, balance: { $gte: rentAmount } },
+                        { $inc: { balance: -rentAmount } }
+                    );
+
+                    if (res.modifiedCount > 0) {
+                        // Wenn bezahlt, dem Besitzer geben
+                        await usersCollection.updateOne({ _id: house.ownerId }, { $inc: { balance: rentAmount } });
+                    } else {
+                        // Wenn pleite: Automatischer Rauswurf aus der WG
+                        await ownedPropertiesCollection.updateOne({ _id: house._id }, { $pull: { roommates: roommateId } });
+                        console.log(`🏠 User ${roommateId} konnte Miete nicht zahlen und wurde vor die Tür gesetzt.`);
+                    }
+                }
+            }
+        } catch (e) { console.error("RentJob Error:", e); }
+    }, 24 * 60 * 60 * 1000); 
+}
+
+// --- IMMOBILIEN API ---
+
+// 1. Markt laden
+app.get('/api/realestate/market', async (req, res) => {
+    try {
+        const houses = await propertiesCollection.find({}).toArray();
+        res.json({ houses });
+    } catch (e) { res.status(500).json({ error: "Markt-Fehler." }); }
+});
+
+// 2. Haus kaufen
+app.post('/api/realestate/buy', isAuthenticated, async (req, res) => {
+    const { houseId } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const [user, config] = await Promise.all([
+                usersCollection.findOne({ _id: userId }, { session }),
+                propertiesCollection.findOne({ id: houseId }, { session })
+            ]);
+
+            if (!config) throw new Error("Dieses Objekt existiert nicht.");
+            if (user.balance < config.price) throw new Error(`Du brauchst $${config.price.toLocaleString()}.`);
+
+            const alreadyOwned = await ownedPropertiesCollection.findOne({ ownerId: userId }, { session });
+            if (alreadyOwned) throw new Error("Du besitzt bereits ein Haus. Verkaufe es erst.");
+
+            // Kaufen
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -config.price } }, { session });
+            await ownedPropertiesCollection.insertOne({
+                ...config,
+                _id: undefined, // Neue ID für Instanz
+                houseId: config.id,
+                ownerId: userId,
+                ownerName: user.username,
+                roommates: [], // Hier kommen die IDs der Mitbewohner rein
+                createdAt: new Date()
+            }, { session });
+        });
+        res.json({ success: true, message: "Willkommen in deinem neuen Zuhause!" });
+    } catch (e) { res.status(400).json({ error: e.message }); }
+    finally { session.endSession(); }
+});
+
+// 3. WG-Management: Mitbewohner einladen
+app.post('/api/realestate/wg/invite', isAuthenticated, async (req, res) => {
+    const { targetUsername } = req.body;
+    const ownerId = new ObjectId(req.session.userId);
+
+    try {
+        const house = await ownedPropertiesCollection.findOne({ ownerId });
+        if (!house) return res.status(403).json({ error: "Nur Hausbesitzer können Leute einladen." });
+        if (house.roommates.length >= house.maxRoommates) return res.status(400).json({ error: "Deine WG ist bereits voll!" });
+
+        const targetUser = await usersCollection.findOne({ username: targetUsername.toLowerCase() });
+        if (!targetUser) return res.status(404).json({ error: "User nicht gefunden." });
+
+        // Check ob der User schon irgendwo wohnt
+        const isHoused = await ownedPropertiesCollection.findOne({ 
+            $or: [{ ownerId: targetUser._id }, { roommates: targetUser._id }] 
+        });
+        if (isHoused) return res.status(400).json({ error: "Dieser User hat bereits eine Unterkunft." });
+
+        await ownedPropertiesCollection.updateOne(
+            { _id: house._id },
+            { $push: { roommates: targetUser._id } }
+        );
+
+        res.json({ message: `${targetUser.username} ist in deine WG eingezogen!` });
+    } catch (e) { res.status(500).json({ error: "Einzug fehlgeschlagen." }); }
+});
+
+// 4. Status abrufen (Wer wohnt wo?)
+app.get('/api/realestate/my-home', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const home = await ownedPropertiesCollection.findOne({ 
+            $or: [{ ownerId: userId }, { roommates: userId }] 
+        });
+        if (!home) return res.json({ hasHome: false });
+
+        const roommates = await usersCollection.find(
+            { _id: { $in: home.roommates } },
+            { projection: { username: 1 } }
+        ).toArray();
+
+        res.json({ 
+            hasHome: true, 
+            isOwner: home.ownerId.equals(userId),
+            details: home,
+            roommates: roommates
+        });
+    } catch (e) { res.status(500).json({ error: "Fehler beim Laden." }); }
 });
 
 app.use((req, res) => {
