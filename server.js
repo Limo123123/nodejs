@@ -10943,6 +10943,44 @@ app.get('/api/realestate/my-home', isAuthenticated, async (req, res) => {
     } catch (e) { res.status(500).json({ error: "Fehler beim Laden." }); }
 });
 
+// POST: Haus verkaufen
+app.post('/api/realestate/sell', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            // 1. Suche das Haus, das dem User gehört
+            const home = await ownedPropertiesCollection.findOne({ ownerId: userId }, { session });
+            if (!home) throw new Error("Du besitzt keine Immobilie, die du verkaufen könntest.");
+
+            // 2. Verkaufspreis berechnen (75% Rückerstattung)
+            const refund = Math.floor(home.price * 0.75);
+
+            // 3. Haus löschen (Mitbewohner fliegen automatisch raus)
+            await ownedPropertiesCollection.deleteOne({ _id: home._id }, { session });
+
+            // 4. Geld gutschreiben
+            await usersCollection.updateOne(
+                { _id: userId },
+                { $inc: { balance: refund } },
+                { session }
+            );
+
+            // 5. Alle offenen Einladungen für dieses Haus löschen
+            await propertyInvitesCollection.deleteMany({ houseId: home._id }, { session });
+        });
+
+        res.json({ success: true, message: "Haus erfolgreich verkauft! Du hast 75% des Preises zurückerhalten." });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
