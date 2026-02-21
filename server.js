@@ -10595,17 +10595,39 @@ app.post('/api/realestate/wg/invite', isAuthenticated, async (req, res) => {
     const ownerId = new ObjectId(req.session.userId);
 
     try {
+        // A. Check: Ist der Absender selbst irgendwo nur Untermieter?
+        const amIRoommateElsewhere = await ownedPropertiesCollection.findOne({ roommates: ownerId });
+        if (amIRoommateElsewhere) {
+            return res.status(403).json({ 
+                error: `Du wohnst aktuell zur Untermiete in der WG von ${amIRoommateElsewhere.ownerName}. Du kannst von hier aus keine Einladungen verwalten!` 
+            });
+        }
+
+        // B. Check: Besitzt der Absender überhaupt ein Haus?
         const house = await ownedPropertiesCollection.findOne({ ownerId });
-        if (!house) return res.status(403).json({ error: "Nur Hausbesitzer können einladen." });
-        if (house.roommates.length >= house.maxRoommates) return res.status(400).json({ error: "Kein Platz mehr!" });
+        if (!house) return res.status(403).json({ error: "Nur Hausbesitzer können Einladungen verschicken." });
+        
+        // C. Check: Ist das eigene Haus schon voll?
+        if (house.roommates.length >= house.maxRoommates) {
+            return res.status(400).json({ error: "Kein Platz mehr in deiner Bude!" });
+        }
 
         const targetUser = await usersCollection.findOne({ username: targetUsername.toLowerCase() });
         if (!targetUser) return res.status(404).json({ error: "User nicht gefunden." });
 
-        // Prüfen ob bereits eine Einladung offen ist
-        const existing = await propertyInvitesCollection.findOne({ houseId: house._id, targetUserId: targetUser._id });
+        // D. Check: Selbst-Einladung
+        if (targetUser._id.equals(ownerId)) {
+            return res.status(400).json({ error: "Du kannst dich nicht selbst einladen." });
+        }
+
+        // E. Check: Ist bereits eine Einladung offen?
+        const existing = await propertyInvitesCollection.findOne({ 
+            houseId: house._id, 
+            targetUserId: targetUser._id 
+        });
         if (existing) return res.status(400).json({ error: "Einladung wurde bereits gesendet." });
 
+        // F. Einladung in DB schreiben
         await propertyInvitesCollection.insertOne({
             houseId: house._id,
             houseName: house.name,
@@ -10614,8 +10636,11 @@ app.post('/api/realestate/wg/invite', isAuthenticated, async (req, res) => {
             createdAt: new Date()
         });
 
-        res.json({ message: `Einladung an ${targetUser.username} gesendet!` });
-    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+        res.json({ message: `Einladung an ${targetUser.username} wurde verschickt!` });
+    } catch (e) { 
+        console.error("Invite Error:", e);
+        res.status(500).json({ error: "Fehler beim Senden der Einladung." }); 
+    }
 });
 
 // 2. Einladungen abrufen (User sieht seine Einladungen)
