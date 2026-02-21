@@ -161,6 +161,7 @@ let teachermonInvCollection;
 let teachermonTradesCollection;
 let teachermonBattlesCollection;
 let cachedTeachermonCards = null;
+let teachermonUniversesCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -899,6 +900,7 @@ MongoClient.connect(mongoUri)
         teachermonInvCollection = db.collection('teachermonInventories');
         teachermonTradesCollection = db.collection('teachermonTrades');
         teachermonBattlesCollection = db.collection('teachermonBattles');
+		teachermonUniversesCollection = db.collection('teachermonUniverses');
 
         authCodesCollection = db.collection(authCodesCollectionName);
 
@@ -952,6 +954,7 @@ MongoClient.connect(mongoUri)
             await ratingsCollection.createIndex({ userId: 1 }); // Wichtig, da bisher nur { humanId: 1, userId: 1 } existiert
             await dontBlameMeCollection.createIndex({ userId: 1 });
             await auctionsCollection.createIndex({ sellerId: 1 });
+			await seedTeachermonUniverses();
 
             if (tokenTransactionsCollection) {
                 await tokenTransactionsCollection.createIndex({ userId: 1 });
@@ -9965,6 +9968,19 @@ async function seedTeachermonCards() {
     }
 }
 
+async function seedTeachermonUniverses() {
+    const count = await teachermonUniversesCollection.countDocuments();
+    if (count === 0) {
+        await teachermonUniversesCollection.insertOne({
+            id: 'teachermon',
+            name: '🏫 Teachermon Edition',
+            stats: ['kalterKaffee', 'gequaelt', 'intelligenz'] // Die Standard-Werte
+        });
+        console.log(`${LOG_PREFIX_TEACHERMON} 🌌 Standard-Universum 'teachermon' generiert.`);
+    }
+}
+
+
 // Hilfsfunktion: Karte ziehen basierend auf Wahrscheinlichkeit
 async function drawRandomCard(requestedUniverse = 'teachermon') {
     // Nur einmal aus der DB laden und cachen
@@ -10644,6 +10660,60 @@ app.post('/api/teachermon/battles/accept/:id', isAuthenticated, async (req, res)
         res.status(400).json({ error: e.message });
     } finally {
         await session.endSession();
+    }
+});
+
+// --- UNIVERSUM MANAGEMENT API ---
+
+// Alle Universen abrufen (Öffentlich, da der Shop sie braucht)
+app.get('/api/teachermon/universes', async (req, res) => {
+    try {
+        const universes = await teachermonUniversesCollection.find({}).toArray();
+        res.json({ universes });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der Universen." });
+    }
+});
+
+// Admin: Neues Universum erstellen
+app.post('/api/teachermon/admin/universes', isAuthenticated, isAdmin, async (req, res) => {
+    const { id, name, statsString } = req.body;
+
+    if (!id || !name || !statsString) return res.status(400).json({ error: "Alle Felder müssen ausgefüllt sein." });
+
+    // Aus dem String "Humor, Geld, Macht" ein sauberes Array machen: ["humor", "geld", "macht"]
+    const statsArray = statsString.split(',').map(s => s.trim().toLowerCase().replace(/[^a-z0-9]/g, '')).filter(s => s.length > 0);
+
+    if (statsArray.length === 0) return res.status(400).json({ error: "Mindestens ein gültiger Stat wird benötigt." });
+
+    try {
+        const existing = await teachermonUniversesCollection.findOne({ id: id.trim() });
+        if (existing) return res.status(400).json({ error: "Diese Universums-ID existiert bereits." });
+
+        const newUniverse = {
+            id: id.trim(),
+            name: name.trim(),
+            stats: statsArray
+        };
+
+        await teachermonUniversesCollection.insertOne(newUniverse);
+        res.status(201).json({ message: `Universum '${name}' erfolgreich erstellt!`, universe: newUniverse });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Erstellen des Universums." });
+    }
+});
+
+// Admin: Universum löschen
+app.delete('/api/teachermon/admin/universes/:id', isAuthenticated, isAdmin, async (req, res) => {
+    const uniId = req.params.id;
+    if (uniId === 'teachermon') return res.status(400).json({ error: "Das Standard-Universum kann nicht gelöscht werden." });
+
+    try {
+        await teachermonUniversesCollection.deleteOne({ id: uniId });
+        // Optional: Alle Karten dieses Universums löschen? (Hier lassen wir sie erstmal existieren, sie sind dann "Lost Media")
+        res.json({ message: "Universum gelöscht." });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Löschen." });
     }
 });
 
