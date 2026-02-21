@@ -4907,8 +4907,8 @@ app.post('/api/daily', isAuthenticated, async (req, res) => {
 // =========================================================
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-// Wir erhöhen das Intervall leicht auf 45 Min, damit sich Ereignisse "ansammeln" können
-const NEWS_INTERVAL_MS = 45 * 60 * 1000;
+
+const NEWS_INTERVAL_MS = 75 * 60 * 1000;
 
 // Hilfsfunktion: Zeitstempel des letzten Laufs aus der DB holen & aktualisieren
 // Das verhindert, dass der Bot alte Kamellen wiederholt.
