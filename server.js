@@ -10569,24 +10569,46 @@ app.post('/api/realestate/buy', isAuthenticated, async (req, res) => {
             if (!config) throw new Error("Dieses Objekt existiert nicht.");
             if (user.balance < config.price) throw new Error(`Du brauchst $${config.price.toLocaleString()}.`);
 
-            const alreadyOwned = await ownedPropertiesCollection.findOne({ ownerId: userId }, { session });
-            if (alreadyOwned) throw new Error("Du besitzt bereits ein Haus. Verkaufe es erst.");
+            // 1. Check: Besitzt der User bereits ein Haus?
+            const alreadyOwner = await ownedPropertiesCollection.findOne({ ownerId: userId }, { session });
+            if (alreadyOwner) throw new Error("Du besitzt bereits ein Haus. Verkaufe es erst, bevor du neu kaufst.");
 
-            // Kaufen
+            // --- NEU: AUTO-AUSZUG AUS ALTER WG ---
+            // Wir löschen den User aus allen 'roommates' Listen anderer Häuser
+            await ownedPropertiesCollection.updateMany(
+                { roommates: userId },
+                { $pull: { roommates: userId } },
+                { session }
+            );
+            // --------------------------------------
+
+            // 2. Geld abziehen
             await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -config.price } }, { session });
+
+            // 3. Neues Haus in DB anlegen
             await ownedPropertiesCollection.insertOne({
-                ...config,
-                _id: undefined, // Neue ID für Instanz
                 houseId: config.id,
+                name: config.name,
                 ownerId: userId,
                 ownerName: user.username,
-                roommates: [], // Hier kommen die IDs der Mitbewohner rein
+                roommates: [],
+                maxRoommates: config.maxRoommates,
+                rent: config.rent,
+                protection: config.protection,
+                energyBonus: config.energyBonus || 1.0,
+                price: config.price, // Wichtig für die 75% Rückerstattung beim Verkauf
+                img: config.img,
+                desc: config.desc,
                 createdAt: new Date()
             }, { session });
         });
-        res.json({ success: true, message: "Willkommen in deinem neuen Zuhause!" });
-    } catch (e) { res.status(400).json({ error: e.message }); }
-    finally { session.endSession(); }
+
+        res.json({ success: true, message: "Glückwunsch! Du bist jetzt Hausbesitzer und aus deiner alten WG ausgezogen." });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
 });
 
 // 1. Einladung senden (Owner -> User)
@@ -10772,8 +10794,6 @@ app.post('/api/realestate/sell', isAuthenticated, async (req, res) => {
         await session.endSession();
     }
 });
-
-
 
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
