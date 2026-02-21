@@ -163,6 +163,7 @@ let teachermonBattlesCollection;
 let cachedTeachermonCards = null;
 let teachermonUniversesCollection;
 let propertiesCollection, ownedPropertiesCollection;
+let propertyInvitesCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -774,19 +775,20 @@ async function initCacheSystem() {
     await refreshProductCache();
 }
 
-// Standard-Immobilien Seeding
 async function seedProperties() {
     const count = await propertiesCollection.countDocuments();
     if (count === 0) {
         const houses = [
+            { id: 'carton', name: 'Pappkarton', price: 100, maxRoommates: 0, rent: 0, protection: 0.02, energyBonus: 1.0, img: '📦', desc: 'Wenigstens wird man nicht nass.' },
             { id: 'trailer', name: 'Altes Wohnmobil', price: 25000, maxRoommates: 1, rent: 250, protection: 0.10, energyBonus: 1.1, img: '🚐', desc: 'Eng, aber dein eigener Herr.' },
             { id: 'apartment', name: 'Stadt-Appartement', price: 120000, maxRoommates: 2, rent: 800, protection: 0.25, energyBonus: 1.2, img: '🏢', desc: 'Mitten im Geschehen.' },
-            { id: 'suburb', name: 'Einfamilienhaus', price: 650000, maxRoommates: 3, rent: 2500, protection: 0.45, energyBonus: 1.3, img: '🏡', desc: 'Ruhige Lage, viel Platz.' },
-            { id: 'mansion', name: 'Limo-Villa', price: 4500000, maxRoommates: 5, rent: 10000, protection: 0.70, energyBonus: 1.5, img: '🏰', desc: 'Luxus pur für dich und deine Gang.' },
-            { id: 'penthouse', name: 'Sky-Penthouse', price: 25000000, maxRoommates: 5, rent: 45000, protection: 0.90, energyBonus: 2.0, img: '💎', desc: 'Der Gipfel des Erfolgs.' }
+            { id: 'suburb', name: 'Einfamilienhaus', price: 650000, maxRoommates: 4, rent: 2500, protection: 0.45, energyBonus: 1.3, img: '🏡', desc: 'Ruhige Lage, viel Platz.' },
+            { id: 'mansion', name: 'Limo-Villa', price: 4500000, maxRoommates: 5, rent: 10000, protection: 0.70, energyBonus: 1.5, img: '🏰', desc: 'Luxus pur.' },
+            { id: 'bunker', name: 'Atomschutz-Bunker', price: 12000000, maxRoommates: 6, rent: 15000, protection: 0.98, energyBonus: 1.2, img: '🛡️', desc: 'Sicherer geht es nicht. Platz für 6 Prepper.' },
+            { id: 'penthouse', name: 'Sky-Penthouse', price: 25000000, maxRoommates: 6, rent: 45000, protection: 0.90, energyBonus: 2.0, img: '💎', desc: 'Luxus für 6 Personen über den Wolken.' }
         ];
         await propertiesCollection.insertMany(houses);
-        console.log(`${LOG_PREFIX_SERVER} 🏠 Immobilienmarkt mit Standard-Objekten bestückt.`);
+        console.log(`${LOG_PREFIX_SERVER} 🏠 Immobilienmarkt aktualisiert.`);
     }
 }
 
@@ -920,6 +922,7 @@ MongoClient.connect(mongoUri)
 		teachermonUniversesCollection = db.collection('teachermonUniverses');
 		propertiesCollection = db.collection('properties');
 		ownedPropertiesCollection = db.collection('ownedProperties');
+		propertyInvitesCollection = db.collection('propertyInvites');
 
         authCodesCollection = db.collection(authCodesCollectionName);
 
@@ -10817,32 +10820,104 @@ app.post('/api/realestate/buy', isAuthenticated, async (req, res) => {
     finally { session.endSession(); }
 });
 
-// 3. WG-Management: Mitbewohner einladen
+// 1. Einladung senden (Owner -> User)
 app.post('/api/realestate/wg/invite', isAuthenticated, async (req, res) => {
     const { targetUsername } = req.body;
     const ownerId = new ObjectId(req.session.userId);
 
     try {
         const house = await ownedPropertiesCollection.findOne({ ownerId });
-        if (!house) return res.status(403).json({ error: "Nur Hausbesitzer können Leute einladen." });
-        if (house.roommates.length >= house.maxRoommates) return res.status(400).json({ error: "Deine WG ist bereits voll!" });
+        if (!house) return res.status(403).json({ error: "Nur Hausbesitzer können einladen." });
+        if (house.roommates.length >= house.maxRoommates) return res.status(400).json({ error: "Kein Platz mehr!" });
 
         const targetUser = await usersCollection.findOne({ username: targetUsername.toLowerCase() });
         if (!targetUser) return res.status(404).json({ error: "User nicht gefunden." });
 
-        // Check ob der User schon irgendwo wohnt
-        const isHoused = await ownedPropertiesCollection.findOne({ 
-            $or: [{ ownerId: targetUser._id }, { roommates: targetUser._id }] 
+        // Prüfen ob bereits eine Einladung offen ist
+        const existing = await propertyInvitesCollection.findOne({ houseId: house._id, targetUserId: targetUser._id });
+        if (existing) return res.status(400).json({ error: "Einladung wurde bereits gesendet." });
+
+        await propertyInvitesCollection.insertOne({
+            houseId: house._id,
+            houseName: house.name,
+            ownerName: house.ownerName,
+            targetUserId: targetUser._id,
+            createdAt: new Date()
         });
-        if (isHoused) return res.status(400).json({ error: "Dieser User hat bereits eine Unterkunft." });
+
+        res.json({ message: `Einladung an ${targetUser.username} gesendet!` });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// 2. Einladungen abrufen (User sieht seine Einladungen)
+app.get('/api/realestate/wg/my-invites', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const invites = await propertyInvitesCollection.find({ targetUserId: userId }).toArray();
+        res.json({ invites });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// 3. Einladung annehmen oder ablehnen
+app.post('/api/realestate/wg/respond', isAuthenticated, async (req, res) => {
+    const { inviteId, action } = req.body; // action: 'accept' oder 'decline'
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const invite = await propertyInvitesCollection.findOne({ _id: new ObjectId(inviteId), targetUserId: userId });
+        if (!invite) return res.status(404).json({ error: "Einladung nicht gefunden." });
+
+        if (action === 'accept') {
+            const house = await ownedPropertiesCollection.findOne({ _id: invite.houseId });
+            if (!house || house.roommates.length >= house.maxRoommates) {
+                await propertyInvitesCollection.deleteOne({ _id: invite._id });
+                return res.status(400).json({ error: "Haus ist bereits voll oder existiert nicht mehr." });
+            }
+
+            // In die WG einziehen
+            await ownedPropertiesCollection.updateOne(
+                { _id: house._id },
+                { $push: { roommates: userId } }
+            );
+        }
+
+        // Einladung löschen (egal ob angenommen oder abgelehnt)
+        await propertyInvitesCollection.deleteOne({ _id: invite._id });
+        res.json({ message: action === 'accept' ? "Eingezogen!" : "Abgelehnt." });
+
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// 4. Rauswurf (Kick) oder Auszug (Leave)
+app.post('/api/realestate/wg/remove', isAuthenticated, async (req, res) => {
+    const { targetUserId } = req.body; // Wenn leer -> Selbst-Auszug
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const home = await ownedPropertiesCollection.findOne({ 
+            $or: [{ ownerId: userId }, { roommates: userId }] 
+        });
+
+        if (!home) return res.status(404).json({ error: "Kein Wohnsitz gefunden." });
+
+        let userToRemove;
+        if (targetUserId) {
+            // KICK-LOGIK (Nur Owner)
+            if (!home.ownerId.equals(userId)) return res.status(403).json({ error: "Nur der Besitzer kann Leute rauswerfen." });
+            userToRemove = new ObjectId(targetUserId);
+        } else {
+            // AUSZUG-LOGIK (Selbst)
+            userToRemove = userId;
+            if (home.ownerId.equals(userId)) return res.status(400).json({ error: "Als Besitzer kannst du nicht ausziehen. Du musst das Haus verkaufen." });
+        }
 
         await ownedPropertiesCollection.updateOne(
-            { _id: house._id },
-            { $push: { roommates: targetUser._id } }
+            { _id: home._id },
+            { $pull: { roommates: userToRemove } }
         );
 
-        res.json({ message: `${targetUser.username} ist in deine WG eingezogen!` });
-    } catch (e) { res.status(500).json({ error: "Einzug fehlgeschlagen." }); }
+        res.json({ message: "WG-Status aktualisiert." });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
 });
 
 // 4. Status abrufen (Wer wohnt wo?)
