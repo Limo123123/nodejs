@@ -6609,44 +6609,63 @@ app.post('/api/crime/rob', isAuthenticated, async (req, res) => {
         if (victim.isAdmin) return res.status(403).json({ error: "Admins sind unantastbar." });
         if (victim.balance < ROBBERY_PROTECTION_LIMIT) return res.status(400).json({ error: "Opfer ist zu arm (< $10k)." });
 
-        // --- BERECHNUNG ---
         const successChance = await calculateRobberyChance(victim._id, victim.balance);
         const isSuccess = Math.random() < successChance;
 
         let stolen = 0;
         let fine = 0;
-        let protectionUsed = 0;
+        let bountyClaimed = 0;
 
         if (isSuccess) {
             const percent = (Math.random() * 0.03) + 0.02;
             let rawStolen = Math.floor(victim.balance * percent);
             if (rawStolen > 100000) rawStolen = 100000;
 
-            // --- IMMOBILIEN SCHUTZ LOGIK ---
-            const victimHome = await ownedPropertiesCollection.findOne({ 
-                $or: [{ ownerId: victim._id }, { roommates: victim._id }] 
-            });
+            // Immobilien Schutz
+            const victimHome = await ownedPropertiesCollection.findOne({ $or: [{ ownerId: victim._id }, { roommates: victim._id }] });
+            const protectionUsed = victimHome ? (victimHome.protection || 0) : 0;
+            stolen = Math.floor(rawStolen * (1 - protectionUsed));
 
-            if (victimHome && victimHome.protection) {
-                protectionUsed = victimHome.protection;
-                // Reduziere Beute: Wenn protection 0.90 ist, bleiben nur 10% übrig
-                stolen = Math.floor(rawStolen * (1 - protectionUsed));
-            } else {
-                stolen = rawStolen;
-            }
-            // ------------------------------
-
+            // --- NEU: ANGREIFER-LOGIK (Die letzten 3 Täter beim Opfer speichern) ---
             await usersCollection.updateOne(
                 { _id: victim._id },
-                { $inc: { balance: -stolen, "crimeStats.timesRobbed": 1 } }
+                { 
+                    $inc: { balance: -stolen, "crimeStats.timesRobbed": 1 },
+                    $push: { 
+                        lastAttackers: { 
+                            $each: [{ id: robberId, name: robberName, amount: stolen, date: new Date() }],
+                            $slice: -3 // Behalte nur die letzten 3
+                        }
+                    }
+                }
             );
 
+            // --- NEU: KOPFGELD-PRÜFUNG (Wurde auf das Opfer ein Kopfgeld ausgesetzt?) ---
+            const activeBounty = await db.collection('bounties').findOne({ targetUserId: victim._id });
+            if (activeBounty && activeBounty.pool > 0) {
+                bountyClaimed = activeBounty.pool;
+                // Kopfgeld auszahlen und Eintrag löschen
+                await usersCollection.updateOne({ _id: robberId }, { $inc: { balance: bountyClaimed } });
+                await db.collection('bounties').deleteOne({ _id: activeBounty._id });
+
+                // News Eintrag für LNN (ohne Aktien!)
+                await newsCollection.insertOne({
+                    headline: "KOPFGELD-JÄGER ERFOLGREICH!",
+                    content: `${robberName} hat den gesuchten ${victim.username} zur Strecke gebracht und ein Kopfgeld von $${bountyClaimed.toLocaleString()} kassiert!`,
+                    author: "LNN Justiz",
+                    createdAt: new Date(),
+                    likes: 0
+                });
+            }
+
+            // Robber Update
             await usersCollection.updateOne({ _id: robberId }, {
                 $inc: { balance: stolen, "crimeStats.successfulRobberies": 1, "crimeStats.totalStolen": stolen },
                 $set: { lastRobberyAt: new Date() }
             });
 
         } else {
+            // Fail Logik (bleibt gleich)
             const percentFine = (Math.random() * 0.05) + 0.05;
             fine = Math.floor(robber.balance * percentFine);
             if (fine > 2000000) fine = 2000000;
@@ -6660,30 +6679,22 @@ app.post('/api/crime/rob', isAuthenticated, async (req, res) => {
         }
 
         // Logbucheintrag
-        if (robberyLogsCollection) {
-            await robberyLogsCollection.insertOne({
-                victimId: victim._id,
-                attackerName: robberName,
-                success: isSuccess,
-                amountLost: isSuccess ? stolen : 0,
-                protectionApplied: protectionUsed,
-                timestamp: new Date()
-            });
-        }
+        await robberyLogsCollection.insertOne({
+            victimId: victim._id,
+            attackerName: robberName,
+            success: isSuccess,
+            amountLost: isSuccess ? stolen : 0,
+            timestamp: new Date()
+        });
 
         const updatedRobber = await usersCollection.findOne({ _id: robberId }, { projection: { balance: 1 } });
-
-        let resultMsg = isSuccess ? `Erfolg! $${stolen} erbeutet.` : `Erwischt! $${fine} Strafe gezahlt.`;
-        if (isSuccess && protectionUsed > 0) {
-            resultMsg += ` (Opfer hatte einen Tresor: -${Math.round(protectionUsed * 100)}% Beute)`;
-        }
 
         res.json({
             success: isSuccess,
             amount: isSuccess ? stolen : -fine,
-            chanceWas: (successChance * 100).toFixed(1),
+            bountyClaimed: bountyClaimed,
             newBalance: updatedRobber.balance,
-            message: resultMsg
+            message: isSuccess ? (bountyClaimed > 0 ? `Sieg! Beute: $${stolen} + Kopfgeld: $${bountyClaimed}!` : `Erfolg! $${stolen} erbeutet.`) : `Erwischt! $${fine} Strafe.`
         });
 
     } catch (err) {
@@ -10740,6 +10751,77 @@ app.post('/api/realestate/sell', isAuthenticated, async (req, res) => {
         res.status(400).json({ error: e.message });
     } finally {
         await session.endSession();
+    }
+});
+
+// --- BOUNTY SYSTEM ENDPOINTS ---
+
+// 1. Liste der letzten Angreifer holen (für das Profil)
+app.get('/api/bounty/attackers', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const user = await usersCollection.findOne({ _id: userId }, { projection: { lastAttackers: 1 } });
+        res.json({ attackers: user.lastAttackers || [] });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// 2. "Most Wanted" Liste abrufen
+app.get('/api/bounty/most-wanted', async (req, res) => {
+    try {
+        // Lade alle Kopfgelder und "joine" den Usernamen dazu
+        const bounties = await db.collection('bounties').aggregate([
+            { $match: { pool: { $gt: 0 } } },
+            { $lookup: { from: 'users', localField: 'targetUserId', foreignField: '_id', as: 'userDetails' } },
+            { $unwind: '$userDetails' },
+            { $project: { 
+                username: '$userDetails.username', 
+                pool: 1, 
+                updatedAt: 1,
+                targetUserId: 1
+            }},
+            { $sort: { pool: -1 } }
+        ]).toArray();
+        
+        res.json({ bounties });
+    } catch (e) { res.status(500).json({ error: "Fehler beim Laden der Most Wanted Liste." }); }
+});
+
+// 3. Kopfgeld auf jemanden aussetzen
+app.post('/api/bounty/place', isAuthenticated, async (req, res) => {
+    const { targetUserId, amount } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const bountyAmount = parseInt(amount);
+
+    if (isNaN(bountyAmount) || bountyAmount < 1000) {
+        return res.status(400).json({ error: "Mindest-Kopfgeld ist $1.000." });
+    }
+
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        if (user.balance < bountyAmount) return res.status(400).json({ error: "Nicht genug Geld." });
+
+        const targetIdObj = new ObjectId(targetUserId);
+        const targetUser = await usersCollection.findOne({ _id: targetIdObj });
+        if (!targetUser) return res.status(404).json({ error: "Zielperson existiert nicht." });
+
+        // A. Geld vom Konto abziehen
+        await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -bountyAmount } });
+
+        // B. Kopfgeld-Pool aktualisieren
+        await db.collection('bounties').updateOne(
+            { targetUserId: targetIdObj },
+            { 
+                $inc: { pool: bountyAmount }, 
+                $set: { updatedAt: new Date() } 
+            },
+            { upsert: true }
+        );
+
+        console.log(`${LOG_PREFIX_SERVER} 🔫 Kopfgeld gesetzt: ${user.username} -> ${targetUser.username} ($${bountyAmount})`);
+        res.json({ message: `Kopfgeld erfolgreich auf ${targetUser.username} gesetzt!`, newBalance: user.balance - bountyAmount });
+
+    } catch (e) {
+        res.status(500).json({ error: "Serverfehler beim Kopfgeld." });
     }
 });
 
