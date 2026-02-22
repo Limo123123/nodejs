@@ -7626,14 +7626,26 @@ async function triggerAiResponse(userId, partnerId, chatId, prompt = null) {
         }
 
         // 6. Ab zu Groq!
-        const groqResponse = await groq.chat.completions.create({
-            messages: apiMessages,
-            model: "llama3-8b-8192",
-            temperature: 0.85, // Etwas frecher und kreativer
-            max_tokens: 150,   // Verhindert Textwüsten und spart deine 14.400 Anfragen
+        const groqResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${process.env.GROQ_API_KEY}`, 
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                messages: apiMessages,
+                model: "llama3-8b-8192",
+                temperature: 0.85,
+                max_tokens: 150
+            })
         });
 
-        const aiText = groqResponse.choices[0].message.content.trim();
+        if (!groqResponse.ok) {
+            throw new Error(`Groq API Fehler: ${groqResponse.statusText}`);
+        }
+
+        const data = await groqResponse.json();
+        const aiText = data.choices[0].message.content.trim();
 
         // 7. Die Antwort der KI in der Datenbank speichern
         const newMsg = {
