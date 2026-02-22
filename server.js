@@ -2681,36 +2681,63 @@ app.get('/api/chat/chats', isAuthenticated, async (req, res) => {
             .limit(100) // Begrenzung für Performance
             .toArray();
 
-        // Optional: Teilnehmernamen hinzufügen (ohne den aktuellen Nutzer selbst)
-        // und Mute-Status hinzufügen
-        const populatedChats = [];
-        for (const chat of userChats) {
+        // 1. Sammle alle nötigen User-IDs für Batch-Abfragen (Kein N+1 Problem mehr!)
+        const neededUserIds = new Set();
+        const chatIds = userChats.map(c => c._id);
+
+        userChats.forEach(chat => {
+            if (chat.type === 'personal' || chat.type === 'group') {
+                chat.participants.forEach(pId => {
+                    if (!pId.equals(userId)) neededUserIds.add(pId.toString());
+                });
+            }
+        });
+
+        // 2. Lade alle benötigten User auf EINMAL aus der Datenbank
+        let usersMap = new Map();
+        if (neededUserIds.size > 0) {
+            const userIdsArray = Array.from(neededUserIds).map(id => new ObjectId(id));
+            const users = await usersCollection.find(
+                { _id: { $in: userIdsArray } },
+                { projection: { username: 1 } }
+            ).toArray();
+            usersMap = new Map(users.map(u => [u._id.toString(), u.username]));
+        }
+
+        // 3. Lade alle Mute-Einstellungen auf EINMAL
+        const chatSettings = await limUserChatSettingsCollection.find({ userId, chatId: { $in: chatIds } }).toArray();
+        const mutedChatsSet = new Set(chatSettings.filter(s => s.isMuted).map(s => s.chatId.toString()));
+
+        // 4. Baue die Chats für das Frontend zusammen (läuft jetzt instant im RAM)
+        const populatedChats = userChats.map(chat => {
             const participantDetails = [];
-            if (chat.type === 'personal') {
+
+            if (chat.type === 'tinda') {
+                // Tinda Chats sind speziell: Die Namen stehen schon im Chat-Dokument! Keine extra DB-Abfrage nötig.
+                participantDetails.push({ userId: chat.tindaPartnerId, username: chat.tindaPartnerName });
+            } 
+            else if (chat.type === 'personal') {
                 const otherParticipantId = chat.participants.find(pId => !pId.equals(userId));
-                if (otherParticipantId) {
-                    const otherUser = await usersCollection.findOne({ _id: otherParticipantId }, { projection: { username: 1 } });
-                    if (otherUser) participantDetails.push({ userId: otherUser._id, username: otherUser.username });
+                if (otherParticipantId && usersMap.has(otherParticipantId.toString())) {
+                    participantDetails.push({ userId: otherParticipantId, username: usersMap.get(otherParticipantId.toString()) });
                 }
-            } else { // 'group'
-                // Für Gruppen könnten wir die Anzahl der Teilnehmer oder die ersten paar Namen holen
-                const otherParticipants = await usersCollection.find(
-                    { _id: { $in: chat.participants.filter(pId => !pId.equals(userId)) } },
-                    { projection: { username: 1 } }
-                ).limit(3).toArray(); // Zeige bis zu 3 andere Teilnehmer
-                participantDetails.push(...otherParticipants.map(u => ({ userId: u._id, username: u.username })));
+            } 
+            else { // 'group'
+                const otherParticipants = chat.participants.filter(pId => !pId.equals(userId)).slice(0, 3);
+                otherParticipants.forEach(pId => {
+                    if (usersMap.has(pId.toString())) {
+                        participantDetails.push({ userId: pId, username: usersMap.get(pId.toString()) });
+                    }
+                });
             }
 
-            const userChatSetting = await limUserChatSettingsCollection.findOne({ userId, chatId: chat._id });
-
-            populatedChats.push({
+            return {
                 ...chat,
                 displayParticipants: participantDetails,
-                isMuted: userChatSetting ? userChatSetting.isMuted : false,
-                // Limo ID anstelle von Limazon Konto (nur ein String für die Antwort)
+                isMuted: mutedChatsSet.has(chat._id.toString()),
                 accountSystemName: "Limo ID"
-            });
-        }
+            };
+        });
 
         res.json({ chats: populatedChats });
     } catch (err) {
@@ -7512,11 +7539,13 @@ app.post('/api/tinda/swipe', isAuthenticated, async (req, res) => {
             if (!existingChat) {
                 await limChatsCollection.insertOne(newChat);
 
-                // Erste Nachricht von der KI generieren lassen (Initialer Gruß)
-                // Wir rufen die KI Funktion asynchron auf, ohne auf Antwort zu warten
+                // NEU: Wir triggern das Polling SOFORT, damit das Frontend den leeren Chat anzeigt, 
+                // BEVOR die KI überhaupt anfängt zu tippen!
+                if (typeof updateDataVersion === 'function') updateDataVersion('chat');
+
+                // KI Trigger läuft jetzt wirklich komplett unbemerkt im Hintergrund
                 triggerAiResponse(userId, hIdObj, newChat._id, "Generiere einen kurzen, flirty Anmachspruch.");
             }
-
             return res.json({ match: true, humanName: human.name });
         }
 
