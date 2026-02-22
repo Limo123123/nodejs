@@ -8041,7 +8041,7 @@ app.post('/api/heist/hack', isAuthenticated, async (req, res) => {
 // 3. ZUGRIFF (Der Raub - Nur wenn offen)
 app.post('/api/heist/start', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
-
+    
     // Großer Raub kostet mehr Equipment
     const COST = 2000;
 
@@ -8060,41 +8060,49 @@ app.post('/api/heist/start', isAuthenticated, async (req, res) => {
             if (fw.integrity > 0) throw new Error("Firewall ist noch aktiv! Hackt sie erst runter.");
             if (pot < 1000) throw new Error("Tresor ist leer.");
 
-            // Cooldown pro User (damit man nicht 100x klickt in der Stunde)
-            // Sagen wir: 5 Minuten Cooldown zwischen Versuchen
+            // Cooldown pro User (erhöht auf 15 Minuten!)
             const lastHeist = user.lastHeistAt ? new Date(user.lastHeistAt).getTime() : 0;
-            if (Date.now() - lastHeist < 5 * 60 * 1000) throw new Error("Fahndungslevel zu hoch. Warte 5 Minuten.");
+            if (Date.now() - lastHeist < 15 * 60 * 1000) {
+                const waitMin = Math.ceil((15 * 60 * 1000 - (Date.now() - lastHeist)) / 60000);
+                throw new Error(`Fahndungslevel zu hoch. Warte ${waitMin} Minuten.`);
+            }
 
             // Kosten
             await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -COST } }, { session });
 
-            // CHANCE: Wenn offen -> 60% Erfolg!
-            const isSuccess = Math.random() < 0.60;
+            // CHANCE: Deutlich schwerer (nur noch 25% Erfolg)
+            const isSuccess = Math.random() < 0.25; 
 
             if (isSuccess) {
-                // Beute: 5% bis 10% des AKTUELLEN Pots (damit für andere was übrig bleibt)
-                const percent = (Math.random() * 0.05) + 0.05;
-                const loot = Math.floor(pot * percent);
+                // Beute: Nur noch 0.5% bis 2% des Pots
+                const percent = (Math.random() * 0.015) + 0.005;
+                let loot = Math.floor(pot * percent);
+                
+                // Hard-Cap: Maximal 50 Millionen auf einmal (verhindert Milliarden-Diebstähle)
+                if (loot > 50000000) loot = 50000000;
 
                 await systemSettingsCollection.updateOne({ id: 'state_treasury' }, { $inc: { balance: -loot } }, { session });
                 await usersCollection.updateOne(
-                    { _id: userId },
-                    { $inc: { balance: loot }, $set: { lastHeistAt: new Date() } },
+                    { _id: userId }, 
+                    { $inc: { balance: loot }, $set: { lastHeistAt: new Date() } }, 
                     { session }
                 );
                 result = { success: true, message: `TREFFER! Du hast $${loot.toLocaleString()} erbeutet!` };
             } else {
-                // Erwischt: Kleine Strafe
-                const fine = 5000;
+                // Erwischt: Dynamische Strafe! 2% des EIGENEN Geldes (Mindestens 5000, Maximal 10 Millionen)
+                let fine = Math.floor(user.balance * 0.02);
+                if (fine < 5000) fine = 5000;
+                if (fine > 10000000) fine = 10000000;
+
                 await usersCollection.updateOne(
-                    { _id: userId },
-                    { $inc: { balance: -fine }, $set: { lastHeistAt: new Date() } },
+                    { _id: userId }, 
+                    { $inc: { balance: -fine }, $set: { lastHeistAt: new Date() } }, 
                     { session }
                 );
-                // Strafe in den Pot
+                // Strafe wandert zurück in den Pot
                 await systemSettingsCollection.updateOne({ id: 'state_treasury' }, { $inc: { balance: fine } }, { session });
-
-                result = { success: false, message: `ALARM! Du musstest fliehen und $${fine} Bestechungsgeld zahlen.` };
+                
+                result = { success: false, message: `ALARM! Erwischt! Du musstest $${fine.toLocaleString()} Strafe zahlen.` };
             }
         });
         res.json(result);
