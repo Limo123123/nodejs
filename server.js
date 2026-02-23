@@ -11272,6 +11272,176 @@ app.get('/api/admin/permissions', isAuthenticated, isAdmin, (req, res) => {
     res.json({ permissions: permissionsArray });
 });
 
+// =========================================================
+// === 🛋️ LIMO THERAPIE (ANTI-CASINO-SUCHT) ===
+// =========================================================
+
+// Helfer: Die KI von Dr. Limo
+async function triggerTherapyAi(userId, chatId, userMessage) {
+    try {
+        const GROQ_API_KEY = process.env.GROQ_API_KEY;
+        if (!GROQ_API_KEY) {
+            console.warn(`${LOG_PREFIX_SERVER} Groq API Key fehlt für die Therapie!`);
+            return;
+        }
+
+        // User Daten laden (für personalisierte Therapie)
+        const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
+        if (!user) return;
+
+        // Chat-Historie holen (Letzte 8 Nachrichten für den Kontext)
+        const recentMessages = await limMessagesCollection.find({ chatId: new ObjectId(chatId) })
+            .sort({ timestamp: 1 })
+            .toArray();
+        const lastMessages = recentMessages.slice(-8);
+
+        // Der Prompt für Dr. Limo
+        const systemPrompt = `Du bist Dr. Limo, der offizielle, virtuelle Therapeut und Suchtberater der Plattform "Limazon". 
+Dein Patient heißt ${user.username}. Aktueller Kontostand: $${user.balance.toFixed(2)}. Casino-Statistik: ${user.casinoStats ? user.casinoStats.totalWagered : 0} Dollar verspielt.
+
+REGELN:
+1. Behandle den Patienten wegen seiner Casino-Spielsucht (oder anderen Problemen). 
+2. Du bist professionell, aber leicht genervt, sarkastisch und sprichst die harte Wahrheit aus ("Vielleicht solltest du nicht ständig auf Rot setzen, ${user.username}.").
+3. Du weißt, dass dies alles auf der Plattform "Limazon" stattfindet.
+4. Antworte kurz und prägnant wie in einem WhatsApp-Chat (Max. 2-3 Sätze). Keine Romane.
+5. Du bist KEIN KI-Assistent, du bist ein studierter Psychologe mit einem sehr anstrengenden Job.`;
+
+        const apiMessages = [{ role: "system", content: systemPrompt }];
+
+        // Historie anhängen
+        for (const msg of lastMessages) {
+            apiMessages.push({
+                role: msg.isAi ? "assistant" : "user",
+                content: msg.content
+            });
+        }
+
+        // Neue Nachricht anhängen
+        if (userMessage) {
+            apiMessages.push({ role: "user", content: userMessage });
+        }
+
+        const payload = {
+            model: "llama-3.1-8b-instant",
+            messages: apiMessages,
+            temperature: 0.7, // Etwas logischer und direkter als bei Tinda
+            max_tokens: 150
+        };
+
+        const aiRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', payload, {
+            headers: {
+                'Authorization': `Bearer ${GROQ_API_KEY}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        const aiText = aiRes.data.choices[0].message.content;
+
+        if (aiText) {
+            // Antwort speichern
+            await limMessagesCollection.insertOne({
+                chatId: new ObjectId(chatId),
+                senderId: new ObjectId("000000000000000000000000"), // Fake ID für Dr. Limo
+                senderUsername: "Dr. Limo",
+                content: aiText.trim(),
+                timestamp: new Date(),
+                isAi: true
+            });
+
+            // Chat updaten
+            await limChatsCollection.updateOne({ _id: new ObjectId(chatId) }, {
+                $set: {
+                    lastMessagePreview: aiText.trim().substring(0, 30),
+                    updatedAt: new Date(),
+                    lastMessageTimestamp: new Date()
+                }
+            });
+
+            if (typeof updateDataVersion === 'function') updateDataVersion('chat'); // Polling triggern
+        }
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Therapie KI Fehler:`, err.message);
+    }
+}
+
+// 1. Therapie-Chat abrufen oder neu erstellen
+app.get('/api/therapy/chat', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        let chat = await limChatsCollection.findOne({ type: 'therapy', participants: userId });
+
+        if (!chat) {
+            // Erstgespräch anlegen
+            const newChat = {
+                type: 'therapy',
+                participants: [userId],
+                partnerName: "Dr. Limo",
+                createdAt: new Date(),
+                updatedAt: new Date(),
+                lastMessagePreview: "Nimm bitte auf der Couch Platz.",
+                lastMessageTimestamp: new Date()
+            };
+            const insertRes = await limChatsCollection.insertOne(newChat);
+            chat = { _id: insertRes.insertedId, ...newChat };
+
+            // Begrüßungsnachricht
+            await limMessagesCollection.insertOne({
+                chatId: chat._id,
+                senderId: new ObjectId("000000000000000000000000"),
+                senderUsername: "Dr. Limo",
+                content: `Hallo ${req.session.username}. Ich bin Dr. Limo. Ich sehe, du hast den Weg in meine Praxis gefunden. Leg dich auf die virtuelle Couch. Was bedrückt dich? Ist es wieder das Casino?`,
+                timestamp: new Date(),
+                isAi: true
+            });
+        }
+
+        // Nachrichten laden
+        const messages = await limMessagesCollection.find({ chatId: chat._id })
+            .sort({ timestamp: 1 })
+            .toArray();
+
+        res.json({ chat, messages });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Betreten der Praxis." });
+    }
+});
+
+// 2. Nachricht an Dr. Limo senden
+app.post('/api/therapy/chat/message', isAuthenticated, async (req, res) => {
+    const { content } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (!content || content.trim() === "") return res.status(400).json({ error: "Du musst schon sprechen." });
+
+    try {
+        const chat = await limChatsCollection.findOne({ type: 'therapy', participants: userId });
+        if (!chat) return res.status(404).json({ error: "Keine Akte gefunden." });
+
+        // User-Nachricht speichern
+        const userMsg = {
+            chatId: chat._id,
+            senderId: userId,
+            senderUsername: req.session.username,
+            content: content.trim(),
+            timestamp: new Date()
+        };
+        await limMessagesCollection.insertOne(userMsg);
+
+        await limChatsCollection.updateOne({ _id: chat._id }, {
+            $set: { lastMessagePreview: content.substring(0, 30), updatedAt: new Date() }
+        });
+
+        res.json({ message: "Gesendet", sentMessage: userMsg });
+
+        // KI im Hintergrund antworten lassen
+        triggerTherapyAi(userId, chat._id, content.trim());
+
+    } catch (e) {
+        res.status(500).json({ error: "Der Doktor ist gerade in einer anderen Sitzung." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
