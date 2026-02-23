@@ -5342,33 +5342,28 @@ app.get('/api/admin/users', isAuthenticated, isAdmin, async (req, res) => {
 
 // User bearbeiten (Geld, Tokens, Admin-Status UND Infinity Money)
 app.put('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
-    // Wir holen uns jetzt auch 'infinityMoney' aus dem Body
-    const { balance, tokens, isAdmin: makeAdmin, infinityMoney } = req.body;
-
+    const { balance, tokens, infinityMoney, role, permissions } = req.body;
     try {
-        const updateData = {
-            balance: parseFloat(balance),
-            tokens: parseInt(tokens),
-            isAdmin: makeAdmin
-        };
-
-        // Wenn infinityMoney im Request mitgesendet wurde (true oder false), updaten wir es
+        const updateData = {};
+        if (balance !== undefined) updateData.balance = parseFloat(balance);
+        if (tokens !== undefined) updateData.tokens = parseInt(tokens);
         if (infinityMoney !== undefined) {
             updateData.infinityMoney = infinityMoney;
-            // Wir setzen auch das "Unlocked" Flag, damit es konsistent bleibt
             updateData.unlockedInfinityMoney = infinityMoney;
         }
+        
+        // NEU: Rolle und Rechte speichern
+        if (role !== undefined) {
+            updateData.role = role;
+            // Legacy Support: Wenn Rolle "admin" ist, setze isAdmin auf true, sonst false
+            updateData.isAdmin = (role === 'admin'); 
+        }
+        if (permissions !== undefined) updateData.permissions = permissions;
 
-        await usersCollection.updateOne(
-            { _id: new ObjectId(req.params.id) },
-            { $set: updateData }
-        );
-
-        console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} hat User ${req.params.id} bearbeitet (InfMoney: ${infinityMoney}).`);
+        await usersCollection.updateOne({ _id: new ObjectId(req.params.id) }, { $set: updateData });
         res.json({ message: "User erfolgreich aktualisiert." });
     } catch (e) {
-        console.error(e);
-        res.status(500).json({ error: "Fehler beim Aktualisieren des Users." });
+        res.status(500).json({ error: "Fehler beim Aktualisieren." });
     }
 });
 
