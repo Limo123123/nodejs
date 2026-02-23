@@ -11459,6 +11459,71 @@ app.post('/api/therapy/chat/message', isAuthenticated, async (req, res) => {
     }
 });
 
+// =========================================================
+// === SYSTEM BERICHT (REPORT) ===
+// =========================================================
+app.get('/api/admin/system/report', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        console.log(`${LOG_PREFIX_SERVER} 📊 Admin ${req.session.username} generiert System-Bericht...`);
+
+        // 1. Zählungen
+        const userCount = await usersCollection.countDocuments();
+        const gangCount = await db.collection('gangs').countDocuments();
+        const courtCases = await db.collection('courtCases').countDocuments();
+        const activeAuctions = await auctionsCollection.countDocuments({ status: 'active' });
+
+        // 2. Wirtschaft (Aggregation)
+        const economyStats = await usersCollection.aggregate([
+            { 
+                $group: { 
+                    _id: null, 
+                    totalMoney: { $sum: "$balance" }, 
+                    totalTokens: { $sum: "$tokens" },
+                    totalTaxes: { $sum: "$totalTaxesPaid" }
+                } 
+            }
+        ]).toArray();
+
+        // 3. Staatskasse
+        const stateTreasury = await db.collection('systemSettings').findOne({ id: 'state_treasury' });
+        const treasuryBal = stateTreasury ? stateTreasury.balance : 0;
+
+        const totalMoneyCirculation = (economyStats[0]?.totalMoney || 0) + treasuryBal;
+
+        // 4. Die Top 5 Reichsten (Ohne Admins und ohne Infinity-Geld)
+        const topUsers = await usersCollection.find({ 
+            isAdmin: { $ne: true }, 
+            unlockedInfinityMoney: { $ne: true } 
+        })
+        .sort({ balance: -1 })
+        .limit(5)
+        .project({ username: 1, balance: 1, tokens: 1, _id: 0 })
+        .toArray();
+
+        // 5. Antwort senden
+        res.json({
+            timestamp: new Date().toISOString(),
+            stats: {
+                users: userCount,
+                gangs: gangCount,
+                courtCases: courtCases,
+                activeAuctions: activeAuctions,
+                economy: {
+                    totalMoney: totalMoneyCirculation,
+                    userMoney: economyStats[0]?.totalMoney || 0,
+                    treasury: treasuryBal,
+                    totalTokens: economyStats[0]?.totalTokens || 0,
+                    totalTaxesPaid: economyStats[0]?.totalTaxes || 0
+                },
+                topUsers: topUsers
+            }
+        });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Generieren des Berichts:`, err);
+        res.status(500).json({ error: "Fehler beim Generieren des Berichts." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
