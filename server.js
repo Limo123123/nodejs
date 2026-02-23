@@ -10761,6 +10761,23 @@ if (cluster.isPrimary) {
     }, 24 * 60 * 60 * 1000); 
 }
 
+// M. Arena: Kampf-Historie abrufen
+app.get('/api/teachermon/battles/history', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        // Finde alle beendeten Kämpfe, an denen der User beteiligt war
+        const history = await teachermonBattlesCollection.find({
+            status: 'resolved',
+            $or: [{ challengerId: userId }, { acceptorId: userId }]
+        }).sort({ resolvedAt: -1 }).limit(30).toArray();
+
+        res.json({ history });
+    } catch (e) {
+        console.error(`${LOG_PREFIX_TEACHERMON} Fehler bei History:`, e);
+        res.status(500).json({ error: "Fehler beim Laden der Historie." });
+    }
+});
+
 // --- IMMOBILIEN API ---
 
 // 1. Markt laden
