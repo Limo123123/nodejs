@@ -11490,13 +11490,13 @@ app.get('/api/admin/system/report', isAuthenticated, isAdmin, async (req, res) =
 
         const totalMoneyCirculation = (economyStats[0]?.totalMoney || 0) + treasuryBal;
 
-        // 4. Die Top 5 Reichsten (Ohne Admins und ohne Infinity-Geld)
+        // 4. Die Top 10 Reichsten (Ohne Admins und ohne Infinity-Geld)
         const topUsers = await usersCollection.find({ 
             isAdmin: { $ne: true }, 
             unlockedInfinityMoney: { $ne: true } 
         })
         .sort({ balance: -1 })
-        .limit(5)
+        .limit(10)
         .project({ username: 1, balance: 1, tokens: 1, _id: 0 })
         .toArray();
 
