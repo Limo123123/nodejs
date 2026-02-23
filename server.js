@@ -862,21 +862,186 @@ function isAuthenticated(req, res, next) {
     }
 }
 
+// 1. ZENTRALE RECHTE-LISTE (Einfach hier deine Endpunkte und Rechte mappen)
+const AVAILABLE_PERMISSIONS = {
+    'manage_products': { name: 'Shop & Produkte', desc: 'Produkte erstellen, bearbeiten, löschen und Lagerbestände ändern.' },
+    'manage_tokens': { name: 'Token-Generierung', desc: 'Erlaubt das Generieren von neuen Token-Guthabencodes.' },
+    'manage_users': { name: 'Nutzerverwaltung (Basis)', desc: 'Nutzerdaten anpassen (Geld, Tokens) und Geldstrafen verhängen.' },
+    'manage_users_critical': { name: 'Nutzerverwaltung (Kritisch)', desc: 'Achtung: Erlaubt das Löschen, Bannen und Passwort-Zurücksetzen von Nutzern.' },
+    'manage_news': { name: 'LNN News', desc: 'Manuelle News posten, AI-Trigger ausführen und Artikel löschen.' },
+    'manage_ideas': { name: 'Ideenbox Moderation', desc: 'Ideen-Status ändern, löschen und Nutzer für die Ideenbox sperren/entsperren.' },
+    'manage_teachermon': { name: 'Teachermon Karten', desc: 'Teachermon Karten erstellen und aus dem Spiel entfernen.' },
+    'manage_universes': { name: 'Teachermon Universen', desc: 'Neue Universen anlegen und verwalten.' },
+    'manage_human_grades': { name: 'Human Grades Daten', desc: 'Personen, Kategorien und Kriterien anlegen oder löschen.' },
+    'manage_human_ratings': { name: 'Human Grades Moderation', desc: 'Bewertungen von Nutzern einsehen und gezielt löschen.' },
+    'manage_cdn': { name: 'Bilder & CDN', desc: 'Hochgeladene Bilder vom Server löschen.' },
+    'manage_economy': { name: 'Wirtschaftskontrolle', desc: 'Steuer-Razzia erzwingen, Vermögen kappen und Infinity-Money entziehen.' },
+    'manage_chats': { name: 'Chat Inspektor', desc: 'Tinda-Chats und private Nachrichten lesen sowie als Admin Systemnachrichten senden.' },
+    'system_maintenance': { name: 'System & Wartung', desc: 'Health-Check abrufen, Kontostände normalisieren und Bild-Links reparieren.' },
+    'super_admin': { name: 'Super Admin (Engine)', desc: 'Gefährlich: Voller, ungefilterter Zugriff auf die MongoDB-Engine.' }
+};
+
+// 2. MAPPING: WELCHER ENDPOINT BRAUCHT WELCHES RECHT
+const ENDPOINT_PERMISSIONS = {
+    // --- Shop & Produkte ---
+    'GET /api/admin/products': 'manage_products',
+    'POST /api/admin/products': 'manage_products',
+    'PATCH /api/products/:id': 'manage_products',
+    'DELETE /api/admin/products/:id': 'manage_products',
+    'DELETE /api/products/:id': 'manage_products', // Alte Route
+    'PATCH /api/products/reset': 'manage_products',
+    'PATCH /api/admin/zero-stock': 'manage_products',
+    
+    // --- Tokens ---
+    'POST /api/admin/generate-token-code': 'manage_tokens',
+
+    // --- User Management ---
+    'GET /api/admin/users': 'manage_users',
+    'PUT /api/admin/users/:id': 'manage_users',
+    'POST /api/admin/users/:id/fine': 'manage_users',
+    'POST /api/admin/users/:id/reset-pw': 'manage_users_critical',
+    'DELETE /api/admin/users/:id': 'manage_users_critical',
+    'POST /api/admin/banUser': 'manage_users_critical', 
+
+    // --- LNN News ---
+    'POST /api/admin/news': 'manage_news',
+    'POST /api/admin/news/trigger-ai': 'manage_news',
+    'DELETE /api/admin/news/:id': 'manage_news',
+
+    // --- Ideenbox ---
+    'PATCH /api/ideas/:id/status': 'manage_ideas',
+    'DELETE /api/ideas/:id': 'manage_ideas',
+    'POST /api/admin/ideas/ban-user': 'manage_ideas',
+    'POST /api/admin/ideas/unban-user': 'manage_ideas',
+
+    // --- Teachermon ---
+    'POST /api/teachermon/admin/cards': 'manage_teachermon',
+    'DELETE /api/teachermon/admin/cards/:id': 'manage_teachermon',
+    'POST /api/teachermon/admin/universes': 'manage_universes',
+    'DELETE /api/teachermon/admin/universes/:id': 'manage_universes',
+
+    // --- Human Grades ---
+    'POST /api/human/admin/categories': 'manage_human_grades',
+    'POST /api/human/admin/criteria': 'manage_human_grades',
+    'POST /api/human/admin/humans': 'manage_human_grades',
+    'PUT /api/human/admin/humans/:id': 'manage_human_grades',
+    'DELETE /api/human/admin/humans/:id': 'manage_human_grades',
+    'POST /api/human/admin/reset-defaults': 'manage_human_grades',
+    'GET /api/human/admin/raters': 'manage_human_ratings',
+    'GET /api/human/admin/raters/:userId': 'manage_human_ratings',
+    'DELETE /api/human/admin/ratings/:id': 'manage_human_ratings',
+
+    // --- Wirtschaft ---
+    'POST /api/admin/system/force-tax': 'manage_economy',
+    'POST /api/admin/system/revoke-infinity': 'manage_economy',
+    'POST /api/admin/system/reset-rich-users': 'manage_economy',
+
+    // --- Chat Inspektor ---
+    'GET /api/admin/chat/tinda-conversations': 'manage_chats',
+    'GET /api/admin/chat/messages': 'manage_chats',
+    'POST /api/admin/chat/send': 'manage_chats',
+
+    // --- CDN / Bilder ---
+    'DELETE /api/cdn/delete/:filename': 'manage_cdn',
+
+    // --- System & Wartung ---
+    'GET /api/admin/health-check': 'system_maintenance',
+    'POST /api/admin/fix-balances': 'system_maintenance',
+    'POST /api/admin/convert-products-to-stocks': 'system_maintenance',
+    'POST /api/admin/normalize-balances': 'system_maintenance',
+    'POST /api/admin/system/normalize': 'system_maintenance',
+    'POST /api/admin/system/fix-images': 'system_maintenance',
+    'POST /api/admin/system/fix-decimals': 'system_maintenance',
+
+    // --- Admin Engine ---
+    'POST /api/admin/engine': 'super_admin'
+};
+
+// 3. VORGEFERTIGTE GRUPPEN (ROLES)
+const PREDEFINED_ROLES = {
+    'admin': { 
+        name: 'Administrator',
+        desc: 'Hat vollen Zugriff auf alles.',
+        permissions: ['ALL'] // Spezielles Keyword für "Darf alles"
+    },
+    'moderator': {
+        name: 'Moderator',
+        desc: 'Kümmert sich um die Community, Chats und Strafen.',
+        permissions: [
+            'manage_users', 
+            'manage_news', 
+            'manage_ideas', 
+            'manage_human_grades', 
+            'manage_human_ratings', 
+            'manage_chats'
+        ]
+    },
+    'shop_manager': {
+        name: 'Shop & Content Manager',
+        desc: 'Verwaltet den Shop, Items und Teachermon-Karten.',
+        permissions: [
+            'manage_products',
+            'manage_teachermon',
+            'manage_universes',
+            'manage_cdn'
+        ]
+    },
+    'user': {
+        name: 'Standard User',
+        desc: 'Normaler Spieler. Keine Admin-Rechte.',
+        permissions: [] // Hat Zugriff auf keinen einzigen Admin-Endpoint
+    }
+};
+
+// 2. DIE NEUE (SMARTE) isAdmin MIDDLEWARE
 async function isAdmin(req, res, next) {
     if (!req.session || !req.session.userId) {
-        console.warn(`${LOG_PREFIX_SERVER} isAdmin: Zugriff verweigert (nicht eingeloggt) für Pfad ${req.originalUrl}.`);
         return res.status(401).json({ error: 'Nicht eingeloggt.' });
     }
+
     try {
         const user = await usersCollection.findOne({ _id: new ObjectId(req.session.userId) });
-        if (user && user.isAdmin === true) {
+        if (!user) return res.status(401).json({ error: 'User nicht gefunden.' });
+
+        // A) Legacy-Support: Hat der User noch das alte "isAdmin: true" Feld?
+        if (user.isAdmin === true) {
             return next();
-        } else {
-            console.warn(`${LOG_PREFIX_SERVER} isAdmin: Zugriff verweigert (keine Admin-Rechte) für User ${req.session.username} auf Pfad ${req.originalUrl}.`);
-            res.status(403).json({ error: 'Zugriff verweigert. Nur für Admins.' });
         }
+
+        // B) Finde heraus, welchen Endpoint er aufrufen will
+        const routePath = req.route ? req.route.path : req.path;
+        const routeKey = `${req.method} ${routePath}`;
+        const requiredPermission = ENDPOINT_PERMISSIONS[routeKey];
+
+        // Wenn der User gar keine Rolle in der DB hat, ist er ein normaler 'user'
+        const userRole = user.role || 'user';
+
+        // C) Prüfung 1: Ist er in einer VORGEFERTIGTEN Gruppe?
+        if (PREDEFINED_ROLES[userRole]) {
+            const rolePerms = PREDEFINED_ROLES[userRole].permissions;
+            
+            // Wenn die Gruppe 'ALL' hat (z.B. Admin), darf er sofort durch
+            if (rolePerms.includes('ALL')) return next();
+            
+            // Wenn die Gruppe das spezifische Recht hat, darf er durch
+            if (requiredPermission && rolePerms.includes(requiredPermission)) {
+                return next();
+            }
+        }
+
+        // D) Prüfung 2: Hat er die Rolle 'custom' (Spezialanfertigung)?
+        if (userRole === 'custom' && user.permissions) {
+            if (requiredPermission && user.permissions.includes(requiredPermission)) {
+                return next();
+            }
+        }
+
+        // E) Rauswurf: Weder Admin, noch passende Gruppe, noch passendes Custom-Recht
+        console.warn(`${LOG_PREFIX_SERVER} ⛔ Zugriff verweigert für User ${req.session.username} (Rolle: ${userRole}) auf ${req.originalUrl}`);
+        res.status(403).json({ error: 'Zugriff verweigert. Fehlende Berechtigungen.' });
+
     } catch (err) {
-        console.error(`${LOG_PREFIX_SERVER} Fehler bei Admin-Prüfung für User ${req.session.username}:`, err);
+        console.error(`${LOG_PREFIX_SERVER} Fehler bei Admin-Prüfung:`, err);
         res.status(500).json({ error: "Fehler bei der Überprüfung der Berechtigungen." });
     }
 }
@@ -11054,6 +11219,38 @@ if (cluster.isPrimary) {
         }
     }, 60000); 
 }
+
+// GET: Gibt alle verfügbaren Rollen für das Frontend zurück
+app.get('/api/admin/roles', isAuthenticated, isAdmin, (req, res) => {
+    // Wandelt das Objekt in ein Array um für Vue/React/HTML
+    const rolesArray = Object.entries(PREDEFINED_ROLES).map(([id, data]) => ({
+        id: id,
+        name: data.name,
+        description: data.desc,
+        permissions: data.permissions
+    }));
+    
+    // Die 'custom' Rolle fügen wir manuell für das Frontend hinzu
+    rolesArray.push({
+        id: 'custom',
+        name: 'Benutzerdefiniert (Custom)',
+        description: 'Rechte einzeln zuweisen',
+        permissions: []
+    });
+
+    res.json({ roles: rolesArray });
+});
+
+// GET: Gibt alle verfügbaren Rechte und ihre Beschreibungen für das Frontend zurück
+app.get('/api/admin/permissions', isAuthenticated, isAdmin, (req, res) => {
+    // Wandelt das Objekt in ein Array um, ideal für v-for oder map() im Frontend
+    const permissionsArray = Object.entries(AVAILABLE_PERMISSIONS).map(([id, data]) => ({
+        id: id,
+        name: data.name,
+        description: data.desc
+    }));
+    res.json({ permissions: permissionsArray });
+});
 
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
