@@ -7968,7 +7968,7 @@ app.post('/api/tinda/match/direct', isAuthenticated, async (req, res) => {
     }
 });
 
-// 4. NEU: Geld an ein Tinda-Match senden (Sugar Daddy / Mommy)
+// 4. Geld an ein Tinda-Match senden (Sugar Daddy / Mommy)
 app.post('/api/tinda/chat/:chatId/transfer', isAuthenticated, isChatParticipant, async (req, res) => {
     const { amount } = req.body;
     const chatId = new ObjectId(req.params.chatId);
@@ -8017,7 +8017,8 @@ app.post('/api/tinda/chat/:chatId/transfer', isAuthenticated, isChatParticipant,
         res.json({ message: "Geld erfolgreich überwiesen!" });
 
         // 4. Die Magie: Wir rufen die KI auf und schieben ihr einen unsichtbaren System-Befehl unter, damit sie auf das Geld reagiert!
-        const secretPrompt = `[SYSTEM-EREIGNIS: Der User hat dir gerade ein Geschenk in Höhe von $${transferAmount} überwiesen! Reagiere absolut passend zu deinem Charakter darauf. Bedanke dich (oder sei undankbar, wenn das zu dir passt).]`;
+        const secretPrompt = `*System-Benachrichtigung der Tinda-App: Du hast gerade $${transferAmount} auf dein virtuelles Limazon-Konto überwiesen bekommen.* Reagiere in deiner nächsten Nachricht sofort auf dieses digitale Geldgeschenk (freu dich, sei flirty, arrogant oder kaufmännisch, passend zu deiner Rolle). Erwähne keine physischen Münzen oder Geldscheine, es ist eine App-Überweisung!`;
+        
         triggerAiResponse(userId, chat.tindaPartnerId, chatId, secretPrompt);
 
     } catch (e) {
