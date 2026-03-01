@@ -98,13 +98,14 @@ console.log(`${LOG_PREFIX_SERVER} Erlaubte CORS Origins:`, allowedOrigins);
 
 app.use(cors({
     origin: function (origin, callback) {
-        // Prüfen, ob die Origin in der statischen Liste ist ODER dem dynamischen Muster entspricht
-        const isAllowed = !origin ||
+        // origin === 'null' fängt die OAuth-Redirects ab
+        const isAllowed = !origin || 
+            origin === 'null' || 
             allowedOrigins.includes(origin) ||
             (origin && origin.endsWith('.scf.usercontent.goog'));
 
         if (isAllowed) {
-            callback(null, true); // Anfrage erlauben
+            callback(null, true); 
         } else {
             console.error(`${LOG_PREFIX_SERVER} CORS Fehler: Origin ${origin} nicht erlaubt.`);
             callback(new Error(`Origin ${origin} nicht durch CORS erlaubt`));
