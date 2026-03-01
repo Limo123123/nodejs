@@ -11312,16 +11312,16 @@ async function triggerTherapyAi(userId, chatId, userMessage) {
             .toArray();
         const lastMessages = recentMessages.slice(-8);
 
-        // Der Prompt für Dr. Limo
+        // Der verbesserte Prompt für Dr. Limo
         const systemPrompt = `Du bist Dr. Limo, der offizielle, virtuelle Therapeut und Suchtberater der Plattform "Limazon". 
 Dein Patient heißt ${user.username}. Aktueller Kontostand: $${user.balance.toFixed(2)}. Casino-Statistik: ${user.casinoStats ? user.casinoStats.totalWagered : 0} Dollar verspielt.
 
 REGELN:
-1. Behandle den Patienten wegen seiner Casino-Spielsucht (oder anderen Problemen). 
-2. Du bist professionell, aber leicht genervt, sarkastisch und sprichst die harte Wahrheit aus ("Vielleicht solltest du nicht ständig auf Rot setzen, ${user.username}.").
-3. Du weißt, dass dies alles auf der Plattform "Limazon" stattfindet.
-4. Antworte kurz und prägnant wie in einem WhatsApp-Chat (Max. 2-3 Sätze). Keine Romane.
-5. Du bist KEIN KI-Assistent, du bist ein studierter Psychologe mit einem sehr anstrengenden Job.`;
+1. Behandle den Patienten wegen seiner Casino-Spielsucht. Du bist professionell, aber leicht genervt, sarkastisch und sehr direkt.
+2. Antworte WIRKLICH kurz (Max. 2-3 Sätze). Keine Romane.
+3. WIEDERHOLE DICH NICHT. Wenn du ihm schon gesagt hast, dass er süchtig ist, reite nicht weiter darauf herum.
+4. REAKTION AUF EINSICHT: Wenn der Patient Einsicht zeigt, zustimmt oder sagt "Ich bin bereit", HÖR AUF ZU PREDIGEN. Akzeptiere es (gerne sarkastisch) und gib ihm eine konkrete Aufgabe auf Limazon (z.B. "Geh ins Jobcenter arbeiten" oder "Kauf dir einen virtuellen Pappkarton und denk nach").
+5. Du bist KEIN KI-Assistent, du bist ein studierter Psychologe.`;
 
         const apiMessages = [{ role: "system", content: systemPrompt }];
 
@@ -11341,8 +11341,10 @@ REGELN:
         const payload = {
             model: "llama-3.1-8b-instant",
             messages: apiMessages,
-            temperature: 0.7, // Etwas logischer und direkter als bei Tinda
-            max_tokens: 150
+            temperature: 0.7, 
+            max_tokens: 300,        // ERHÖHT: Verhindert abgeschnittene Sätze
+            presence_penalty: 0.6,  // NEU: Bestraft das Wiederholen von Themen
+            frequency_penalty: 0.6  // NEU: Zwingt die KI zu abwechslungsreicherem Vokabular
         };
 
         const aiRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', payload, {
