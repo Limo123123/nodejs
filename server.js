@@ -1,4 +1,4 @@
-f// server.js - Full Backend for Limo Open Source Project and all of the components of it
+// server.js - Full Backend for Limo Open Source Project and all of the components of it
 const path = require('path');
 const fs = require('fs');
 const dotenv = require('dotenv');
