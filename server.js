@@ -7800,7 +7800,9 @@ WICHTIGE REGELN:
         ];
 
         for (const msg of last6Messages) {
-            const isBot = msg.senderId.toString() === humanId.toString();
+            // Prüft erst, ob senderId überhaupt existiert, bevor .toString() aufgerufen wird
+            const isBot = msg.senderId ? (msg.senderId.toString() === humanId.toString()) : false;
+            
             apiMessages.push({
                 role: isBot ? "assistant" : "user",
                 content: msg.content
