@@ -11988,15 +11988,21 @@ app.post('/api/pets/:id/feed', isAuthenticated, async (req, res) => {
             const pet = await petsCollection.findOne({ _id: petId, userId: userId }, { session });
             if (!pet) throw new Error("Tier nicht gefunden.");
 
-            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -FEED_COST } }, { session });
+            // Überfressen verhindern (Wenn Balken über 90% ist)
+            const now = new Date().getTime();
+            const lastFed = new Date(pet.lastFedAt).getTime();
+            const hoursPassed = (now - lastFed) / (1000 * 60 * 60);
+            let hungerPercent = 100 - ((hoursPassed / pet.starvationTimeHours) * 100);
             
-            await petsCollection.updateOne(
-                { _id: petId },
-                { $set: { lastFedAt: new Date() } },
-                { session }
-            );
+            if (hungerPercent >= 90) {
+                throw new Error(`${pet.name} ist noch pappsatt! Warte, bis es wieder Hunger hat.`);
+            }
+
+            // Geld abziehen & Magen füllen
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -FEED_COST } }, { session });
+            await petsCollection.updateOne({ _id: petId }, { $set: { lastFedAt: new Date() } }, { session });
         });
-        res.json({ message: "Tier erfolgreich gefüttert! Es ist wieder satt." });
+        res.json({ message: "Tier erfolgreich gefüttert! Es ist wieder glücklich und satt." });
     } catch (e) {
         res.status(400).json({ error: e.message });
     } finally {
