@@ -165,6 +165,8 @@ let cachedTeachermonCards = null;
 let teachermonUniversesCollection;
 let propertiesCollection, ownedPropertiesCollection;
 let propertyInvitesCollection;
+let petsCollection;
+let petCemeteryCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -1089,6 +1091,8 @@ MongoClient.connect(mongoUri)
 		propertiesCollection = db.collection('properties');
 		ownedPropertiesCollection = db.collection('ownedProperties');
 		propertyInvitesCollection = db.collection('propertyInvites');
+		petsCollection = db.collection('pets');
+        petCemeteryCollection = db.collection('petCemetery');
 
         authCodesCollection = db.collection(authCodesCollectionName);
 
@@ -11874,6 +11878,183 @@ app.get('/api/limea/visit/:houseId', isAuthenticated, async (req, res) => {
         res.status(500).json({ error: "Klingel kaputt. Fehler beim Laden." });
     }
 });
+
+// =========================================================
+// === 🐾 HAUSTIER SYSTEM (TAMAGOTCHI & FRIEDHOF) ===
+// =========================================================
+
+// Katalog: starvationTimeHours = Nach wie vielen Stunden OHNE Futter das Tier stirbt.
+const PET_CATALOG = [
+    { id: 'dog', name: 'Hund', icon: '🐶', enclosure: 'Hundehütte 🛖', price: 500, starvationTimeHours: 24 },
+    { id: 'cat', name: 'Katze', icon: '🐱', enclosure: 'Kratzbaum 🗼', price: 500, starvationTimeHours: 24 },
+    { id: 'hamster', name: 'Hamster', icon: '🐹', enclosure: 'Käfig 🗄️', price: 150, starvationTimeHours: 12 }, 
+    { id: 'lizard', name: 'Echse', icon: '🦎', enclosure: 'Terrarium 📦', price: 300, starvationTimeHours: 48 }, 
+    { id: 'parrot', name: 'Papagei', icon: '🦜', enclosure: 'Vogelkäfig 🪹', price: 600, starvationTimeHours: 24 }
+];
+
+const FEED_COST = 15; // $15 pro Fütterung
+
+app.get('/api/pets/shop', isAuthenticated, (req, res) => {
+    res.json({ catalog: PET_CATALOG, feedCost: FEED_COST });
+});
+
+app.post('/api/pets/adopt', isAuthenticated, async (req, res) => {
+    const { petId, customName } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (!customName || customName.trim().length < 2 || customName.trim().length > 20) {
+        return res.status(400).json({ error: "Bitte gib deinem Tier einen Namen (2-20 Zeichen)." });
+    }
+
+    const petType = PET_CATALOG.find(p => p.id === petId);
+    if (!petType) return res.status(400).json({ error: "Dieses Tier gibt es nicht." });
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (user.balance < petType.price) throw new Error(`Du brauchst $${petType.price} für die Adoption.`);
+
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -petType.price } }, { session });
+
+            await petsCollection.insertOne({
+                userId: userId,
+                ownerName: user.username,
+                typeId: petType.id,
+                typeName: petType.name,
+                icon: petType.icon,
+                enclosure: petType.enclosure,
+                name: customName.trim(),
+                starvationTimeHours: petType.starvationTimeHours,
+                lastFedAt: new Date(),
+                adoptedAt: new Date()
+            }, { session });
+        });
+        res.json({ message: `Herzlichen Glückwunsch! ${customName.trim()} gehört jetzt dir.` });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+app.get('/api/pets/my', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const pets = await petsCollection.find({ userId }).toArray();
+        const now = new Date().getTime();
+
+        const populatedPets = pets.map(pet => {
+            const lastFed = new Date(pet.lastFedAt).getTime();
+            const adoptedAt = new Date(pet.adoptedAt).getTime();
+            
+            const hoursPassed = (now - lastFed) / (1000 * 60 * 60);
+            
+            // Alter in Tagen (Tamagotchi Style)
+            const ageInDays = Math.floor((now - adoptedAt) / (1000 * 60 * 60 * 24));
+            
+            // Hunger berechnen
+            let hungerPercent = 100 - ((hoursPassed / pet.starvationTimeHours) * 100);
+            if (hungerPercent < 0) hungerPercent = 0;
+
+            return {
+                id: pet._id,
+                name: pet.name,
+                icon: pet.icon,
+                type: pet.typeName,
+                enclosure: pet.enclosure,
+                hunger: Math.round(hungerPercent),
+                ageDays: ageInDays,
+                isDying: hungerPercent <= 15
+            };
+        });
+
+        res.json({ pets: populatedPets });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden deiner Tiere." });
+    }
+});
+
+app.post('/api/pets/:id/feed', isAuthenticated, async (req, res) => {
+    const petId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (user.balance < FEED_COST) throw new Error(`Futter kostet $${FEED_COST}. Du hast nicht genug Geld!`);
+
+            const pet = await petsCollection.findOne({ _id: petId, userId: userId }, { session });
+            if (!pet) throw new Error("Tier nicht gefunden.");
+
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -FEED_COST } }, { session });
+            
+            await petsCollection.updateOne(
+                { _id: petId },
+                { $set: { lastFedAt: new Date() } },
+                { session }
+            );
+        });
+        res.json({ message: "Tier erfolgreich gefüttert! Es ist wieder satt." });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+app.get('/api/pets/cemetery', async (req, res) => {
+    try {
+        const deadPets = await petCemeteryCollection.find({}).sort({ deathDate: -1 }).limit(100).toArray();
+        res.json({ cemetery: deadPets });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Betreten des Friedhofs." });
+    }
+});
+
+// --- DER SENSENMANN (CRON JOB) ---
+if (cluster.isPrimary) {
+    setInterval(async () => {
+        try {
+            const now = new Date();
+            const allPets = await petsCollection.find({}).toArray();
+            
+            const deaths = [];
+            const idsToDelete = [];
+
+            for (const pet of allPets) {
+                const lastFed = new Date(pet.lastFedAt).getTime();
+                const hoursPassed = (now.getTime() - lastFed) / (1000 * 60 * 60);
+
+                // Hat das Tier sein Verhunger-Limit erreicht?
+                if (hoursPassed >= pet.starvationTimeHours) {
+                    const ageDays = Math.floor((now.getTime() - new Date(pet.adoptedAt).getTime()) / (1000 * 60 * 60 * 24));
+                    deaths.push({
+                        userId: pet.userId,
+                        ownerName: pet.ownerName,
+                        petName: pet.name,
+                        icon: pet.icon,
+                        type: pet.typeName,
+                        ageDays: ageDays, // Auf dem Grabstein festhalten, wie alt es wurde
+                        deathDate: now,
+                        cause: 'Verhungert 🦴'
+                    });
+                    idsToDelete.push(pet._id);
+                }
+            }
+
+            if (deaths.length > 0) {
+                await petCemeteryCollection.insertMany(deaths);
+                await petsCollection.deleteMany({ _id: { $in: idsToDelete } });
+                console.log(`${LOG_PREFIX_SERVER} 🪦 Der Sensenmann war da. ${deaths.length} Tiere sind verhungert.`);
+            }
+
+        } catch (e) {
+            console.error("Fehler im Sensenmann-Job:", e);
+        }
+    }, 5 * 60 * 1000); // Alle 5 Minuten prüfen
+}
 
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
