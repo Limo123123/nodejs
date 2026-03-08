@@ -11718,9 +11718,9 @@ const LIMEA_CATALOG = [
     { id: 'f_bed_double', name: 'Doppelbett "Romantik"', price: 300, w: 120, h: 120, icon: '🛌', bg: '#A0522D', layer: 'base' },
     { id: 'f_sofa', name: 'Sofa "Klippan"', price: 200, w: 140, h: 60, icon: '🛋️', bg: '#4682B4', layer: 'base' },
     { id: 'f_table', name: 'Esstisch "Holz"', price: 120, w: 100, h: 100, icon: '🍽️', bg: '#D2B48C', layer: 'base' },
-    { id: 'f_desk', name: 'Schreibtisch "Work"', price: 90, w: 100, h: 50, icon: '💻', bg: '#555', layer: 'base' },
+    { id: 'f_desk', name: 'Schreibtisch "Work"', price: 90, w: 100, h: 60, icon: '💻', bg: '#555', layer: 'base' }, // h: 50 -> 60
     
-    // --- NEUE STÜHLE ---
+    // --- STÜHLE ---
     { id: 'f_chair_wood', name: 'Holzstuhl', price: 40, w: 40, h: 40, icon: '🪑', bg: '#8B4513', layer: 'base' },
     { id: 'f_chair_office', name: 'Bürostuhl', price: 80, w: 40, h: 40, icon: '💺', bg: '#333', layer: 'base' },
     { id: 'f_armchair', name: 'Sessel "Chill"', price: 150, w: 60, h: 60, icon: '🛋️', bg: '#FF8C00', layer: 'base' },
@@ -11728,7 +11728,7 @@ const LIMEA_CATALOG = [
     // --- DEKO & REST ---
     { id: 'f_plant', name: 'Zimmerpflanze', price: 30, w: 40, h: 40, icon: '🪴', bg: '#2E8B57', layer: 'decor' },
     { id: 'f_tv', name: 'Flachbild-TV', price: 400, w: 120, h: 20, icon: '📺', bg: '#111', layer: 'decor' },
-    { id: 'f_toilet', name: 'Toilette', price: 90, w: 40, h: 50, icon: '🚽', bg: '#FFF', layer: 'base' },
+    { id: 'f_toilet', name: 'Toilette', price: 90, w: 40, h: 60, icon: '🚽', bg: '#FFF', layer: 'base' }, // h: 50 -> 60
     { id: 'f_rug', name: 'Teppich "Flauschi"', price: 50, w: 160, h: 120, icon: '🧶', bg: '#CD5C5C', layer: 'floor' },
     { id: 'f_kitchen', name: 'Küchenzeile', price: 600, w: 200, h: 60, icon: '🍳', bg: '#ddd', layer: 'base' }
 ];
