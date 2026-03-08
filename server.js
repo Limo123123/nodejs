@@ -11796,7 +11796,14 @@ app.post('/api/limea/buy', isAuthenticated, async (req, res) => {
                 { upsert: true, session }
             );
         });
-        res.json({ message: `Erfolgreich gekauft: ${qty}x ${item.name}!` });
+        
+        // NEU: Aktuellen Kontostand aus der Datenbank laden
+        const updatedUser = await usersCollection.findOne({ _id: userId });
+        
+        res.json({ 
+            message: `Erfolgreich gekauft: ${qty}x ${item.name}!`,
+            newBalance: updatedUser.balance // <--- Das schicken wir jetzt ans Frontend
+        });
     } catch (e) {
         res.status(400).json({ error: e.message });
     } finally {
@@ -11822,6 +11829,49 @@ app.post('/api/realestate/my-home/layout', isAuthenticated, async (req, res) => 
         res.json({ message: "Inneneinrichtung erfolgreich gespeichert!" });
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Speichern der Einrichtung." });
+    }
+});
+
+// NEU: Nachbarschaft (Alle gebauten Häuser sehen)
+app.get('/api/realestate/neighborhood', isAuthenticated, async (req, res) => {
+    try {
+        const houses = await ownedPropertiesCollection.find({}).toArray();
+        
+        // Daten für das Frontend schön verpacken
+        const neighborhood = houses.map(h => ({
+            id: h._id,
+            name: h.name,
+            ownerName: h.ownerName,
+            roommatesCount: (h.roommates || []).length,
+            icon: h.img || '🏠'
+        }));
+        
+        res.json({ neighborhood });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der Nachbarschaft." });
+    }
+});
+
+// NEU: Haus besuchen (Limea Layout abrufen, OHNE Inventar)
+app.get('/api/limea/visit/:houseId', isAuthenticated, async (req, res) => {
+    try {
+        const houseId = new ObjectId(req.params.houseId);
+        const house = await ownedPropertiesCollection.findOne({ _id: houseId });
+        
+        if (!house) return res.status(404).json({ error: "Dieses Haus existiert nicht mehr." });
+
+        res.json({
+            home: {
+                id: house.houseId, // Wichtig für die Raumgröße (carton, villa etc.)
+                name: house.name,
+                ownerName: house.ownerName,
+                layout: house.furnitureLayout || [],
+                isOwner: false // Besucher dürfen nichts anfassen!
+            },
+            catalog: LIMEA_CATALOG // Brauchen wir, um die Möbel zu rendern
+        });
+    } catch(e) {
+        res.status(500).json({ error: "Klingel kaputt. Fehler beim Laden." });
     }
 });
 
