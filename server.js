@@ -11739,14 +11739,14 @@ app.get('/api/limea/editor-data', isAuthenticated, async (req, res) => {
     try {
         const user = await usersCollection.findOne({ _id: userId });
         
-        // Finde das Haus, in dem der User wohnt (Eigentümer oder Mitbewohner)
+        // Finde das Haus, in dem der User wohnt
         const home = await ownedPropertiesCollection.findOne({ 
             $or: [{ ownerId: userId }, { roommates: userId }] 
         });
         
         if (!home) return res.status(404).json({ error: "Du besitzt kein Haus und wohnst in keiner WG." });
 
-        // Inventar laden (nur Limea Möbel)
+        // Inventar laden
         const furnitureIds = LIMEA_CATALOG.map(i => i.id);
         const inventory = await inventoriesCollection.find({ 
             userId: userId, 
@@ -11757,9 +11757,9 @@ app.get('/api/limea/editor-data', isAuthenticated, async (req, res) => {
         res.json({
             balance: user.balance,
             home: {
-                id: home._id,
+                id: home.houseId, // <--- HIER WAR DER FEHLER (Es muss houseId sein!)
                 name: home.name,
-                layout: home.furnitureLayout || [], // Gespeicherte Möbel-Positionen
+                layout: home.furnitureLayout || [],
                 isOwner: home.ownerId.equals(userId)
             },
             inventory: inventory,
