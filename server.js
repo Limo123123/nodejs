@@ -11708,6 +11708,116 @@ app.get('/api/admin/system/report', isAuthenticated, isAdmin, async (req, res) =
     }
 });
 
+// =========================================================
+// === 🪑 LIMEA MÖBELHAUS & HOUSING (VOGELPERSPEKTIVE) ===
+// =========================================================
+
+// Der Produkt-Katalog von Limea (Maße sind in Pixeln für den Editor)
+const LIMEA_CATALOG = [
+    { id: 'f_bed_single', name: 'Einzelbett "Snark"', price: 150, w: 60, h: 120, icon: '🛏️', bg: '#8B5A2B' },
+    { id: 'f_bed_double', name: 'Doppelbett "Romantik"', price: 300, w: 120, h: 120, icon: '🛌', bg: '#A0522D' },
+    { id: 'f_sofa', name: 'Sofa "Klippan"', price: 200, w: 140, h: 60, icon: '🛋️', bg: '#4682B4' },
+    { id: 'f_table', name: 'Esstisch "Holz"', price: 120, w: 100, h: 100, icon: '🪑', bg: '#D2B48C' },
+    { id: 'f_desk', name: 'Schreibtisch "Work"', price: 90, w: 100, h: 50, icon: '💻', bg: '#555' },
+    { id: 'f_plant', name: 'Zimmerpflanze', price: 30, w: 40, h: 40, icon: '🪴', bg: '#2E8B57' },
+    { id: 'f_tv', name: 'Flachbild-TV', price: 400, w: 120, h: 20, icon: '📺', bg: '#111' },
+    { id: 'f_toilet', name: 'Toilette', price: 90, w: 40, h: 50, icon: '🚽', bg: '#FFF' },
+    { id: 'f_rug', name: 'Teppich "Flauschi"', price: 50, w: 160, h: 120, icon: '🧶', bg: '#CD5C5C' },
+    { id: 'f_kitchen', name: 'Küchenzeile', price: 600, w: 200, h: 60, icon: '🍳', bg: '#ddd' }
+];
+
+// Editor-Daten abrufen (Lädt Haus, Möbel, Katalog und Geld auf einmal)
+app.get('/api/limea/editor-data', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        
+        // Finde das Haus, in dem der User wohnt (Eigentümer oder Mitbewohner)
+        const home = await ownedPropertiesCollection.findOne({ 
+            $or: [{ ownerId: userId }, { roommates: userId }] 
+        });
+        
+        if (!home) return res.status(404).json({ error: "Du besitzt kein Haus und wohnst in keiner WG." });
+
+        // Inventar laden (nur Limea Möbel)
+        const furnitureIds = LIMEA_CATALOG.map(i => i.id);
+        const inventory = await inventoriesCollection.find({ 
+            userId: userId, 
+            productId: { $in: furnitureIds },
+            quantityOwned: { $gt: 0 }
+        }).toArray();
+
+        res.json({
+            balance: user.balance,
+            home: {
+                id: home._id,
+                name: home.name,
+                layout: home.furnitureLayout || [], // Gespeicherte Möbel-Positionen
+                isOwner: home.ownerId.equals(userId)
+            },
+            inventory: inventory,
+            catalog: LIMEA_CATALOG
+        });
+    } catch(e) {
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Laden des Limea-Editors." });
+    }
+});
+
+// Möbel im Shop kaufen
+app.post('/api/limea/buy', isAuthenticated, async (req, res) => {
+    const { itemId, quantity } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const qty = parseInt(quantity) || 1;
+
+    const item = LIMEA_CATALOG.find(i => i.id === itemId);
+    if (!item) return res.status(404).json({ error: "Dieses Möbelstück gibt es bei Limea nicht." });
+
+    const totalCost = item.price * qty;
+    const session = client.startSession();
+    
+    try {
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (user.balance < totalCost) throw new Error("Zu wenig Geld für diesen Einkauf.");
+
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -totalCost } }, { session });
+
+            await inventoriesCollection.updateOne(
+                { userId: userId, productId: itemId },
+                { $inc: { quantityOwned: qty } },
+                { upsert: true, session }
+            );
+        });
+        res.json({ message: `Erfolgreich gekauft: ${qty}x ${item.name}!` });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// Haus-Layout (Möbelpositionen) speichern
+app.post('/api/realestate/my-home/layout', isAuthenticated, async (req, res) => {
+    const { layout } = req.body; 
+    // Erwartetes Format: [{ id: 'f_bed', uid: 'uuid-string', x: 100, y: 200, r: 90 }]
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const home = await ownedPropertiesCollection.findOne({ ownerId: userId });
+        if (!home) return res.status(403).json({ error: "Nur der Hausbesitzer darf Möbel verrücken und speichern." });
+
+        await ownedPropertiesCollection.updateOne(
+            { _id: home._id },
+            { $set: { furnitureLayout: layout } }
+        );
+
+        res.json({ message: "Inneneinrichtung erfolgreich gespeichert!" });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Speichern der Einrichtung." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
