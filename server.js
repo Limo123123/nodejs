@@ -7783,11 +7783,13 @@ async function triggerAiResponse(userId, humanId, chatId, userMessage) {
             .sort({ timestamp: 1 })
             .toArray();
         
-        const last6Messages = recentMessages.slice(-6);
+        const lastMessages = recentMessages.slice(-30);
+		
+		const chat = await limChatsCollection.findOne({ _id: new ObjectId(chatId) });
 
         // --- DER GEFIXTE SYSTEM PROMPT ---
         const systemPrompt = `Du bist die echte Person ${human.name}.
-Szenario: Du bist auf der Dating-App Tinda und schreibst mit einem Match.
+Szenario: Du bist auf Tinda und schreibst mit dem User. ${chat.isMarried ? 'IHR SEID INZWISCHEN VERHEIRATET UND WOHNT ZUSAMMEN!' : 'Ihr datet euch gerade.'}
 
 WICHTIGE REGELN:
 1. SPRACHE ANPASSEN: Antworte EXAKT in der Sprache, in der der User schreibt. Wenn er Englisch schreibt, wechsle sofort komplett auf Englisch! Wenn er Deutsch schreibt, bleib bei Deutsch.
@@ -7799,7 +7801,7 @@ WICHTIGE REGELN:
             { role: "system", content: systemPrompt }
         ];
 
-        for (const msg of last6Messages) {
+        for (const msg of lastMessages) {
             // Prüft erst, ob senderId überhaupt existiert, bevor .toString() aufgerufen wird
             const isBot = msg.senderId ? (msg.senderId.toString() === humanId.toString()) : false;
             
@@ -8021,6 +8023,139 @@ app.post('/api/tinda/chat/:chatId/transfer', isAuthenticated, isChatParticipant,
         
         triggerAiResponse(userId, chat.tindaPartnerId, chatId, secretPrompt);
 
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// NEU: Heiraten und Zusammenziehen
+app.post('/api/tinda/chat/:chatId/marry', isAuthenticated, isChatParticipant, async (req, res) => {
+    const chatId = new ObjectId(req.params.chatId);
+    const userId = new ObjectId(req.session.userId);
+    const chat = req.chat;
+    const MARRIAGE_COST = 10000;
+
+    if (chat.type !== 'tinda') return res.status(400).json({ error: "Du kannst nur Tinda-Matches heiraten." });
+    if (chat.isMarried) return res.status(400).json({ error: "Ihr seid bereits verheiratet!" });
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (user.balance < MARRIAGE_COST) throw new Error(`Hochzeit kostet $${MARRIAGE_COST}. Spar noch etwas!`);
+
+            // 1. Kosten abziehen & User-Status anpassen
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -MARRIAGE_COST }, $set: { isMarriedTo: chat.tindaPartnerName } }, { session });
+
+            // 2. Chat auf verheiratet setzen
+            await limChatsCollection.updateOne({ _id: chatId }, { $set: { isMarried: true } }, { session });
+
+            // 3. Zusammenziehen (Partner in die eigene Immobilie packen, falls vorhanden)
+            const home = await ownedPropertiesCollection.findOne({ ownerId: userId }, { session });
+            if (home) {
+                await ownedPropertiesCollection.updateOne({ _id: home._id }, { $addToSet: { roommates: chat.tindaPartnerId } }, { session });
+            }
+
+            // 4. System-Nachricht in den Chat
+            const sysMsgContent = `💍 IHR HABT GEHEIRATET! ${chat.tindaPartnerName} ist bei dir eingezogen. Das gemeinsame Konto ist eröffnet.`;
+            await limMessagesCollection.insertOne({
+                chatId, senderId: null, senderUsername: "System", content: sysMsgContent, timestamp: new Date(), isSystem: true
+            }, { session });
+        });
+
+        updateDataVersion('chat');
+        triggerAiResponse(userId, chat.tindaPartnerId, chatId, "*System: Der User hat dir soeben einen Antrag gemacht und ihr seid verheiratet und zusammengezogen! Reagiere extrem glücklich als frischgebackener Ehepartner!*");
+
+        res.json({ message: "Herzlichen Glückwunsch zur Hochzeit!" });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// NEU: Gemeinsames Konto (Tägliches Taschengeld vom Partner abheben)
+app.post('/api/tinda/chat/:chatId/shared-account', isAuthenticated, isChatParticipant, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    const chat = req.chat;
+    const DAILY_ALLOWANCE = 1500; // Gehalt vom Ehepartner
+
+    if (chat.type !== 'tinda' || !chat.isMarried) return res.status(400).json({ error: "Ihr seid nicht verheiratet." });
+
+    const user = await usersCollection.findOne({ _id: userId });
+    const now = Date.now();
+    const lastWithdraw = user.lastAllowanceAt ? new Date(user.lastAllowanceAt).getTime() : 0;
+
+    // 24 Stunden Cooldown für das gemeinsame Konto
+    if (now - lastWithdraw < 24 * 60 * 60 * 1000) {
+        const hoursLeft = Math.ceil((24 * 60 * 60 * 1000 - (now - lastWithdraw)) / (1000 * 60 * 60));
+        return res.status(429).json({ error: `Gemeinsames Konto gesperrt. Dein Partner lässt dich erst in ${hoursLeft} Stunden wieder ran.` });
+    }
+
+    await usersCollection.updateOne(
+        { _id: userId },
+        { $inc: { balance: DAILY_ALLOWANCE }, $set: { lastAllowanceAt: new Date() } }
+    );
+
+    // Trigger KI, damit der Partner darauf reagiert
+    triggerAiResponse(userId, chat.tindaPartnerId, chat._id, `*System: Du hast bemerkt, dass dein Ehepartner gerade $${DAILY_ALLOWANCE} vom gemeinsamen Konto abgehoben hat. Sag ihm deine Meinung dazu.*`);
+
+    res.json({ message: `$${DAILY_ALLOWANCE} vom gemeinsamen Konto abgehoben. Dein Partner hat das sicher gemerkt.`, newBalance: user.balance + DAILY_ALLOWANCE });
+});
+
+// Scheidung und Auszug
+app.post('/api/tinda/chat/:chatId/divorce', isAuthenticated, isChatParticipant, async (req, res) => {
+    const chatId = new ObjectId(req.params.chatId);
+    const userId = new ObjectId(req.session.userId);
+    const chat = req.chat;
+    const DIVORCE_COST = 5000; // Anwaltskosten
+
+    if (chat.type !== 'tinda') return res.status(400).json({ error: "Das geht nur bei Tinda-Matches." });
+    if (!chat.isMarried) return res.status(400).json({ error: "Ihr seid gar nicht verheiratet!" });
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (user.balance < DIVORCE_COST) throw new Error(`Die Scheidung kostet $${DIVORCE_COST} Anwaltsgebühren. Du bist zu arm für die Trennung!`);
+
+            // 1. Kosten abziehen & Beziehungsstatus beim User entfernen
+            await usersCollection.updateOne(
+                { _id: userId }, 
+                { $inc: { balance: -DIVORCE_COST }, $unset: { isMarriedTo: "" } }, 
+                { session }
+            );
+
+            // 2. Chat auf "nicht mehr verheiratet" setzen
+            await limChatsCollection.updateOne(
+                { _id: chatId }, 
+                { $set: { isMarried: false } }, 
+                { session }
+            );
+
+            // 3. Auszug (Partner aus der eigenen Immobilie werfen)
+            const home = await ownedPropertiesCollection.findOne({ ownerId: userId }, { session });
+            if (home) {
+                await ownedPropertiesCollection.updateOne(
+                    { _id: home._id }, 
+                    { $pull: { roommates: chat.tindaPartnerId } }, 
+                    { session }
+                );
+            }
+
+            // 4. System-Nachricht in den Chat
+            const sysMsgContent = `💔 IHR HABT EUCH GESCHIEDEN! ${chat.tindaPartnerName} ist ausgezogen.`;
+            await limMessagesCollection.insertOne({
+                chatId, senderId: null, senderUsername: "System", content: sysMsgContent, timestamp: new Date(), isSystem: true
+            }, { session });
+        });
+
+        updateDataVersion('chat');
+        triggerAiResponse(userId, chat.tindaPartnerId, chatId, "*System: Der User hat soeben die Scheidung eingereicht und dich aus der Wohnung geworfen. Reagiere wütend, dramatisch oder fassungslos!*");
+
+        res.json({ message: "Scheidung erfolgreich eingereicht. Dein Ex-Partner ist ausgezogen." });
     } catch (e) {
         res.status(400).json({ error: e.message });
     } finally {
