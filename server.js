@@ -11784,6 +11784,7 @@ const LIMEA_CATALOG = [
     { id: 'f_lamp_design', name: 'Designer-Stehlampe', price: 350, w: 20, h: 20, icon: '✨', bg: '#C0C0C0', layer: 'decor' },
     { id: 'f_chandelier', name: 'Kronleuchter', price: 1500, w: 40, h: 40, icon: '💎', bg: '#FFFFE0', layer: 'decor' },
     { id: 'f_partition', name: 'Trennwand', price: 100, w: 100, h: 20, icon: '🧱', bg: '#A9A9A9', layer: 'base' },
+	{ id: 'f_phone', name: 'Bürotelefon', price: 20, w: 20, h: 20, icon: '☎️', bg: '#222222', layer: 'decor' },
 
     // --- PFLANZEN ---
     { id: 'f_plant', name: 'Zimmerpflanze', price: 30, w: 40, h: 40, icon: '🪴', bg: '#2E8B57', layer: 'decor' },
