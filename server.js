@@ -780,20 +780,22 @@ async function initCacheSystem() {
 }
 
 async function seedProperties() {
-    const count = await propertiesCollection.countDocuments();
-    if (count === 0) {
-        const houses = [
-            { id: 'carton', name: 'Pappkarton', price: 100, maxRoommates: 0, rent: 0, protection: 0.02, energyBonus: 1.0, img: '📦', desc: 'Wenigstens wird man nicht nass.' },
-            { id: 'trailer', name: 'Altes Wohnmobil', price: 25000, maxRoommates: 1, rent: 250, protection: 0.10, energyBonus: 1.1, img: '🚐', desc: 'Eng, aber dein eigener Herr.' },
-            { id: 'apartment', name: 'Stadt-Appartement', price: 120000, maxRoommates: 2, rent: 800, protection: 0.25, energyBonus: 1.2, img: '🏢', desc: 'Mitten im Geschehen.' },
-            { id: 'suburb', name: 'Einfamilienhaus', price: 650000, maxRoommates: 4, rent: 2500, protection: 0.45, energyBonus: 1.3, img: '🏡', desc: 'Ruhige Lage, viel Platz.' },
-            { id: 'mansion', name: 'Limo-Villa', price: 4500000, maxRoommates: 5, rent: 10000, protection: 0.70, energyBonus: 1.5, img: '🏰', desc: 'Luxus pur.' },
-            { id: 'bunker', name: 'Atomschutz-Bunker', price: 12000000, maxRoommates: 6, rent: 15000, protection: 0.98, energyBonus: 1.2, img: '🛡️', desc: 'Sicherer geht es nicht. Platz für 6 Prepper.' },
-            { id: 'penthouse', name: 'Sky-Penthouse', price: 25000000, maxRoommates: 6, rent: 45000, protection: 0.90, energyBonus: 2.0, img: '💎', desc: 'Luxus für 6 Personen über den Wolken.' }
-        ];
-        await propertiesCollection.insertMany(houses);
-        console.log(`${LOG_PREFIX_SERVER} 🏠 Immobilienmarkt aktualisiert.`);
+    const houses = [
+        { id: 'carton', name: 'Pappkarton', price: 100, maxRoommates: 0, rent: 0, protection: 0.02, energyBonus: 1.0, img: '📦', desc: 'Wenigstens wird man nicht nass.' },
+        { id: 'trailer', name: 'Altes Wohnmobil', price: 25000, maxRoommates: 1, rent: 250, protection: 0.10, energyBonus: 1.1, img: '🚐', desc: 'Eng, aber dein eigener Herr.' },
+        { id: 'treehouse', name: 'Baumhaus', price: 45000, maxRoommates: 1, rent: 400, protection: 0.15, energyBonus: 1.1, img: '🌳', desc: 'Natur pur, aber es zieht ein bisschen.' },
+        { id: 'apartment', name: 'Stadt-Appartement', price: 120000, maxRoommates: 2, rent: 800, protection: 0.25, energyBonus: 1.2, img: '🏢', desc: 'Mitten im Geschehen.' },
+        { id: 'suburb', name: 'Einfamilienhaus', price: 650000, maxRoommates: 4, rent: 2500, protection: 0.45, energyBonus: 1.3, img: '🏡', desc: 'Ruhige Lage, viel Platz.' },
+        { id: 'mansion', name: 'Limo-Villa', price: 4500000, maxRoommates: 5, rent: 10000, protection: 0.70, energyBonus: 1.5, img: '🏰', desc: 'Luxus pur.' },
+        { id: 'bunker', name: 'Atomschutz-Bunker', price: 12000000, maxRoommates: 6, rent: 15000, protection: 0.98, energyBonus: 1.2, img: '🛡️', desc: 'Sicherer geht es nicht. Platz für 6 Prepper.' },
+        { id: 'penthouse', name: 'Sky-Penthouse', price: 25000000, maxRoommates: 6, rent: 45000, protection: 0.90, energyBonus: 2.0, img: '💎', desc: 'Luxus für 6 Personen über den Wolken.' }
+    ];
+    
+    // Upsert stellt sicher, dass neue Häuser (Baumhaus) eingefügt werden, ohne alte zu killen!
+    for (const h of houses) {
+        await propertiesCollection.updateOne({ id: h.id }, { $set: h }, { upsert: true });
     }
+    console.log(`${LOG_PREFIX_SERVER} 🏠 Immobilienmarkt aktualisiert.`);
 }
 
 async function refreshProductCache() {
@@ -11816,15 +11818,12 @@ app.get('/api/limea/editor-data', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
     try {
         const user = await usersCollection.findOne({ _id: userId });
-        
-        // Finde das Haus, in dem der User wohnt
         const home = await ownedPropertiesCollection.findOne({ 
             $or: [{ ownerId: userId }, { roommates: userId }] 
         });
         
         if (!home) return res.status(404).json({ error: "Du besitzt kein Haus und wohnst in keiner WG." });
 
-        // Inventar laden
         const furnitureIds = LIMEA_CATALOG.map(i => i.id);
         const inventory = await inventoriesCollection.find({ 
             userId: userId, 
@@ -11834,8 +11833,9 @@ app.get('/api/limea/editor-data', isAuthenticated, async (req, res) => {
 
         res.json({
             balance: user.balance,
+            isAdmin: user.isAdmin || false, // <--- DAS IST NEU! GIBT DEM FRONTEND DIE RECHTE BEKANNT
             home: {
-                id: home.houseId, // <--- HIER WAR DER FEHLER (Es muss houseId sein!)
+                id: home.houseId, 
                 name: home.name,
                 layout: home.furnitureLayout || [],
                 isOwner: home.ownerId.equals(userId)
@@ -11844,7 +11844,6 @@ app.get('/api/limea/editor-data', isAuthenticated, async (req, res) => {
             catalog: LIMEA_CATALOG
         });
     } catch(e) {
-        console.error(e);
         res.status(500).json({ error: "Fehler beim Laden des Limea-Editors." });
     }
 });
@@ -12006,12 +12005,37 @@ app.delete('/api/limea/admin/layouts/:id', isAuthenticated, isAdmin, async (req,
 // =========================================================
 
 // Katalog: starvationTimeHours = Nach wie vielen Stunden OHNE Futter das Tier stirbt.
+// Katalog: starvationTimeHours = Nach wie vielen Stunden OHNE Futter das Tier stirbt.
 const PET_CATALOG = [
     { id: 'dog', name: 'Hund', icon: '🐶', enclosure: 'Hundehütte 🛖', price: 500, starvationTimeHours: 24 },
     { id: 'cat', name: 'Katze', icon: '🐱', enclosure: 'Kratzbaum 🗼', price: 500, starvationTimeHours: 24 },
     { id: 'hamster', name: 'Hamster', icon: '🐹', enclosure: 'Käfig 🗄️', price: 150, starvationTimeHours: 12 }, 
     { id: 'lizard', name: 'Echse', icon: '🦎', enclosure: 'Terrarium 📦', price: 300, starvationTimeHours: 48 }, 
-    { id: 'parrot', name: 'Papagei', icon: '🦜', enclosure: 'Vogelkäfig 🪹', price: 600, starvationTimeHours: 24 }
+    { id: 'parrot', name: 'Papagei', icon: '🦜', enclosure: 'Vogelkäfig 🪹', price: 600, starvationTimeHours: 24 },
+    { id: 'tarantula', name: 'Tarantula', icon: '🕷️', enclosure: 'Spinnen-Terrarium 🕸️', price: 800, starvationTimeHours: 72 },
+    { id: 'wolf', name: 'Wolf', icon: '🐺', enclosure: 'Waldgehege 🌲', price: 2000, starvationTimeHours: 36 },
+    { id: 'fox', name: 'Fuchs', icon: '🦊', enclosure: 'Fuchsbau 🕳️', price: 1200, starvationTimeHours: 24 },
+    { id: 'meerkat', name: 'Erdmännchen', icon: '🐿️', enclosure: 'Sandwüste 🏜️', price: 900, starvationTimeHours: 18 },
+    { id: 'arcticfox', name: 'Polarfuchs', icon: '🦊', enclosure: 'Eisgehege 🧊', price: 1500, starvationTimeHours: 24 },
+    { id: 'plant', name: 'Zimmerpflanze', icon: '🪴', enclosure: 'Blumentopf 🏺', price: 50, starvationTimeHours: 168 }, // 1 Woche
+    { id: 'tree', name: 'Bonsai Baum', icon: '🌳', enclosure: 'Gartenbeet 🏡', price: 200, starvationTimeHours: 336 }, // 2 Wochen
+    { id: 'elephant', name: 'Elefant', icon: '🐘', enclosure: 'Savanne 🌅', price: 15000, starvationTimeHours: 48 },
+    { id: 'giraffe', name: 'Giraffe', icon: '🦒', enclosure: 'Savanne 🌅', price: 12000, starvationTimeHours: 48 },
+    { id: 'lion', name: 'Löwe', icon: '🦁', enclosure: 'Löwenkäfig 🥩', price: 10000, starvationTimeHours: 24 },
+    { id: 'fish', name: 'Fisch', icon: '🐟', enclosure: 'Aquarium 💧', price: 100, starvationTimeHours: 24 },
+    { id: 'shark', name: 'Hai', icon: '🦈', enclosure: 'Großaquarium 🌊', price: 25000, starvationTimeHours: 24 },
+    { id: 'snake', name: 'Schlange', icon: '🐍', enclosure: 'Terrarium 📦', price: 800, starvationTimeHours: 96 },
+    { id: 'penguin', name: 'Pinguin', icon: '🐧', enclosure: 'Eisgehege 🧊', price: 4000, starvationTimeHours: 24 },
+    { id: 'dragon', name: 'Drache', icon: '🐉', enclosure: 'Vulkanhöhle 🌋', price: 100000, starvationTimeHours: 120 },
+    { id: 'tiger', name: 'Tiger', icon: '🐯', enclosure: 'Dschungel 🌴', price: 12000, starvationTimeHours: 24 },
+    { id: 'mouse', name: 'Maus', icon: '🐁', enclosure: 'Käfig 🗄️', price: 50, starvationTimeHours: 12 },
+    { id: 'snail', name: 'Schnecke', icon: '🐌', enclosure: 'Glasbox 🧊', price: 20, starvationTimeHours: 168 },
+    { id: 'bat', name: 'Fledermaus', icon: '🦇', enclosure: 'Dunkle Höhle 🦇', price: 700, starvationTimeHours: 24 },
+    { id: 'duck', name: 'Ente', icon: '🦆', enclosure: 'Teich 🦆', price: 300, starvationTimeHours: 24 },
+    { id: 'ladybug', name: 'Marienkäfer', icon: '🐞', enclosure: 'Graslandschaft 🌿', price: 10, starvationTimeHours: 48 },
+    { id: 'turtle', name: 'Schildkröte', icon: '🐢', enclosure: 'Teich 🦆', price: 600, starvationTimeHours: 120 },
+    { id: 'lynx', name: 'Luchs', icon: '🐈', enclosure: 'Waldgehege 🌲', price: 2500, starvationTimeHours: 24 },
+    { id: 'pufferfish', name: 'Kugelfisch', icon: '🐡', enclosure: 'Aquarium 💧', price: 500, starvationTimeHours: 24 }
 ];
 
 const FEED_COST = 15; // $15 pro Fütterung
