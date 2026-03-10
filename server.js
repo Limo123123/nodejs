@@ -168,6 +168,7 @@ let propertyInvitesCollection;
 let petsCollection;
 let petCemeteryCollection;
 let limeaLayoutsCollection;
+let tindaFamiliesCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -1097,6 +1098,7 @@ MongoClient.connect(mongoUri)
 		petsCollection = db.collection('pets');
         petCemeteryCollection = db.collection('petCemetery');
 		limeaLayoutsCollection = db.collection('limeaLayouts');
+		tindaFamiliesCollection = db.collection('tindaFamilies');
 
         authCodesCollection = db.collection(authCodesCollectionName);
 
@@ -8168,6 +8170,96 @@ app.post('/api/tinda/chat/:chatId/divorce', isAuthenticated, isChatParticipant, 
         res.status(400).json({ error: e.message });
     } finally {
         await session.endSession();
+    }
+});
+
+// 1. Eigene Familie abrufen
+app.get('/api/tinda/family', isAuthenticated, async (req, res) => {
+    const userId = req.session.userId;
+    try {
+        // Suche, ob der User Elternteil oder Kind ist
+        const family = await tindaFamiliesCollection.findOne({
+            $or: [ { parents: userId }, { children: userId } ]
+        });
+
+        if (!family) return res.json({ family: null });
+
+        res.json({ family });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der Familie." });
+    }
+});
+
+// 2. Kind "adoptieren" (Anderen User per Name hinzufügen)
+app.post('/api/tinda/family/adopt', isAuthenticated, async (req, res) => {
+    const { childName } = req.body;
+    const userId = req.session.userId;
+    const myName = req.session.username;
+
+    if (childName.toLowerCase() === myName.toLowerCase()) {
+        return res.status(400).json({ error: "Du kannst dich nicht selbst adoptieren!" });
+    }
+
+    try {
+        const childUser = await usersCollection.findOne({ username: { $regex: new RegExp(`^${childName}$`, 'i') } });
+        if (!childUser) return res.status(404).json({ error: "Diesen User gibt es nicht." });
+
+        const childId = childUser._id.toString();
+
+        // Checken ob das Kind schon eine Familie hat
+        const existingFam = await tindaFamiliesCollection.findOne({ children: childId });
+        if (existingFam) return res.status(400).json({ error: `${childUser.username} gehört bereits zu einer anderen Familie.` });
+
+        // Eigene Familie suchen oder neue gründen
+        let myFam = await tindaFamiliesCollection.findOne({ parents: userId });
+        
+        if (myFam) {
+            await tindaFamiliesCollection.updateOne({ _id: myFam._id }, { $push: { children: childId, memberNames: childUser.username } });
+        } else {
+            await tindaFamiliesCollection.insertOne({
+                parents: [userId],
+                children: [childId],
+                memberNames: [myName, childUser.username],
+                chat: [], // Familien-Gruppenchat
+                createdAt: new Date()
+            });
+        }
+        res.json({ message: `Herzlichen Glückwunsch! Du hast ${childUser.username} adoptiert.` });
+    } catch (e) {
+        res.status(500).json({ error: "Adoption fehlgeschlagen." });
+    }
+});
+
+// 3. Familien-Chat (Nachricht senden)
+app.post('/api/tinda/family/chat', isAuthenticated, async (req, res) => {
+    const { text } = req.body;
+    const userId = req.session.userId;
+    const username = req.session.username;
+
+    if (!text || text.trim() === '') return res.status(400).json({ error: "Leere Nachricht." });
+
+    try {
+        const family = await tindaFamiliesCollection.findOne({
+            $or: [ { parents: userId }, { children: userId } ]
+        });
+        if (!family) return res.status(400).json({ error: "Du hast noch keine Familie." });
+
+        const msg = { sender: username, text: text.trim(), timestamp: new Date() };
+        await tindaFamiliesCollection.updateOne({ _id: family._id }, { $push: { chat: msg } });
+        
+        res.json({ message: "Gesendet", chat: [...family.chat, msg] });
+    } catch (e) {
+        res.status(500).json({ error: "Chat-Fehler." });
+    }
+});
+
+// 4. Admin Endpunkt um alle Familien zu sehen
+app.get('/api/tinda/admin/all', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const families = await tindaFamiliesCollection.find({}).toArray();
+        res.json({ families });
+    } catch (e) {
+        res.status(500).json({ error: "Admin-Fehler." });
     }
 });
 
