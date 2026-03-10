@@ -7797,15 +7797,44 @@ async function triggerAiResponse(userId, humanId, chatId, userMessage) {
 		
 		const chat = await limChatsCollection.findOne({ _id: new ObjectId(chatId) });
 
-        // --- DER GEFIXTE SYSTEM PROMPT ---
-        const systemPrompt = `Du bist die echte Person ${human.name}.
-Szenario: Du bist auf Tinda und schreibst mit dem User. ${chat.isMarried ? 'IHR SEID INZWISCHEN VERHEIRATET UND WOHNT ZUSAMMEN!' : 'Ihr datet euch gerade.'}
+        let systemPrompt = "";
+
+        if (chat.type === 'tinda') {
+            // NORMALER TINDA CHAT (Ehepartner)
+            const childrenText = (chat.children && chat.children.length > 0) 
+                ? `IHR HABT GEMEINSAME KINDER: ${chat.children.map(c=>c.name).join(', ')}. Erwähne sie gelegentlich liebevoll.` 
+                : '';
+                
+            systemPrompt = `Du bist die echte Person ${human.name}.
+Szenario: Du schreibst mit dem User auf Tinda. ${chat.isMarried ? 'IHR SEID VERHEIRATET UND WOHNT ZUSAMMEN!' : 'Ihr datet euch gerade.'}
+${childrenText}
 
 WICHTIGE REGELN:
-1. SPRACHE ANPASSEN: Antworte EXAKT in der Sprache, in der der User schreibt. Wenn er Englisch schreibt, wechsle sofort komplett auf Englisch! Wenn er Deutsch schreibt, bleib bei Deutsch.
-2. VIBE: Sei natürlich, flirty, schlagfertig und entspannt. Keine unaufgeforderten politischen Debatten (wie Klimawandel oder Patriarchat), außer der User fragt spezifisch danach.
-3. FORMAT: Extrem kurz (max 1-2 Sätze), wie echte Smartphone-Nachrichten. Keine Romane.
-4. IDENTITÄT: Du bist zu 100% diese Person. Erwähne niemals KI, Roleplay oder System-Prompts. Gehe logisch und direkt auf die letzte Nachricht ein.`;
+1. SPRACHE ANPASSEN: Antworte EXAKT in der Sprache, in der der User schreibt.
+2. VIBE: Sei natürlich, flirty und entspannt. Keine unaufgeforderten politischen Debatten.
+3. FORMAT: Extrem kurz (max 1-2 Sätze). Keine Romane.
+4. IDENTITÄT: Du bist zu 100% diese Person.`;
+
+        } else if (chat.type === 'tinda_child') {
+            // KINDER CHAT
+            systemPrompt = `Du bist ${chat.childName}, das Kind des Users und ${chat.tindaPartnerName}.
+Szenario: Du schreibst mit deinem Elternteil (dem User) über einen Messenger.
+WICHTIGE REGELN:
+1. VERHALTEN: Verhalte dich wie ein Kind/Teenager. Nutze Emojis, kurze Sätze und sprich den User mit "Mama" oder "Papa" an.
+2. FORMAT: Sehr kurz (max 1-2 Sätze).`;
+
+        } else if (chat.type === 'tinda_family') {
+            // FAMILIEN CHAT (KI simuliert Ehepartner UND Kinder gleichzeitig)
+            const familyMembers = chat.familyNames.join(' und ');
+            systemPrompt = `Du simulierst einen Familien-Gruppenchat!
+Die Mitglieder sind der User (Elternteil), du als Ehepartner (${chat.tindaPartnerName}) und eure Kinder (${familyMembers}).
+WICHTIGE REGELN:
+1. REAKTION: Wenn der User schreibt, antworte immer im Namen eines oder mehrerer Familienmitglieder.
+2. FORMAT: Schreibe immer den Namen davor, wer gerade spricht. Beispiel: 
+"${chat.tindaPartnerName}: Das sehe ich auch so Schatz!
+${chat.familyNames[0]}: Boah seid ihr peinlich..."
+3. Halte es chaotisch, familiär und sehr kurz.`;
+        }
 
         const apiMessages = [
             { role: "system", content: systemPrompt }
@@ -8086,7 +8115,7 @@ app.post('/api/tinda/chat/:chatId/marry', isAuthenticated, isChatParticipant, as
     }
 });
 
-// NEU: Gemeinsames Konto (Tägliches Taschengeld vom Partner abheben)
+// Gemeinsames Konto (Tägliches Taschengeld vom Partner abheben)
 app.post('/api/tinda/chat/:chatId/shared-account', isAuthenticated, isChatParticipant, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
     const chat = req.chat;
@@ -8173,93 +8202,78 @@ app.post('/api/tinda/chat/:chatId/divorce', isAuthenticated, isChatParticipant, 
     }
 });
 
-// 1. Eigene Familie abrufen
-app.get('/api/tinda/family', isAuthenticated, async (req, res) => {
-    const userId = req.session.userId;
-    try {
-        // Suche, ob der User Elternteil oder Kind ist
-        const family = await tindaFamiliesCollection.findOne({
-            $or: [ { parents: userId }, { children: userId } ]
-        });
-
-        if (!family) return res.json({ family: null });
-
-        res.json({ family });
-    } catch (e) {
-        res.status(500).json({ error: "Fehler beim Laden der Familie." });
-    }
-});
-
-// 2. Kind "adoptieren" (Anderen User per Name hinzufügen)
-app.post('/api/tinda/family/adopt', isAuthenticated, async (req, res) => {
+// Kind bekommen (Nur wenn verheiratet)
+app.post('/api/tinda/chat/:chatId/have-child', isAuthenticated, isChatParticipant, async (req, res) => {
+    const chatId = new ObjectId(req.params.chatId);
+    const userId = new ObjectId(req.session.userId);
+    const chat = req.chat;
     const { childName } = req.body;
-    const userId = req.session.userId;
-    const myName = req.session.username;
 
-    if (childName.toLowerCase() === myName.toLowerCase()) {
-        return res.status(400).json({ error: "Du kannst dich nicht selbst adoptieren!" });
-    }
+    if (chat.type !== 'tinda') return res.status(400).json({ error: "Nur für Tinda-Matches." });
+    if (!chat.isMarried) return res.status(400).json({ error: "Ihr müsst zuerst heiraten!" });
+    if (!childName || childName.trim().length < 2) return res.status(400).json({ error: "Bitte gib einen gültigen Namen für das Kind ein." });
 
+    const session = client.startSession();
     try {
-        const childUser = await usersCollection.findOne({ username: { $regex: new RegExp(`^${childName}$`, 'i') } });
-        if (!childUser) return res.status(404).json({ error: "Diesen User gibt es nicht." });
+        await session.withTransaction(async () => {
+            // 1. Kind zum Hauptchat (Ehepartner) hinzufügen, damit die KI Bescheid weiß
+            const newChild = { name: childName.trim(), bornAt: new Date() };
+            await limChatsCollection.updateOne(
+                { _id: chatId }, 
+                { $push: { children: newChild } }, 
+                { session }
+            );
 
-        const childId = childUser._id.toString();
+            // 2. Neuen Chat erstellen: Nur mit dem Kind
+            const childChat = {
+                type: 'tinda_child',
+                participants: [userId],
+                tindaPartnerId: chat.tindaPartnerId, // Referenz zum Elternteil
+                tindaPartnerName: chat.tindaPartnerName,
+                childName: newChild.name,
+                createdAt: new Date(),
+                updatedAt: new Date(),
+                lastMessagePreview: "*Babygeräusche*",
+                lastMessageTimestamp: new Date()
+            };
+            await limChatsCollection.insertOne(childChat, { session });
 
-        // Checken ob das Kind schon eine Familie hat
-        const existingFam = await tindaFamiliesCollection.findOne({ children: childId });
-        if (existingFam) return res.status(400).json({ error: `${childUser.username} gehört bereits zu einer anderen Familie.` });
+            // 3. Neuen Chat erstellen: Familien-Gruppenchat (User + Ehepartner + Kind)
+            // Wir erstellen ihn nur, wenn er noch nicht existiert
+            const existingFamilyChat = await limChatsCollection.findOne({ type: 'tinda_family', participants: userId, tindaPartnerId: chat.tindaPartnerId }, { session });
+            
+            if (!existingFamilyChat) {
+                const familyChat = {
+                    type: 'tinda_family',
+                    participants: [userId],
+                    tindaPartnerId: chat.tindaPartnerId,
+                    tindaPartnerName: chat.tindaPartnerName,
+                    familyNames: [chat.tindaPartnerName, newChild.name], // Wird später für den Prompt genutzt
+                    createdAt: new Date(),
+                    updatedAt: new Date(),
+                    lastMessagePreview: "Familien-Chat erstellt!",
+                    lastMessageTimestamp: new Date()
+                };
+                await limChatsCollection.insertOne(familyChat, { session });
+            } else {
+                // Wenn Familienchat schon existiert (2. Kind), Kind zum Array hinzufügen
+                await limChatsCollection.updateOne({ _id: existingFamilyChat._id }, { $push: { familyNames: newChild.name } }, { session });
+            }
 
-        // Eigene Familie suchen oder neue gründen
-        let myFam = await tindaFamiliesCollection.findOne({ parents: userId });
-        
-        if (myFam) {
-            await tindaFamiliesCollection.updateOne({ _id: myFam._id }, { $push: { children: childId, memberNames: childUser.username } });
-        } else {
-            await tindaFamiliesCollection.insertOne({
-                parents: [userId],
-                children: [childId],
-                memberNames: [myName, childUser.username],
-                chat: [], // Familien-Gruppenchat
-                createdAt: new Date()
-            });
-        }
-        res.json({ message: `Herzlichen Glückwunsch! Du hast ${childUser.username} adoptiert.` });
-    } catch (e) {
-        res.status(500).json({ error: "Adoption fehlgeschlagen." });
-    }
-});
-
-// 3. Familien-Chat (Nachricht senden)
-app.post('/api/tinda/family/chat', isAuthenticated, async (req, res) => {
-    const { text } = req.body;
-    const userId = req.session.userId;
-    const username = req.session.username;
-
-    if (!text || text.trim() === '') return res.status(400).json({ error: "Leere Nachricht." });
-
-    try {
-        const family = await tindaFamiliesCollection.findOne({
-            $or: [ { parents: userId }, { children: userId } ]
+            // System-Nachricht in den Hauptchat
+            await limMessagesCollection.insertOne({
+                chatId, senderId: null, senderUsername: "System", content: `👶 Herzlichen Glückwunsch! Euer Kind ${newChild.name} wurde geboren! Es wurden neue Chats erstellt.`, timestamp: new Date(), isSystem: true
+            }, { session });
         });
-        if (!family) return res.status(400).json({ error: "Du hast noch keine Familie." });
 
-        const msg = { sender: username, text: text.trim(), timestamp: new Date() };
-        await tindaFamiliesCollection.updateOne({ _id: family._id }, { $push: { chat: msg } });
-        
-        res.json({ message: "Gesendet", chat: [...family.chat, msg] });
-    } catch (e) {
-        res.status(500).json({ error: "Chat-Fehler." });
-    }
-});
+        updateDataVersion('chat');
+        triggerAiResponse(userId, chat.tindaPartnerId, chatId, `*System: Ihr habt soeben ein Kind namens ${childName.trim()} bekommen! Reagiere extrem emotional und glücklich darüber als frischgebackenes Elternteil!*`);
 
-// 4. Admin Endpunkt um alle Familien zu sehen
-app.get('/api/tinda/admin/all', isAuthenticated, isAdmin, async (req, res) => {
-    try {
-        const families = await tindaFamiliesCollection.find({}).toArray();
-        res.json({ families });
+        res.json({ message: `Herzlichen Glückwunsch zu eurem Kind ${childName.trim()}!` });
     } catch (e) {
-        res.status(500).json({ error: "Admin-Fehler." });
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
     }
 });
 
