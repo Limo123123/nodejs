@@ -7760,7 +7760,9 @@ app.post('/api/tinda/chat/:chatId/message', isAuthenticated, isChatParticipant, 
     const userId = new ObjectId(req.session.userId);
     const chat = req.chat; // Kommt aus Middleware
 
-    if (chat.type !== 'tinda') return res.status(400).json({ error: "Kein Tinda Chat." });
+    if (!['tinda', 'tinda_child', 'tinda_family'].includes(chat.type)) {
+    return res.status(400).json({ error: "Kein gültiger Tinda Chat." });
+    }
 
     // 1. User Nachricht speichern
     const userMsg = {
