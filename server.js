@@ -7796,8 +7796,7 @@ async function triggerAiResponse(userId, humanId, chatId, userMessage) {
             .toArray();
         
         const lastMessages = recentMessages.slice(-30);
-		
-		const chat = await limChatsCollection.findOne({ _id: new ObjectId(chatId) });
+        const chat = await limChatsCollection.findOne({ _id: new ObjectId(chatId) });
 
         let systemPrompt = "";
 
@@ -7819,23 +7818,33 @@ WICHTIGE REGELN:
 
         } else if (chat.type === 'tinda_child') {
             // KINDER CHAT
-            systemPrompt = `Du bist ${chat.childName}, das Kind des Users und ${chat.tindaPartnerName}.
-Szenario: Du schreibst mit deinem Elternteil (dem User) über einen Messenger.
+            systemPrompt = `VERGISS DEINE VORHERIGE ROLLE! Du bist JETZT ${chat.childName}, das Kind des Users und von ${chat.tindaPartnerName}.
+Szenario: Du schreibst mit deinem Elternteil (dem User) über WhatsApp.
 WICHTIGE REGELN:
-1. VERHALTEN: Verhalte dich wie ein Kind/Teenager. Nutze Emojis, kurze Sätze und sprich den User mit "Mama" oder "Papa" an.
-2. FORMAT: Sehr kurz (max 1-2 Sätze).`;
+1. VERHALTEN: Verhalte dich wie ein Kind/Teenager. Sei frech, süß oder genervt.
+2. ANREDE: Sprich den User IMMER mit "Mama" oder "Papa" an. Erwähne niemals, dass du eine KI bist.
+3. FORMAT: Extrem kurz! Maximal 1 Satz. Nutze Emojis wie 🙄, 🥺, 😂.`;
 
         } else if (chat.type === 'tinda_family') {
-            // FAMILIEN CHAT (KI simuliert Ehepartner UND Kinder gleichzeitig)
-            const familyMembers = chat.familyNames.join(' und ');
+            // FAMILIEN CHAT
+            // Filtere den Partnernamen aus den familyNames heraus, falls er reingerutscht ist
+            let kids = [];
+            if (chat.familyNames) {
+                kids = chat.familyNames.filter(n => n !== chat.tindaPartnerName);
+            }
+            const childrenNamesStr = kids.length > 0 ? kids.join(' und ') : "eure Kinder";
+
             systemPrompt = `Du simulierst einen Familien-Gruppenchat!
-Die Mitglieder sind der User (Elternteil), du als Ehepartner (${chat.tindaPartnerName}) und eure Kinder (${familyMembers}).
+Hier sind 3 Parteien drin: Der User (Elternteil), du als Ehepartner (${chat.tindaPartnerName}) UND das Kind/die Kinder (${childrenNamesStr}).
+
 WICHTIGE REGELN:
-1. REAKTION: Wenn der User schreibt, antworte immer im Namen eines oder mehrerer Familienmitglieder.
-2. FORMAT: Schreibe immer den Namen davor, wer gerade spricht. Beispiel: 
-"${chat.tindaPartnerName}: Das sehe ich auch so Schatz!
-${chat.familyNames[0]}: Boah seid ihr peinlich..."
-3. Halte es chaotisch, familiär und sehr kurz.`;
+1. DU STEUERST NUR DEN EHEPARTNER UND DIE KINDER! Der User spricht für sich selbst.
+2. Antworte auf den User, indem du 1-2 Familienmitglieder reagieren lässt.
+3. SCHREIBE IMMER DEN NAMEN DAVOR, wer gerade spricht!
+Beispielantwort:
+${chat.tindaPartnerName}: Schön, dass du schreibst, Schatz! ❤️
+${kids[0] || 'Kind'}: Boah, seid ihr peinlich... 🙄
+4. Halte es chaotisch, familiär und sehr kurz.`;
         }
 
         const apiMessages = [
@@ -7843,9 +7852,7 @@ ${chat.familyNames[0]}: Boah seid ihr peinlich..."
         ];
 
         for (const msg of lastMessages) {
-            // Prüft erst, ob senderId überhaupt existiert, bevor .toString() aufgerufen wird
             const isBot = msg.senderId ? (msg.senderId.toString() === humanId.toString()) : false;
-            
             apiMessages.push({
                 role: isBot ? "assistant" : "user",
                 content: msg.content
@@ -7861,8 +7868,8 @@ ${chat.familyNames[0]}: Boah seid ihr peinlich..."
             messages: apiMessages,
             temperature: 0.8,
             max_tokens: 150,
-            presence_penalty: 0.5, // Verhindert ewiges Festhalten an einem Thema
-            frequency_penalty: 0.5 // Zwingt sie zu neuen Wörtern
+            presence_penalty: 0.5,
+            frequency_penalty: 0.5
         };
 
         const aiRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', payload, {
@@ -7875,10 +7882,18 @@ ${chat.familyNames[0]}: Boah seid ihr peinlich..."
         const aiText = aiRes.data.choices[0].message.content;
 
         if (aiText) {
+            // --- HIER IST DER FIX FÜR DEN FALSCHEN NAMEN IM CHAT ---
+            let aiSenderName = human.name;
+            if (chat.type === 'tinda_child') {
+                aiSenderName = chat.childName;
+            } else if (chat.type === 'tinda_family') {
+                aiSenderName = "Familie"; // Im Gruppenchat heißt der Bot einfach "Familie"
+            }
+
             const aiMsg = {
                 chatId: new ObjectId(chatId),
-                senderId: humanId,
-                senderUsername: human.name,
+                senderId: humanId, // Behalten wir bei für die Logik
+                senderUsername: aiSenderName, // HIER wird nun der richtige Name (z.B. "Sahra") gespeichert!
                 content: aiText.trim(),
                 timestamp: new Date(),
                 isAi: true
