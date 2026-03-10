@@ -167,6 +167,7 @@ let propertiesCollection, ownedPropertiesCollection;
 let propertyInvitesCollection;
 let petsCollection;
 let petCemeteryCollection;
+let limeaLayoutsCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -1093,6 +1094,7 @@ MongoClient.connect(mongoUri)
 		propertyInvitesCollection = db.collection('propertyInvites');
 		petsCollection = db.collection('pets');
         petCemeteryCollection = db.collection('petCemetery');
+		limeaLayoutsCollection = db.collection('limeaLayouts');
 
         authCodesCollection = db.collection(authCodesCollectionName);
 
@@ -11718,23 +11720,94 @@ app.get('/api/admin/system/report', isAuthenticated, isAdmin, async (req, res) =
 
 // Der Produkt-Katalog von Limea (Maße sind in Pixeln für den Editor)
 const LIMEA_CATALOG = [
+    // --- SCHLAFZIMMER ---
     { id: 'f_bed_single', name: 'Einzelbett "Snark"', price: 150, w: 60, h: 120, icon: '🛏️', bg: '#8B5A2B', layer: 'base' },
     { id: 'f_bed_double', name: 'Doppelbett "Romantik"', price: 300, w: 120, h: 120, icon: '🛌', bg: '#A0522D', layer: 'base' },
-    { id: 'f_sofa', name: 'Sofa "Klippan"', price: 200, w: 140, h: 60, icon: '🛋️', bg: '#4682B4', layer: 'base' },
-    { id: 'f_table', name: 'Esstisch "Holz"', price: 120, w: 100, h: 100, icon: '🍽️', bg: '#D2B48C', layer: 'base' },
-    { id: 'f_desk', name: 'Schreibtisch "Work"', price: 90, w: 100, h: 60, icon: '💻', bg: '#555', layer: 'base' }, // h: 50 -> 60
-    
-    // --- STÜHLE ---
-    { id: 'f_chair_wood', name: 'Holzstuhl', price: 40, w: 40, h: 40, icon: '🪑', bg: '#8B4513', layer: 'base' },
-    { id: 'f_chair_office', name: 'Bürostuhl', price: 80, w: 40, h: 40, icon: '💺', bg: '#333', layer: 'base' },
-    { id: 'f_armchair', name: 'Sessel "Chill"', price: 150, w: 60, h: 60, icon: '🛋️', bg: '#FF8C00', layer: 'base' },
+    { id: 'f_bed_boxspring', name: 'Boxspringbett Luxus', price: 800, w: 140, h: 140, icon: '🛌', bg: '#483D8B', layer: 'base' },
+    { id: 'f_bed_bunk', name: 'Stockbett', price: 250, w: 60, h: 120, icon: '🛏️', bg: '#CD853F', layer: 'base' },
+    { id: 'f_nightstand', name: 'Nachttisch Holz', price: 40, w: 40, h: 40, icon: '🗃️', bg: '#5C4033', layer: 'base' },
+    { id: 'f_wardrobe', name: 'Kleiderschrank', price: 350, w: 120, h: 40, icon: '🚪', bg: '#8B4513', layer: 'base' },
+    { id: 'f_wardrobe_walkin', name: 'Begehbarer Schrank', price: 1200, w: 160, h: 100, icon: '👗', bg: '#696969', layer: 'base' },
+    { id: 'f_makeup_table', name: 'Schminktisch', price: 280, w: 80, h: 40, icon: '💄', bg: '#FFC0CB', layer: 'base' },
+    { id: 'f_mirror_dresser', name: 'Spiegelkommode', price: 320, w: 100, h: 40, icon: '🪞', bg: '#F5F5DC', layer: 'base' },
+    { id: 'f_shoe_rack', name: 'Schuhschrank', price: 120, w: 80, h: 40, icon: '👞', bg: '#A0522D', layer: 'base' },
 
-    // --- DEKO & REST ---
+    // --- WOHNZIMMER ---
+    { id: 'f_sofa', name: 'Sofa "Klippan"', price: 200, w: 140, h: 60, icon: '🛋️', bg: '#4682B4', layer: 'base' },
+    { id: 'f_sofa_leather', name: 'Designer-Leder Sofa', price: 1500, w: 160, h: 60, icon: '🛋️', bg: '#111111', layer: 'base' },
+    { id: 'f_sofa_double', name: 'Doppeldecker Couch', price: 900, w: 140, h: 100, icon: '🛋️', bg: '#8B0000', layer: 'base' },
+    { id: 'f_armchair', name: 'Sessel "Chill"', price: 150, w: 60, h: 60, icon: '🛋️', bg: '#FF8C00', layer: 'base' },
+    { id: 'f_armchair_velvet', name: 'Samt-Sessel', price: 450, w: 60, h: 60, icon: '🪑', bg: '#800080', layer: 'base' },
+    { id: 'f_rocking_chair', name: 'Schaukelstuhl', price: 180, w: 60, h: 80, icon: '🪑', bg: '#D2691E', layer: 'base' },
+    { id: 'f_table_coffee', name: 'Couchtisch', price: 80, w: 80, h: 40, icon: '🪑', bg: '#DEB887', layer: 'base' },
+    { id: 'f_table_marble', name: 'Marmor-Couchtisch', price: 600, w: 80, h: 60, icon: '🪨', bg: '#F8F8FF', layer: 'base' },
+    { id: 'f_tv_stand', name: 'TV-Schrank', price: 150, w: 120, h: 40, icon: '🗄️', bg: '#2F4F4F', layer: 'base' },
+    { id: 'f_sideboard_long', name: 'Lange Kommode', price: 300, w: 160, h: 40, icon: '🗄️', bg: '#8B4513', layer: 'base' },
+    { id: 'f_sideboard_design', name: 'Designer-Sideboard', price: 850, w: 140, h: 40, icon: '✨', bg: '#000000', layer: 'base' },
+    { id: 'f_bookshelf', name: 'Bücherregal', price: 180, w: 100, h: 40, icon: '📚', bg: '#A0522D', layer: 'base' },
+    { id: 'f_bookwall', name: 'Bücherwand', price: 500, w: 160, h: 40, icon: '📖', bg: '#5C4033', layer: 'base' },
+    { id: 'f_showcase', name: 'Vitrine (Glas/Gold)', price: 750, w: 80, h: 40, icon: '🏺', bg: '#FFD700', layer: 'base' },
+
+    // --- KÜCHE & ESSZIMMER ---
+    { id: 'f_kitchen', name: 'Küchenzeile', price: 600, w: 200, h: 60, icon: '🍳', bg: '#dddddd', layer: 'base' },
+    { id: 'f_kitchen_island', name: 'Kücheninsel', price: 1100, w: 120, h: 80, icon: '🔪', bg: '#F5F5F5', layer: 'base' },
+    { id: 'f_fridge', name: 'Kühlschrank', price: 400, w: 60, h: 60, icon: '🧊', bg: '#E0E0E0', layer: 'base' },
+    { id: 'f_microwave', name: 'Mikrowelle', price: 150, w: 40, h: 20, icon: '🍱', bg: '#C0C0C0', layer: 'decor' },
+    { id: 'f_pantry', name: 'Vorratsschrank', price: 250, w: 80, h: 40, icon: '🥫', bg: '#DEB887', layer: 'base' },
+    { id: 'f_wine_cooler', name: 'Weinschrank', price: 800, w: 60, h: 40, icon: '🍷', bg: '#2F4F4F', layer: 'base' },
+    { id: 'f_table', name: 'Esstisch "Holz"', price: 120, w: 100, h: 100, icon: '🍽️', bg: '#D2B48C', layer: 'base' },
+    { id: 'f_table_large', name: 'Großer Esstisch', price: 550, w: 160, h: 80, icon: '🥘', bg: '#F0F8FF', layer: 'base' },
+    { id: 'f_chair_wood', name: 'Holzstuhl', price: 40, w: 40, h: 40, icon: '🪑', bg: '#8B4513', layer: 'base' },
+    { id: 'f_chair_premium', name: 'Hochwertiger Stuhl', price: 150, w: 40, h: 40, icon: '💺', bg: '#A9A9A9', layer: 'base' },
+    { id: 'f_bar_stool', name: 'Barhocker', price: 70, w: 20, h: 20, icon: '🪑', bg: '#333333', layer: 'base' },
+
+    // --- BADEZIMMER ---
+    { id: 'f_toilet', name: 'Toilette', price: 90, w: 40, h: 60, icon: '🚽', bg: '#FFFFFF', layer: 'base' },
+    { id: 'f_shower', name: 'Dusche', price: 300, w: 80, h: 80, icon: '🚿', bg: '#E0FFFF', layer: 'base' },
+    { id: 'f_bathtub', name: 'Badewanne', price: 650, w: 140, h: 60, icon: '🛁', bg: '#FFFFFF', layer: 'base' },
+    { id: 'f_sink', name: 'Waschbecken', price: 180, w: 60, h: 40, icon: '🚰', bg: '#F0F8FF', layer: 'base' },
+    { id: 'f_bath_cabinet', name: 'Badezimmerschrank', price: 150, w: 60, h: 40, icon: '🧴', bg: '#FFF8DC', layer: 'base' },
+    { id: 'f_towel_rack', name: 'Handtuchhalter', price: 40, w: 40, h: 20, icon: '🧻', bg: '#A9A9A9', layer: 'decor' },
+    { id: 'f_laundry_basket', name: 'Wäschekorb', price: 30, w: 40, h: 40, icon: '🧺', bg: '#DEB887', layer: 'base' },
+
+    // --- BÜRO & ARBEIT ---
+    { id: 'f_desk', name: 'Schreibtisch "Work"', price: 90, w: 100, h: 60, icon: '💻', bg: '#555555', layer: 'base' },
+    { id: 'f_desk_pc', name: 'Gamer-Computertisch', price: 450, w: 120, h: 60, icon: '🖥️', bg: '#111111', layer: 'base' },
+    { id: 'f_chair_office', name: 'Bürostuhl', price: 80, w: 40, h: 40, icon: '💺', bg: '#333333', layer: 'base' },
+    { id: 'f_filing_cabinet', name: 'Aktenschrank', price: 160, w: 60, h: 40, icon: '🗄️', bg: '#778899', layer: 'base' },
+
+    // --- DEKO & EXTRAS ---
+    { id: 'f_tv', name: 'Flachbild-TV', price: 400, w: 120, h: 20, icon: '📺', bg: '#111111', layer: 'decor' },
+    { id: 'f_mirror', name: 'Spiegel', price: 80, w: 40, h: 20, icon: '🪞', bg: '#E0FFFF', layer: 'decor' },
+    { id: 'f_clock', name: 'Wecker', price: 20, w: 20, h: 20, icon: '⏰', bg: '#FF4500', layer: 'decor' },
+    { id: 'f_lamp_floor', name: 'Stehlampe', price: 70, w: 20, h: 20, icon: '💡', bg: '#FFD700', layer: 'decor' },
+    { id: 'f_lamp_design', name: 'Designer-Stehlampe', price: 350, w: 20, h: 20, icon: '✨', bg: '#C0C0C0', layer: 'decor' },
+    { id: 'f_chandelier', name: 'Kronleuchter', price: 1500, w: 40, h: 40, icon: '💎', bg: '#FFFFE0', layer: 'decor' },
+    { id: 'f_partition', name: 'Trennwand', price: 100, w: 100, h: 20, icon: '🧱', bg: '#A9A9A9', layer: 'base' },
+
+    // --- PFLANZEN ---
     { id: 'f_plant', name: 'Zimmerpflanze', price: 30, w: 40, h: 40, icon: '🪴', bg: '#2E8B57', layer: 'decor' },
-    { id: 'f_tv', name: 'Flachbild-TV', price: 400, w: 120, h: 20, icon: '📺', bg: '#111', layer: 'decor' },
-    { id: 'f_toilet', name: 'Toilette', price: 90, w: 40, h: 60, icon: '🚽', bg: '#FFF', layer: 'base' }, // h: 50 -> 60
-    { id: 'f_rug', name: 'Teppich "Flauschi"', price: 50, w: 160, h: 120, icon: '🧶', bg: '#CD5C5C', layer: 'floor' },
-    { id: 'f_kitchen', name: 'Küchenzeile', price: 600, w: 200, h: 60, icon: '🍳', bg: '#ddd', layer: 'base' }
+    { id: 'f_plant_cactus', name: 'Kaktus', price: 25, w: 20, h: 20, icon: '🌵', bg: '#3CB371', layer: 'decor' },
+    { id: 'f_plant_tree', name: 'Indoor-Baum', price: 150, w: 60, h: 60, icon: '🌳', bg: '#228B22', layer: 'decor' },
+
+    // --- HAUSTIERE (Deko) ---
+    { id: 'f_pet_bed', name: 'Hundekörbchen', price: 60, w: 40, h: 40, icon: '🦴', bg: '#DEB887', layer: 'decor' },
+    { id: 'f_pet_cat_tree', name: 'Kratzbaum', price: 120, w: 40, h: 60, icon: '🐾', bg: '#D2B48C', layer: 'base' },
+    { id: 'f_aquarium', name: 'Aquarium', price: 400, w: 80, h: 40, icon: '🐟', bg: '#00BFFF', layer: 'base' },
+
+    // --- TEPPICHE & BÖDEN (Layer: floor -> unter allem anderen!) ---
+    { id: 'f_rug', name: 'Teppich Rot', price: 50, w: 160, h: 120, icon: '🧶', bg: '#CD5C5C', layer: 'floor' },
+    { id: 'f_rug_blue', name: 'Teppich Blau', price: 50, w: 160, h: 120, icon: '🧶', bg: '#4682B4', layer: 'floor' },
+    { id: 'f_rug_black', name: 'Teppich Schwarz (Modern)', price: 100, w: 160, h: 120, icon: '⬛', bg: '#222222', layer: 'floor' },
+    { id: 'f_rug_white', name: 'Teppich Flauschig Weiß', price: 150, w: 160, h: 120, icon: '☁️', bg: '#F8F8FF', layer: 'floor' },
+    { id: 'f_floor_wood', name: 'Bodenfliese: Parkett', price: 200, w: 200, h: 200, icon: '🪵', bg: '#8B5A2B', layer: 'floor' },
+    { id: 'f_floor_stone', name: 'Bodenfliese: Marmor', price: 400, w: 200, h: 200, icon: '⬜', bg: '#E0E0E0', layer: 'floor' },
+
+    // --- OUTDOOR (GARTEN) ---
+    { id: 'f_garden_bench', name: 'Gartenbank', price: 120, w: 100, h: 40, icon: '🪑', bg: '#8B4513', layer: 'base' },
+    { id: 'f_garden_table', name: 'Gartentisch', price: 150, w: 100, h: 100, icon: '⛱️', bg: '#556B2F', layer: 'base' },
+    { id: 'f_deck_chair', name: 'Liegestuhl', price: 90, w: 60, h: 120, icon: '😎', bg: '#FFD700', layer: 'base' },
+    { id: 'f_hanging_chair', name: 'Hängesessel', price: 220, w: 60, h: 60, icon: '🪢', bg: '#F5DEB3', layer: 'base' }
 ];
 
 // Editor-Daten abrufen (Lädt Haus, Möbel, Katalog und Geld auf einmal)
@@ -11856,7 +11929,7 @@ app.get('/api/realestate/neighborhood', isAuthenticated, async (req, res) => {
     }
 });
 
-// NEU: Haus besuchen (Limea Layout abrufen, OHNE Inventar)
+// Haus besuchen (Limea Layout abrufen, OHNE Inventar)
 app.get('/api/limea/visit/:houseId', isAuthenticated, async (req, res) => {
     try {
         const houseId = new ObjectId(req.params.houseId);
@@ -11876,6 +11949,54 @@ app.get('/api/limea/visit/:houseId', isAuthenticated, async (req, res) => {
         });
     } catch(e) {
         res.status(500).json({ error: "Klingel kaputt. Fehler beim Laden." });
+    }
+});
+
+// =========================================================
+// === LIMEA LAYOUT STORE ===
+// =========================================================
+
+// Alle Layouts im Store abrufen
+app.get('/api/limea/layouts', isAuthenticated, async (req, res) => {
+    try {
+        const layouts = await limeaLayoutsCollection.find({}).sort({ createdAt: -1 }).limit(50).toArray();
+        res.json({ layouts });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden des Layout-Stores." });
+    }
+});
+
+// Eigenes Layout veröffentlichen
+app.post('/api/limea/layouts/publish', isAuthenticated, async (req, res) => {
+    const { name, layout, houseId } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (!name || name.length < 3) return res.status(400).json({ error: "Name zu kurz." });
+    if (!layout || layout.length === 0) return res.status(400).json({ error: "Leere Layouts können nicht geteilt werden." });
+
+    try {
+        await limeaLayoutsCollection.insertOne({
+            name: name,
+            creatorId: userId,
+            creatorName: req.session.username,
+            houseId: houseId, // z.B. 'mansion', damit User wissen, für welches Haus es passt
+            layout: layout,
+            likes: 0,
+            createdAt: new Date()
+        });
+        res.json({ message: "Dein Layout wurde im Store veröffentlicht!" });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Veröffentlichen." });
+    }
+});
+
+// Admin: Layout aus dem Store löschen
+app.delete('/api/limea/admin/layouts/:id', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        await limeaLayoutsCollection.deleteOne({ _id: new ObjectId(req.params.id) });
+        res.json({ message: "Layout gelöscht." });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler." });
     }
 });
 
