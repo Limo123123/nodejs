@@ -6,6 +6,7 @@ const os = require('os');
 const helmet = require('helmet');
 const multer = require('multer');
 const sharp = require('sharp');
+sharp.concurrency(1);
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const { createClient } = require('redis');
 
@@ -203,8 +204,9 @@ app.post('/api/cdn/upload', isAuthenticated, upload.single('image'), async (req,
 
         // Bild mit Sharp extrem komprimieren und als WebP speichern
         await sharp(req.file.buffer)
-            .resize({ width: 800, withoutEnlargement: true }) // Max 800px Breite
-            .webp({ quality: 75 }) // Hohe Kompression (Winzige Dateigröße!)
+            .rotate() // Fixt auf dem Kopf stehende Handy-Fotos
+            .resize({ width: 800, withoutEnlargement: true })
+            .webp({ quality: 75, effort: 4 }) // 'effort: 4' ist ein guter Kompromiss aus Speed und RAM
             .toFile(filepath);
 
         // URL zurückgeben
@@ -705,46 +707,32 @@ const apiRequestCounts = new Map();
 const API_WINDOW_MS = 60 * 1000; // 1 Minute Zeitfenster
 const API_MAX_REQS = 300;        // Max 300 Requests pro Minute pro IP
 
-function globalApiRateLimit(req, res, next) {
-    // Admins oder interne Dienste ausnehmen? Optional hier prüfen.
+async function globalApiRateLimit(req, res, next) {
     if (req.headers['x-bot-bypass'] === 'limo-god-mode') {
-        return next(); // Rate Limit komplett überspringen!
+        return next();
     }
 
     const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
-    const now = Date.now();
+    const redisKey = `rate_limit:global:${ip}`;
 
-    let data = apiRequestCounts.get(ip);
+    try {
+        // Erhöht den Zähler für diese IP um 1
+        const currentCount = await global.redisPub.incr(redisKey);
 
-    if (!data) {
-        data = { count: 1, resetTime: now + API_WINDOW_MS };
-        apiRequestCounts.set(ip, data);
-        return next();
-    }
-
-    if (now > data.resetTime) {
-        // Fenster abgelaufen -> Reset
-        data.count = 1;
-        data.resetTime = now + API_WINDOW_MS;
-        return next();
-    }
-
-    if (data.count >= API_MAX_REQS) {
-        // Limit erreicht
-        return res.status(429).json({
-            error: "Zu viele Anfragen. Bitte warte einen Moment.",
-            retryAfterSeconds: Math.ceil((data.resetTime - now) / 1000)
-        });
-    }
-
-    data.count++;
-    next();
-
-    // Cleanup: Um Speicherlecks zu verhindern, ab und zu aufräumen
-    if (apiRequestCounts.size > 5000) {
-        for (const [key, val] of apiRequestCounts) {
-            if (Date.now() > val.resetTime) apiRequestCounts.delete(key);
+        // Wenn es der erste Request in diesem Zeitfenster ist, setze den Ablauf-Timer (60 Sekunden)
+        if (currentCount === 1) {
+            await global.redisPub.expire(redisKey, 60);
         }
+
+        if (currentCount > 300) { // Max 300 Requests pro Minute
+            return res.status(429).json({ error: "Zu viele Anfragen. Bitte warte einen Moment." });
+        }
+
+        next();
+    } catch (err) {
+        // Fallback: Wenn Redis kurzzeitig hängt, Request trotzdem durchlassen (besser als Server-Downtime)
+        console.error(`${LOG_PREFIX_SERVER} Redis Rate-Limit Fehler:`, err.message);
+        next();
     }
 }
 
@@ -874,17 +862,19 @@ const AVAILABLE_PERMISSIONS = {
     'manage_products': { name: 'Shop & Produkte', desc: 'Produkte erstellen, bearbeiten, löschen und Lagerbestände ändern.' },
     'manage_tokens': { name: 'Token-Generierung', desc: 'Erlaubt das Generieren von neuen Token-Guthabencodes.' },
     'manage_users': { name: 'Nutzerverwaltung (Basis)', desc: 'Nutzerdaten anpassen (Geld, Tokens) und Geldstrafen verhängen.' },
-    'manage_users_critical': { name: 'Nutzerverwaltung (Kritisch)', desc: 'Achtung: Erlaubt das Löschen, Bannen und Passwort-Zurücksetzen von Nutzern.' },
+    'manage_users_critical': { name: 'Nutzerverwaltung (Kritisch)', desc: 'Achtung: Erlaubt das Löschen, Bannen, Rollen-Zuweisung und Passwort-Zurücksetzen von Nutzern.' },
     'manage_news': { name: 'LNN News', desc: 'Manuelle News posten, AI-Trigger ausführen und Artikel löschen.' },
     'manage_ideas': { name: 'Ideenbox Moderation', desc: 'Ideen-Status ändern, löschen und Nutzer für die Ideenbox sperren/entsperren.' },
+    'manage_bugs': { name: 'Bug Bounty Moderation', desc: 'Bug-Reports einsehen, Status ändern und Delta-Coins vergeben.' }, // NEU
     'manage_teachermon': { name: 'Teachermon Karten', desc: 'Teachermon Karten erstellen und aus dem Spiel entfernen.' },
     'manage_universes': { name: 'Teachermon Universen', desc: 'Neue Universen anlegen und verwalten.' },
     'manage_human_grades': { name: 'Human Grades Daten', desc: 'Personen, Kategorien und Kriterien anlegen oder löschen.' },
     'manage_human_ratings': { name: 'Human Grades Moderation', desc: 'Bewertungen von Nutzern einsehen und gezielt löschen.' },
     'manage_cdn': { name: 'Bilder & CDN', desc: 'Hochgeladene Bilder vom Server löschen.' },
+    'manage_limea': { name: 'Limea Moderation', desc: 'Limea Layouts aus dem Community Store löschen.' }, // NEU
     'manage_economy': { name: 'Wirtschaftskontrolle', desc: 'Steuer-Razzia erzwingen, Vermögen kappen und Infinity-Money entziehen.' },
     'manage_chats': { name: 'Chat Inspektor', desc: 'Tinda-Chats und private Nachrichten lesen sowie als Admin Systemnachrichten senden.' },
-    'system_maintenance': { name: 'System & Wartung', desc: 'Health-Check abrufen, Kontostände normalisieren und Bild-Links reparieren.' },
+    'system_maintenance': { name: 'System & Wartung', desc: 'Health-Check, Stats, Reports abrufen und System-Reparaturen durchführen.' },
     'super_admin': { name: 'Super Admin (Engine)', desc: 'Gefährlich: Voller, ungefilterter Zugriff auf die MongoDB-Engine.' }
 };
 
@@ -909,6 +899,8 @@ const ENDPOINT_PERMISSIONS = {
     'POST /api/admin/users/:id/reset-pw': 'manage_users_critical',
     'DELETE /api/admin/users/:id': 'manage_users_critical',
     'POST /api/admin/banUser': 'manage_users_critical', 
+    'GET /api/admin/roles': 'manage_users_critical', // NEU
+    'GET /api/admin/permissions': 'manage_users_critical', // NEU
 
     // --- LNN News ---
     'POST /api/admin/news': 'manage_news',
@@ -920,6 +912,10 @@ const ENDPOINT_PERMISSIONS = {
     'DELETE /api/ideas/:id': 'manage_ideas',
     'POST /api/admin/ideas/ban-user': 'manage_ideas',
     'POST /api/admin/ideas/unban-user': 'manage_ideas',
+
+    // --- Bug Bounty --- // NEU HINZUGEFÜGT
+    'GET /api/admin/bugs': 'manage_bugs',
+    'POST /api/admin/bugs/:id/resolve': 'manage_bugs',
 
     // --- Teachermon ---
     'POST /api/teachermon/admin/cards': 'manage_teachermon',
@@ -938,6 +934,9 @@ const ENDPOINT_PERMISSIONS = {
     'GET /api/human/admin/raters/:userId': 'manage_human_ratings',
     'DELETE /api/human/admin/ratings/:id': 'manage_human_ratings',
 
+    // --- Limea --- // NEU HINZUGEFÜGT
+    'DELETE /api/limea/admin/layouts/:id': 'manage_limea',
+
     // --- Wirtschaft ---
     'POST /api/admin/system/force-tax': 'manage_economy',
     'POST /api/admin/system/revoke-infinity': 'manage_economy',
@@ -953,6 +952,8 @@ const ENDPOINT_PERMISSIONS = {
 
     // --- System & Wartung ---
     'GET /api/admin/health-check': 'system_maintenance',
+    'GET /api/admin/system/stats': 'system_maintenance', // NEU
+    'GET /api/admin/system/report': 'system_maintenance', // NEU
     'POST /api/admin/fix-balances': 'system_maintenance',
     'POST /api/admin/convert-products-to-stocks': 'system_maintenance',
     'POST /api/admin/normalize-balances': 'system_maintenance',
@@ -969,7 +970,7 @@ const PREDEFINED_ROLES = {
     'admin': { 
         name: 'Administrator',
         desc: 'Hat vollen Zugriff auf alles.',
-        permissions: ['ALL'] // Spezielles Keyword für "Darf alles"
+        permissions: ['ALL']
     },
     'moderator': {
         name: 'Moderator',
@@ -978,6 +979,7 @@ const PREDEFINED_ROLES = {
             'manage_users', 
             'manage_news', 
             'manage_ideas', 
+            'manage_bugs',
             'manage_human_grades', 
             'manage_human_ratings', 
             'manage_chats'
@@ -985,11 +987,12 @@ const PREDEFINED_ROLES = {
     },
     'shop_manager': {
         name: 'Shop & Content Manager',
-        desc: 'Verwaltet den Shop, Items und Teachermon-Karten.',
+        desc: 'Verwaltet den Shop, Items, Limea und Teachermon-Karten.',
         permissions: [
             'manage_products',
             'manage_teachermon',
             'manage_universes',
+            'manage_limea', // Hab ich dem Shop Manager gegeben
             'manage_cdn'
         ]
     },
@@ -1587,43 +1590,28 @@ const loginAttempts = new Map(); // Speichert IP -> { count, expireTime }
 const LOGIN_BLOCK_DURATION = 15 * 60 * 1000; // 15 Minuten Sperre
 const MAX_LOGIN_ATTEMPTS = 10; // Max 10 Versuche pro 15 Min
 
-function rateLimitLogin(req, res, next) {
-    // IP ermitteln
+async function rateLimitLogin(req, res, next) {
     const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
-    const now = Date.now();
+    const redisKey = `rate_limit:login:${ip}`;
 
-    if (loginAttempts.has(ip)) {
-        const data = loginAttempts.get(ip);
+    try {
+        const currentCount = await global.redisPub.incr(redisKey);
 
-        // Wenn Zeit abgelaufen, Reset
-        if (now > data.expireTime) {
-            loginAttempts.set(ip, { count: 1, expireTime: now + LOGIN_BLOCK_DURATION });
-            return next();
+        if (currentCount === 1) {
+            await global.redisPub.expire(redisKey, 15 * 60); // 15 Minuten Sperre
         }
 
-        // Wenn Limit erreicht
-        if (data.count >= MAX_LOGIN_ATTEMPTS) {
+        if (currentCount > 10) { // Max 10 Versuche
             console.warn(`${LOG_PREFIX_SERVER} 🚫 Login Block für IP ${ip} (Zu viele Versuche)`);
-            return res.status(429).json({
-                error: "Zu viele falsche Login-Versuche. Bitte warte 15 Minuten."
-            });
+            return res.status(429).json({ error: "Zu viele falsche Login-Versuche. Bitte warte 15 Minuten." });
         }
 
-        // Zähler erhöhen
-        data.count++;
-    } else {
-        // Neuer Eintrag
-        loginAttempts.set(ip, { count: 1, expireTime: now + LOGIN_BLOCK_DURATION });
+        // Wir hängen den Key an den Request, damit wir ihn bei einem erfolgreichen Login löschen können
+        req.loginRateLimitKey = redisKey;
+        next();
+    } catch (err) {
+        next();
     }
-
-    // Kleiner Cleanup (damit der RAM nicht vollläuft)
-    if (loginAttempts.size > 1000) {
-        for (const [key, val] of loginAttempts) {
-            if (now > val.expireTime) loginAttempts.delete(key);
-        }
-    }
-
-    next();
 }
 
 app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
@@ -1647,9 +1635,9 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
         const match = await bcrypt.compare(password, user.password);
 
         if (match) {
-            // NEU: Bei Erfolg den Rate-Limit Zähler für diese IP löschen!
-            if (loginAttempts.has(clientIp)) {
-                loginAttempts.delete(clientIp);
+            // Bei Erfolg den Rate-Limit Zähler für diese IP löschen!
+            if (req.loginRateLimitKey && global.redisPub) {
+                global.redisPub.del(req.loginRateLimitKey).catch(e => console.error("Redis Del Error", e));
             }
 
             // =========================================================
@@ -7035,27 +7023,29 @@ app.post('/api/admin/system/reset-rich-users', isAuthenticated, isAdmin, async (
 // === ADMIN ENGINE (UNIVERSAL ENDPOINT) ===
 // =========================================================
 
-// Diese Funktion wandelt String-IDs in echte ObjectIds um, falls nötig
+// Diese Funktion wandelt String-IDs um UND filtert gefährliche NoSQL-Injections
 function parseQuery(obj) {
     if (typeof obj !== 'object' || obj === null) return obj;
-
-    // Wenn es ein Array ist, rekursiv durchlaufen
     if (Array.isArray(obj)) return obj.map(parseQuery);
 
     const newObj = {};
     for (const key in obj) {
+        // 🛑 SICHERHEIT: Blockiere MongoDB-Operatoren, die Server-seitiges JavaScript ausführen!
+        if (key === '$where' || key === '$accumulator' || key === '$function') {
+            console.warn(`${LOG_PREFIX_SERVER} 🚨 Blockierter NoSQL-Injection-Versuch: Operator ${key} erkannt!`);
+            throw new Error(`Sicherheitsverletzung: Der Operator ${key} ist strengstens verboten.`);
+        }
+
         let value = obj[key];
 
-        // Rekursion für verschachtelte Objekte (z.B. $or, $set)
         if (typeof value === 'object') {
             value = parseQuery(value);
         }
 
-        // Wenn der Key "_id" ist und der Wert ein 24-Zeichen String, mache ObjectId daraus
         if ((key === '_id' || key === 'userId' || key === 'creatorId') && typeof value === 'string' && /^[0-9a-fA-F]{24}$/.test(value)) {
             try {
                 newObj[key] = new ObjectId(value);
-                continue; // Nächster Key
+                continue;
             } catch (e) { }
         }
 
@@ -7064,9 +7054,20 @@ function parseQuery(obj) {
     return newObj;
 }
 
+// 🛑 SICHERHEIT: Nur diese Collections dürfen über die Engine bearbeitet werden.
+// Füge hier neue Collections hinzu, wenn du sie baust. System-Collections fehlen hier absichtlich.
+const ENGINE_ALLOWED_COLLECTIONS = [
+    'users', 'products', 'orders', 'userInventories', 'wheels', 'tokenCodes', 'tokenTransactions', 
+    'limChats', 'limMessages', 'limUserChatSettings', 'auctions', 'dontBlameMePosts', 'portfolios', 
+    'transactions', 'ideas', 'news', 'robberyLogs', 'highscores', 'bugReports', 'systemSettings', 
+    'humans', 'ratings', 'criteria', 'categories', 'tindaSwipes', 'restaurantOrders', 'limterestPins', 
+    'teachermonCards', 'teachermonInventories', 'teachermonTrades', 'teachermonBattles', 'teachermonUniverses', 
+    'properties', 'ownedProperties', 'propertyInvites', 'pets', 'petCemetery', 'limeaLayouts', 
+    'gangs', 'publicGangChat', 'zones', 'bounties', 'lotteryTickets', 'banned_ips'
+];
+
 app.post('/api/admin/engine', isAuthenticated, isAdmin, async (req, res) => {
     const { mode, collection, operation, filter, payload } = req.body;
-    // mode: 'db' (Raw DB) oder 'shortcut' (Schnellbefehle)
 
     console.log(`${LOG_PREFIX_SERVER} ⚙️ Engine Command von ${req.session.username}: [${mode}] ${collection}.${operation}`);
 
@@ -7076,6 +7077,12 @@ app.post('/api/admin/engine', isAuthenticated, isAdmin, async (req, res) => {
         // MODUS 1: RAW DATABASE ACCESS
         if (mode === 'db') {
             if (!collection || !operation) return res.status(400).json({ error: "Collection/Operation fehlt." });
+
+            // 🛑 SICHERHEIT: Whitelist Check
+            if (!ENGINE_ALLOWED_COLLECTIONS.includes(collection)) {
+                console.warn(`${LOG_PREFIX_SERVER} 🚨 Unberechtigter Engine-Zugriff auf Collection: ${collection}`);
+                return res.status(403).json({ error: "Zugriff auf diese Collection ist durch die Firewall blockiert." });
+            }
 
             const targetCol = db.collection(collection);
 
