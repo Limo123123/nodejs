@@ -1742,7 +1742,8 @@ app.get('/api/auth/me', isAuthenticated, async (req, res) => {
             tokens: user.tokens || 0, 
             
             // HIER IST DER TRICK: Das Frontend denkt jetzt, er sei Admin!
-            isAdmin: showAdminUI, 
+            isAdmin: showAdminUI,
+			isRealAdmin: user.isAdmin === true || user.role === 'admin',
             
             infinityMoney: effectiveInfinityMoney, 
             unlockedInfinityMoney: user.unlockedInfinityMoney || false, 
