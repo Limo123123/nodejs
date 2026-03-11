@@ -6392,6 +6392,8 @@ const TAX_INTERVAL_MS = 24 * 60 * 60 * 1000; // Alle 24 Stunden
 async function collectTaxes() {
     console.log(`${LOG_PREFIX_SERVER} 📉 Der Steuer-Eintreiber macht seine Runde...`);
     try {
+		const taxConfig = await systemSettingsCollection.findOne({ id: 'tax_config' });
+        const currentTaxRate = taxConfig ? taxConfig.rate : 0.005;
         // Finde alle User, die mehr als das Limit haben UND keine Admins/Infinity-User sind
         const richUsers = await usersCollection.find({
             balance: { $gt: TAX_THRESHOLD },
@@ -6433,7 +6435,7 @@ async function collectTaxes() {
             }
 
             // 2. STEUER EINZIEHEN (Wenn kein Schild da ist)
-            const taxAmount = Math.floor(user.balance * TAX_RATE * 100) / 100;
+            const taxAmount = Math.floor(user.balance * currentTaxRate * 100) / 100;
 
             if (taxAmount > 0) {
                 bulkOps.push({
@@ -6827,6 +6829,7 @@ app.post('/api/crime/rob', isAuthenticated, async (req, res) => {
         }
 
         if (victim.isAdmin) return res.status(403).json({ error: "Admins sind unantastbar." });
+		if (victim.isMayor) return res.status(403).json({ error: "Der Bürgermeister genießt diplomatische Immunität! Ihn auszurauben ist Hochverrat." });
         if (victim.balance < ROBBERY_PROTECTION_LIMIT) return res.status(400).json({ error: "Opfer ist zu arm (< $10k)." });
 
         const successChance = await calculateRobberyChance(victim._id, victim.balance);
@@ -12337,6 +12340,373 @@ if (cluster.isPrimary) {
         }
     }, 5 * 60 * 1000); // Alle 5 Minuten prüfen
 }
+
+// =========================================================
+// === 🏛️ LIMO DEMOKRATIE (BÜRGERMEISTER WAHL) ===
+// =========================================================
+const LOG_PREFIX_ELECTION = "[Election API]";
+
+// 1. Admin: Wahl starten (Manuell, um den Hype zu kontrollieren)
+app.post('/api/admin/mayor/start', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const durationDays = req.body.days || 3; // Standard: 3 Tage Wahlkampf
+        const endsAt = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000);
+
+        // Wir nutzen die systemSettings Collection für den Wahl-Status
+        await systemSettingsCollection.updateOne(
+            { id: 'mayor_election' },
+            {
+                $set: {
+                    isActive: true,
+                    endsAt: endsAt,
+                    votes: [] // Array für { voterId: "...", candidateId: "..." }
+                }
+            },
+            { upsert: true }
+        );
+
+        // Breaking News generieren (ohne KI, direkt als System)
+        await newsCollection.insertOne({
+            headline: "NEUWAHLEN AUSGERUFEN! 🗳️",
+            content: `Das Admin-Regime hat offiziell Neuwahlen für das Amt des Bürgermeisters angeordnet. Die Wahlurnen sind für ${durationDays} Tage geöffnet. Geht wählen!`,
+            author: "LNN Politik",
+            category: "Community",
+            createdAt: new Date(),
+            likes: 0
+        });
+        updateDataVersion('news');
+
+        console.log(`${LOG_PREFIX_ELECTION} Admin ${req.session.username} hat eine Wahl gestartet.`);
+        res.json({ message: "Wahlurne erfolgreich aufgestellt!" });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Starten der Wahl." });
+    }
+});
+
+// 2. User: Wahlstatus & Kandidaten abrufen
+app.get('/api/mayor/election', isAuthenticated, async (req, res) => {
+    const userId = req.session.userId;
+    
+    try {
+        const election = await systemSettingsCollection.findOne({ id: 'mayor_election' });
+        
+        // Aktive User suchen (Letzter Login < 7 Tage her) UND KEINE ADMINS!
+        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        const activeUsers = await usersCollection.find(
+            {
+                lastLogin: { $gte: sevenDaysAgo },
+                isAdmin: { $ne: true } // Der Admin darf nicht gewählt werden!
+            },
+            { projection: { username: 1, isMayor: 1 } }
+        ).toArray();
+
+        // Wenn keine Wahl aktiv ist, nur den aktuellen Bürgermeister zeigen
+        if (!election || !election.isActive) {
+            const currentMayor = await usersCollection.findOne({ isMayor: true }, { projection: { username: 1 } });
+            return res.json({ 
+                isActive: false, 
+                currentMayor: currentMayor ? currentMayor.username : "Niemand",
+                message: "Es findet aktuell keine Wahl statt."
+            });
+        }
+
+        // Eigene Stimme suchen
+        const myVoteObj = election.votes.find(v => v.voterId === userId);
+        const hasVoted = !!myVoteObj;
+
+        // Stimmenauszählung (Leaderboard für Drama)
+        const voteCounts = {};
+        election.votes.forEach(v => {
+            voteCounts[v.candidateId] = (voteCounts[v.candidateId] || 0) + 1;
+        });
+
+        // Kandidaten für das Frontend aufbereiten
+        const candidates = activeUsers.map(user => ({
+            id: user._id.toString(),
+            username: user.username,
+            isCurrentMayor: !!user.isMayor,
+            votes: voteCounts[user._id.toString()] || 0
+        })).sort((a, b) => b.votes - a.votes); // Nach Stimmen sortieren
+
+        res.json({
+            isActive: true,
+            endsAt: election.endsAt,
+            hasVoted: hasVoted,
+            myVoteId: hasVoted ? myVoteObj.candidateId : null,
+            candidates: candidates,
+            totalVotes: election.votes.length
+        });
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Laden der Wahlurne." });
+    }
+});
+
+// 3. User: Abstimmen
+app.post('/api/mayor/vote', isAuthenticated, async (req, res) => {
+    const { candidateId } = req.body;
+    const voterId = req.session.userId;
+
+    if (!candidateId) return res.status(400).json({ error: "Du musst schon jemanden auswählen." });
+    if (candidateId === voterId) return res.status(400).json({ error: "Eitelkeit wird hier nicht belohnt. Du darfst dich nicht selbst wählen!" });
+
+    try {
+        const election = await systemSettingsCollection.findOne({ id: 'mayor_election' });
+        
+        if (!election || !election.isActive) {
+            return res.status(400).json({ error: "Die Wahlurnen sind geschlossen." });
+        }
+        if (new Date() > new Date(election.endsAt)) {
+            return res.status(400).json({ error: "Die Wahlzeit ist bereits abgelaufen. Wir warten auf den Admin zur Auszählung." });
+        }
+
+        // Prüfen, ob der Kandidat existiert und KEIN Admin ist
+        const candidate = await usersCollection.findOne({ _id: new ObjectId(candidateId) });
+        if (!candidate) return res.status(404).json({ error: "Kandidat nicht gefunden." });
+        if (candidate.isAdmin) return res.status(403).json({ error: "Admins stehen über der Demokratie. Wähl wen anders." });
+
+        // Hat der User schon gewählt?
+        const alreadyVoted = election.votes.some(v => v.voterId === voterId);
+        if (alreadyVoted) {
+            return res.status(400).json({ error: "Du hast deine Stimme bereits abgegeben! Wahlbetrug ist strafbar." });
+        }
+
+        // Stimme speichern
+        await systemSettingsCollection.updateOne(
+            { id: 'mayor_election' },
+            { 
+                $push: { 
+                    votes: { voterId: voterId, candidateId: candidateId, timestamp: new Date() } 
+                } 
+            }
+        );
+
+        console.log(`${LOG_PREFIX_ELECTION} User ${req.session.username} hat für ${candidate.username} gestimmt.`);
+        res.json({ message: `Deine Stimme für ${candidate.username} wurde sicher in der Wahlurne verstaut.` });
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Das Wahlgerät klemmt." });
+    }
+});
+
+// 4. Admin: Wahl beenden und Bürgermeister krönen
+app.post('/api/admin/mayor/end', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const election = await systemSettingsCollection.findOne({ id: 'mayor_election' });
+        if (!election || !election.isActive) return res.status(400).json({ error: "Es läuft keine Wahl." });
+
+        // Stimmen auszählen
+        const voteCounts = {};
+        election.votes.forEach(v => {
+            voteCounts[v.candidateId] = (voteCounts[v.candidateId] || 0) + 1;
+        });
+
+        // Gewinner ermitteln
+        let winnerId = null;
+        let maxVotes = -1;
+
+        for (const [candId, count] of Object.entries(voteCounts)) {
+            if (count > maxVotes) {
+                maxVotes = count;
+                winnerId = candId;
+            }
+        }
+
+        if (!winnerId) {
+            // Niemand hat abgestimmt
+            await systemSettingsCollection.updateOne({ id: 'mayor_election' }, { $set: { isActive: false } });
+            return res.json({ message: "Wahl beendet, aber niemand ist zur Wahlurne gegangen." });
+        }
+
+        // Den bisherigen Bürgermeister entmachten
+        await usersCollection.updateMany(
+            { isMayor: true },
+            { $set: { isMayor: false } }
+        );
+
+        // Den neuen Bürgermeister krönen
+        const winnerObjId = new ObjectId(winnerId);
+        await usersCollection.updateOne(
+            { _id: winnerObjId },
+            { $set: { isMayor: true } }
+        );
+
+        const winnerDoc = await usersCollection.findOne({ _id: winnerObjId });
+
+        // Wahl schließen
+        await systemSettingsCollection.updateOne(
+            { id: 'mayor_election' }, 
+            { $set: { isActive: false, lastWinnerId: winnerId, lastWinnerName: winnerDoc.username } }
+        );
+
+        // LNN News feuern
+        await newsCollection.insertOne({
+            headline: `WIR HABEN EINEN NEUEN BÜRGERMEISTER! 👑`,
+            content: `Mit ${maxVotes} Stimmen hat sich ${winnerDoc.username} durchgesetzt und ist nun der offizielle Bürgermeister von Limazon. Möge er weise herrschen!`,
+            author: "LNN Politik",
+            category: "Community",
+            createdAt: new Date(),
+            likes: 0
+        });
+        updateDataVersion('news');
+
+        // Optional: Kleine Geldprämie für den neuen Bürgermeister aus der Staatskasse
+        await usersCollection.updateOne({ _id: winnerObjId }, { $inc: { balance: 25000 } });
+
+        console.log(`${LOG_PREFIX_ELECTION} Wahl beendet. Neuer Bürgermeister: ${winnerDoc.username}`);
+        res.json({ message: `Wahl beendet! ${winnerDoc.username} ist der neue Bürgermeister.` });
+
+    } catch (e) {
+        res.status(500).json({ error: "Fehler bei der Auszählung." });
+    }
+});
+
+// Middleware: Prüft, ob der User der amtierende Bürgermeister ist
+async function isMayorMode(req, res, next) {
+    try {
+        const user = await usersCollection.findOne({ _id: new ObjectId(req.session.userId) });
+        if (user && user.isMayor === true) {
+            return next();
+        }
+        res.status(403).json({ error: "Zugriff verweigert! Nur der gewählte Bürgermeister hat hier Zutritt." });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler bei der Authentifizierung." });
+    }
+}
+
+const LOG_PREFIX_MAYOR = "[Rathaus API]";
+
+// --- 1. STEUERN ANPASSEN ---
+// Der Bürgermeister kann die Steuern zwischen 0.1% und 1.5% festlegen.
+app.post('/api/mayor/taxes', isAuthenticated, isMayorMode, async (req, res) => {
+    const { newRatePercent } = req.body; 
+    // Erwartet einen Wert wie 0.5 (für 0.5%) oder 1.2 (für 1.2%)
+
+    if (typeof newRatePercent !== 'number' || newRatePercent < 0.1 || newRatePercent > 1.5) {
+        return res.status(400).json({ error: "Der Steuersatz muss zwischen 0.1% und 1.5% liegen." });
+    }
+
+    try {
+        const decimalRate = newRatePercent / 100; // z.B. 0.005
+
+        // In SystemSettings speichern
+        await systemSettingsCollection.updateOne(
+            { id: 'tax_config' },
+            { $set: { rate: decimalRate, lastChangedBy: req.session.username, lastChangedAt: new Date() } },
+            { upsert: true }
+        );
+
+        // LNN News (Buhmann-Effekt)
+        let headline = newRatePercent > 0.5 ? "BÜRGERMEISTER ERHÖHT STEUERN! 🤬" : "STEUERSENKUNG! 🙏";
+        await newsCollection.insertOne({
+            headline: headline,
+            content: `Bürgermeister ${req.session.username} hat den allgemeinen Steuersatz auf ${newRatePercent}% angepasst. Das Volk tobt (oder jubelt).`,
+            author: "LNN Wirtschaft",
+            category: "Wirtschaft",
+            createdAt: new Date(),
+            likes: 0
+        });
+        updateDataVersion('news');
+
+        console.log(`${LOG_PREFIX_MAYOR} Steuern durch Bürgermeister auf ${newRatePercent}% gesetzt.`);
+        res.json({ message: `Gesetz erlassen: Der Steuersatz beträgt nun ${newRatePercent}%.` });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler im Finanzministerium." });
+    }
+});
+
+// --- 2. KONJUNKTURPAKET (STIMULUS CHECK) ---
+// Nimmt Geld aus der Staatskasse und gibt jedem aktiven Spieler einen festen Betrag (1x pro Woche)
+app.post('/api/mayor/stimulus', isAuthenticated, isMayorMode, async (req, res) => {
+    try {
+        const settings = await systemSettingsCollection.findOne({ id: 'mayor_stimulus' });
+        const now = Date.now();
+
+        // Cooldown: Nur alle 7 Tage
+        if (settings && settings.lastUsedAt && (now - new Date(settings.lastUsedAt).getTime() < 7 * 24 * 60 * 60 * 1000)) {
+            const daysLeft = Math.ceil((7 * 24 * 60 * 60 * 1000 - (now - new Date(settings.lastUsedAt).getTime())) / (24 * 60 * 60 * 1000));
+            return res.status(429).json({ error: `Die Staatskasse muss sich erholen! Nächstes Konjunkturpaket erst in ${daysLeft} Tagen möglich.` });
+        }
+
+        // Staatskasse prüfen
+        const treasuryDoc = await systemSettingsCollection.findOne({ id: 'state_treasury' });
+        const pot = treasuryDoc ? treasuryDoc.balance : 0;
+
+        if (pot < 100000) return res.status(400).json({ error: "Die Staatskasse ist zu leer (unter $100.000)." });
+
+        // Wir nehmen 10% der Staatskasse
+        const budget = Math.floor(pot * 0.1);
+
+        // Aktive User suchen (letzte 7 Tage eingeloggt, keine Admins)
+        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        const activeUsers = await usersCollection.find({ lastLogin: { $gte: sevenDaysAgo }, isAdmin: { $ne: true } }).toArray();
+
+        if (activeUsers.length === 0) return res.status(400).json({ error: "Keine aktiven Bürger gefunden." });
+
+        const payoutPerUser = Math.floor(budget / activeUsers.length);
+
+        // Geld verteilen
+        await usersCollection.updateMany(
+            { lastLogin: { $gte: sevenDaysAgo }, isAdmin: { $ne: true } },
+            { $inc: { balance: payoutPerUser } }
+        );
+
+        // Staatskasse leeren
+        await systemSettingsCollection.updateOne({ id: 'state_treasury' }, { $inc: { balance: -budget } });
+
+        // Cooldown setzen
+        await systemSettingsCollection.updateOne({ id: 'mayor_stimulus' }, { $set: { lastUsedAt: new Date() } }, { upsert: true });
+
+        // LNN News
+        await newsCollection.insertOne({
+            headline: "GELDREGEN VOM RATHAUS! 💸",
+            content: `Bürgermeister ${req.session.username} hat ein Konjunkturpaket verabschiedet! Jeder aktive Bürger erhält $${payoutPerUser.toLocaleString()} aus der Staatskasse!`,
+            author: "LNN Politik",
+            category: "Wirtschaft",
+            createdAt: new Date(),
+            likes: 0
+        });
+        updateDataVersion('news');
+
+        res.json({ message: `Konjunkturpaket verabschiedet! ${activeUsers.length} Bürger haben je $${payoutPerUser.toLocaleString()} erhalten.` });
+
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Verteilen der Gelder." });
+    }
+});
+
+// --- 3. PRÄSIDENTIELLE BEGNADIGUNG (GERICHT) ---
+// Bricht eine laufende Gerichtsverhandlung ab und spricht den Angeklagten frei.
+app.post('/api/mayor/pardon', isAuthenticated, isMayorMode, async (req, res) => {
+    try {
+        // Suche aktiven Fall
+        const activeCase = await db.collection('courtCases').findOne({ status: 'active' }, { sort: { createdAt: 1 } });
+        if (!activeCase) return res.status(400).json({ error: "Es gibt aktuell keinen aktiven Gerichtsfall." });
+
+        // Fall als "innocent" schließen
+        await db.collection('courtCases').updateOne(
+            { _id: activeCase._id },
+            { $set: { status: 'closed', verdict: 'innocent', closedAt: new Date(), pardonedByMayor: true } }
+        );
+
+        // LNN News
+        await newsCollection.insertOne({
+            headline: "BEGNADIGUNG DURCH DEN BÜRGERMEISTER! ⚖️",
+            content: `Bürgermeister ${req.session.username} hat von seinem Veto-Recht Gebrauch gemacht und ${activeCase.accusedName} offiziell begnadigt! Der Prozess ist beendet.`,
+            author: "LNN Justiz",
+            category: "Justiz",
+            createdAt: new Date(),
+            likes: 0
+        });
+        updateDataVersion('news');
+
+        res.json({ message: `Du hast ${activeCase.accusedName} begnadigt. Der Pöbel wird das sicher diskutieren.` });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler bei der Begnadigung." });
+    }
+});
 
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
