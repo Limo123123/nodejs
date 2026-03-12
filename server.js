@@ -12342,6 +12342,52 @@ if (cluster.isPrimary) {
     }, 5 * 60 * 1000); // Alle 5 Minuten prüfen
 }
 
+app.post('/api/admin/system/resurrect-pets', isAuthenticated, isAdmin, async (req, res) => {
+    console.log(`${LOG_PREFIX_SERVER} 🧟‍♂️ Admin ${req.session.username} beschwört die toten Tiere...`);
+
+    try {
+        // Alle toten Tiere vom Friedhof holen
+        const deadPets = await petCemeteryCollection.find({}).toArray();
+        
+        if (deadPets.length === 0) {
+            return res.json({ message: "Der Friedhof ist leer. Niemand muss gerettet werden!" });
+        }
+
+        let resurrectedCount = 0;
+
+        for (const deadPet of deadPets) {
+            // Wir suchen das Tier im Katalog, um die verlorenen Daten (wie das Gehege) wiederherzustellen
+            const petType = PET_CATALOG.find(p => p.icon === deadPet.icon || p.name === deadPet.type) || PET_CATALOG[0];
+
+            // Tier wieder in die Lebenden-Datenbank einfügen
+            await petsCollection.insertOne({
+                userId: deadPet.userId,
+                ownerName: deadPet.ownerName,
+                typeId: petType.id,
+                typeName: petType.name,
+                icon: petType.icon,
+                enclosure: petType.enclosure,
+                name: deadPet.petName, // Im Friedhof hieß das Feld 'petName', hier 'name'
+                starvationTimeHours: petType.starvationTimeHours,
+                lastFedAt: new Date(), // Direkt füttern (Balken auf 100%)!
+                // Wir berechnen das ursprüngliche Adoptionsdatum ungefähr zurück
+                adoptedAt: new Date(Date.now() - (deadPet.ageDays || 0) * 24 * 60 * 60 * 1000) 
+            });
+            
+            // Tier vom Friedhof löschen
+            await petCemeteryCollection.deleteOne({ _id: deadPet._id });
+            resurrectedCount++;
+        }
+
+        console.log(`${LOG_PREFIX_SERVER} 🧟‍♂️ ${resurrectedCount} Tiere erfolgreich wiederbelebt.`);
+        res.json({ message: `Halleluja! ${resurrectedCount} Tiere wurden von den Toten auferweckt, frisch gefüttert und ihren Besitzern zurückgegeben.` });
+
+    } catch (e) {
+        console.error(`${LOG_PREFIX_SERVER} Nekromantie-Fehler:`, e);
+        res.status(500).json({ error: "Das Ritual ist fehlgeschlagen: " + e.message });
+    }
+});
+
 // =========================================================
 // === 🏛️ LIMO DEMOKRATIE (BÜRGERMEISTER WAHL) ===
 // =========================================================
