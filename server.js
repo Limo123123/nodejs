@@ -170,6 +170,7 @@ let petsCollection;
 let petCemeteryCollection;
 let limeaLayoutsCollection;
 let tindaFamiliesCollection;
+let mailsCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -1102,6 +1103,7 @@ MongoClient.connect(mongoUri)
         petCemeteryCollection = db.collection('petCemetery');
 		limeaLayoutsCollection = db.collection('limeaLayouts');
 		tindaFamiliesCollection = db.collection('tindaFamilies');
+		mailsCollection = db.collection('mails');
 
         authCodesCollection = db.collection(authCodesCollectionName);
 
@@ -1157,6 +1159,7 @@ MongoClient.connect(mongoUri)
             await auctionsCollection.createIndex({ sellerId: 1 });
 			await seedTeachermonUniverses();
 			await seedProperties();
+			await mailsCollection.createIndex({ userId: 1, createdAt: -1 });
 
             if (tokenTransactionsCollection) {
                 await tokenTransactionsCollection.createIndex({ userId: 1 });
@@ -12752,6 +12755,132 @@ app.post('/api/mayor/pardon', isAuthenticated, isMayorMode, async (req, res) => 
         res.json({ message: `Du hast ${activeCase.accusedName} begnadigt. Der Pöbel wird das sicher diskutieren.` });
     } catch (e) {
         res.status(500).json({ error: "Fehler bei der Begnadigung." });
+    }
+});
+
+// =========================================================
+// === ✉️ LIMO MAIL SYSTEM (POSTFACH & BELOHNUNGEN) ===
+// =========================================================
+const LOG_PREFIX_MAIL = "[Limo Mail]";
+
+// 1. User: Postfach abrufen
+app.get('/api/mail/inbox', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const mails = await mailsCollection.find({ userId }).sort({ createdAt: -1 }).toArray();
+        res.json({ mails });
+    } catch (e) {
+        res.status(500).json({ error: "Postfach konnte nicht geladen werden." });
+    }
+});
+
+// 2. User: Mail als gelesen markieren
+app.post('/api/mail/:id/read', isAuthenticated, async (req, res) => {
+    const mailId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+    try {
+        await mailsCollection.updateOne({ _id: mailId, userId }, { $set: { isRead: true } });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler." });
+    }
+});
+
+// 3. User: Belohnung (Claim) einlösen (Sicher mit Transaktion!)
+app.post('/api/mail/:id/claim', isAuthenticated, async (req, res) => {
+    const mailId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+
+    const session = client.startSession();
+    try {
+        let rewardMessage = "Belohnung eingelöst!";
+        
+        await session.withTransaction(async () => {
+            const mail = await mailsCollection.findOne({ _id: mailId, userId }, { session });
+            if (!mail) throw new Error("Mail nicht gefunden.");
+            if (!mail.rewards) throw new Error("Diese Mail enthält keine Belohnungen.");
+            if (mail.isClaimed) throw new Error("Belohnung wurde bereits abgeholt!");
+
+            // Update User mit den Belohnungen
+            const updateOps = { $inc: {} };
+            
+            if (mail.rewards.money) updateOps.$inc.balance = mail.rewards.money;
+            if (mail.rewards.tokens) updateOps.$inc.tokens = mail.rewards.tokens;
+            
+            if (mail.rewards.badge) {
+                updateOps.$addToSet = { achievements: mail.rewards.badge };
+            }
+
+            if (Object.keys(updateOps.$inc).length === 0) delete updateOps.$inc;
+
+            await usersCollection.updateOne({ _id: userId }, updateOps, { session });
+            
+            // Mail als eingelöst markieren
+            await mailsCollection.updateOne(
+                { _id: mailId }, 
+                { $set: { isClaimed: true, isRead: true } }, 
+                { session }
+            );
+
+            rewardMessage = `Erfolgreich eingelöst! Du hast erhalten: ` + 
+                (mail.rewards.money ? `$${mail.rewards.money} ` : '') +
+                (mail.rewards.tokens ? `${mail.rewards.tokens} Tokens ` : '') +
+                (mail.rewards.badge ? `+ Exklusives Badge!` : '');
+        });
+
+        res.json({ success: true, message: rewardMessage });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// 4. Admin: Mails versenden
+app.post('/api/admin/mail/send', isAuthenticated, isAdmin, async (req, res) => {
+    const { target, subject, content, rewards } = req.body;
+    // target kann 'all', 'active' (letzte 7 Tage) oder ein 'username' sein.
+    
+    if (!subject || !content) return res.status(400).json({ error: "Betreff und Text fehlen." });
+
+    try {
+        let usersToReceive = [];
+
+        if (target === 'all') {
+            usersToReceive = await usersCollection.find({}, { projection: { _id: 1 } }).toArray();
+        } else if (target === 'active') {
+            // Nur User, die in den letzten 7 Tagen online waren
+            const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+            usersToReceive = await usersCollection.find({ lastLogin: { $gte: sevenDaysAgo } }, { projection: { _id: 1 } }).toArray();
+        } else {
+            // Einzelner User
+            const u = await usersCollection.findOne({ username: { $regex: new RegExp(`^${target}$`, 'i') } });
+            if (!u) return res.status(404).json({ error: "Ziel-User nicht gefunden." });
+            usersToReceive.push(u);
+        }
+
+        if (usersToReceive.length === 0) return res.status(400).json({ error: "Keine Empfänger gefunden." });
+
+        // Mails generieren
+        const mailsToInsert = usersToReceive.map(u => ({
+            userId: u._id,
+            sender: `System-Admin (${req.session.username})`,
+            subject: subject,
+            content: content,
+            rewards: rewards || null, // z.B. { money: 50000, tokens: 25, badge: 'bug_survivor' }
+            isRead: false,
+            isClaimed: false,
+            createdAt: new Date()
+        }));
+
+        await mailsCollection.insertMany(mailsToInsert);
+
+        console.log(`${LOG_PREFIX_MAIL} Admin ${req.session.username} hat ${mailsToInsert.length} Mails gesendet.`);
+        res.json({ message: `Nachricht an ${mailsToInsert.length} Bürger verschickt!` });
+
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Versenden." });
     }
 });
 
