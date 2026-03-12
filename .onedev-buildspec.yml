@@ -1,4 +1,4 @@
-version: 43
+version: 44
 jobs:
 - name: Generate NPM Package
   steps:
@@ -46,6 +46,17 @@ jobs:
     userName: Limo123123
     passwordSecret: gh
     force: true
+    condition: SUCCESSFUL
+    optional: false
+  - type: CommandStep
+    name: Update Server
+    runInContainer: true
+    image: curlimages/curl:latest
+    interpreter:
+      type: DefaultInterpreter
+      commands: |
+        curl -X POST http://192.168.178.183:9005@secret:update@
+    useTTY: true
     condition: SUCCESSFUL
     optional: false
   triggers:
