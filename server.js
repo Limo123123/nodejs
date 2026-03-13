@@ -171,6 +171,7 @@ let petCemeteryCollection;
 let limeaLayoutsCollection;
 let tindaFamiliesCollection;
 let mailsCollection;
+let proposalsCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -1104,6 +1105,7 @@ MongoClient.connect(mongoUri)
 		limeaLayoutsCollection = db.collection('limeaLayouts');
 		tindaFamiliesCollection = db.collection('tindaFamilies');
 		mailsCollection = db.collection('mails');
+		proposalsCollection = db.collection('proposals');
 
         authCodesCollection = db.collection(authCodesCollectionName);
 
@@ -6396,7 +6398,8 @@ const TAX_INTERVAL_MS = 24 * 60 * 60 * 1000; // Alle 24 Stunden
 async function collectTaxes() {
     console.log(`${LOG_PREFIX_SERVER} 📉 Der Steuer-Eintreiber macht seine Runde...`);
     try {
-		const taxConfig = await systemSettingsCollection.findOne({ id: 'tax_config' });
+		// Wenn kein Bürgermeister was eingestellt hat, ist der Standard 0.5% (0.005)
+        const taxConfig = await systemSettingsCollection.findOne({ id: 'tax_config' });
         const currentTaxRate = taxConfig ? taxConfig.rate : 0.005;
         // Finde alle User, die mehr als das Limit haben UND keine Admins/Infinity-User sind
         const richUsers = await usersCollection.find({
@@ -6415,8 +6418,7 @@ async function collectTaxes() {
         const inventoryOps = []; // Für verbrauchte Schilde
 
         for (const user of richUsers) {
-            // 1. PRÜFUNG: Hat der User ein Steuerschutz-Zertifikat?
-            // Wir schauen direkt in die Inventar-Collection
+            // A. Hat der User ein Schild?
             const shield = await inventoriesCollection.findOne({
                 userId: user._id,
                 productId: 'tax_shield',
@@ -6424,8 +6426,7 @@ async function collectTaxes() {
             });
 
             if (shield) {
-                console.log(`${LOG_PREFIX_SERVER} 🛡️ User ${user.username} ist geschützt! Verbrauche 1x Steuerschutz.`);
-
+                shieldedUsers++;
                 // Schild verbrauchen (-1 quantity)
                 inventoryOps.push({
                     updateOne: {
@@ -6433,15 +6434,24 @@ async function collectTaxes() {
                         update: { $inc: { quantityOwned: -1 } }
                     }
                 });
-
-                // Wir ziehen KEIN Geld ab -> weiter zum nächsten User
-                continue;
+                continue; // Nächster User (keine Steuer)
             }
 
-            // 2. STEUER EINZIEHEN (Wenn kein Schild da ist)
-            const taxAmount = Math.floor(user.balance * currentTaxRate * 100) / 100;
+            // --- BÜRGERMEISTER-STEUER & EHEGATTENSPLITTING KOMBINIERT ---
+            let userTaxRate = currentTaxRate;
+            
+            // Wenn der User verheiratet ist, zahlt er nur die Hälfte der aktuellen Bürgermeister-Steuer!
+            if (user.spouses && user.spouses.length > 0) {
+                userTaxRate = currentTaxRate / 2; 
+            }
+
+            // B. Steuer berechnen (Mit dem finalen Steuersatz)
+            const taxAmount = Math.floor(user.balance * userTaxRate * 100) / 100;
 
             if (taxAmount > 0) {
+                taxedUsersCount++;
+                totalTaxCollected += taxAmount;
+
                 bulkOps.push({
                     updateOne: {
                         filter: { _id: user._id },
@@ -6453,7 +6463,6 @@ async function collectTaxes() {
                         }
                     }
                 });
-                totalTaxCollected += taxAmount;
             }
         }
 
@@ -12881,6 +12890,200 @@ app.post('/api/admin/mail/send', isAuthenticated, isAdmin, async (req, res) => {
     } catch (e) {
         console.error(e);
         res.status(500).json({ error: "Fehler beim Versenden." });
+    }
+});
+
+// =========================================================
+// === 💒 STANDESAMT (HEIRATEN & SCHEIDUNG FÜR ECHTE USER) ===
+// =========================================================
+const LOG_PREFIX_WEDDING = "[Standesamt API]";
+
+const RING_TYPES = {
+    'kaugummi': { name: 'Kaugummiautomat-Ring', price: 500, icon: '🍬' },
+    'silber': { name: 'Silberring', price: 10000, icon: '💍' },
+    'gold': { name: 'Goldring', price: 50000, icon: '🌟' },
+    'diamant': { name: 'Diamantring', price: 250000, icon: '💎' },
+    'limo': { name: 'Limo Prime Ring', price: 1000000, icon: '👑' }
+};
+
+// 1. Status abrufen (Meine Ehen & Anträge)
+app.get('/api/standesamt/status', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const user = await usersCollection.findOne({ _id: userId }, { projection: { spouses: 1 } });
+        
+        // Offene Anträge (die ich erhalten habe)
+        const incomingProposals = await proposalsCollection.find({ targetId: userId }).toArray();
+        // Anträge (die ich gesendet habe)
+        const outgoingProposals = await proposalsCollection.find({ senderId: userId }).toArray();
+
+        res.json({
+            spouses: user.spouses || [],
+            incoming: incomingProposals,
+            outgoing: outgoingProposals,
+            rings: RING_TYPES
+        });
+    } catch (e) {
+        res.status(500).json({ error: "Standesamt geschlossen." });
+    }
+});
+
+// 2. Heiratsantrag stellen
+app.post('/api/standesamt/propose', isAuthenticated, async (req, res) => {
+    const { targetUsername, ringType } = req.body;
+    const senderId = new ObjectId(req.session.userId);
+    const senderName = req.session.username;
+
+    if (!targetUsername || !ringType || !RING_TYPES[ringType]) {
+        return res.status(400).json({ error: "Ungültige Daten." });
+    }
+
+    if (targetUsername.toLowerCase() === senderName.toLowerCase()) {
+        return res.status(400).json({ error: "Selbstliebe ist wichtig, aber steuerlich nicht absetzbar. Wähle jemand anderen." });
+    }
+
+    const ring = RING_TYPES[ringType];
+
+    try {
+        const targetUser = await usersCollection.findOne({ username: { $regex: new RegExp(`^${targetUsername}$`, 'i') } });
+        if (!targetUser) return res.status(404).json({ error: "Diese Person lebt nicht in Limazon." });
+
+        const user = await usersCollection.findOne({ _id: senderId });
+        if (user.balance < ring.price) return res.status(400).json({ error: `Du bist zu arm für den ${ring.name} ($${ring.price.toLocaleString()}).` });
+
+        // Prüfen, ob sie schon verheiratet sind
+        if (user.spouses && user.spouses.some(s => s.id.equals(targetUser._id))) {
+            return res.status(400).json({ error: "Ihr seid doch schon verheiratet!" });
+        }
+
+        // Prüfen, ob schon ein Antrag läuft
+        const existing = await proposalsCollection.findOne({ senderId: senderId, targetId: targetUser._id });
+        if (existing) return res.status(400).json({ error: "Du liegst bereits auf den Knien. Warte auf eine Antwort!" });
+
+        // Geld abziehen
+        await usersCollection.updateOne({ _id: senderId }, { $inc: { balance: -ring.price } });
+
+        // Antrag in DB
+        await proposalsCollection.insertOne({
+            senderId: senderId,
+            senderName: senderName,
+            targetId: targetUser._id,
+            targetName: targetUser.username,
+            ringType: ringType,
+            ringDetails: ring,
+            createdAt: new Date()
+        });
+
+        res.json({ message: `Antrag mit ${ring.name} an ${targetUser.username} gesendet! Hoffen wir, dass sie/er 'Ja' sagt.` });
+
+    } catch (e) {
+        res.status(500).json({ error: "Der Ring ist ins Gulli gefallen." });
+    }
+});
+
+// 3. Antrag beantworten (Ja / Nein)
+app.post('/api/standesamt/respond', isAuthenticated, async (req, res) => {
+    const { proposalId, action } = req.body; // action: 'accept' oder 'decline'
+    const userId = new ObjectId(req.session.userId);
+    const userName = req.session.username;
+
+    const session = client.startSession();
+    try {
+        let responseMessage = "";
+
+        await session.withTransaction(async () => {
+            const proposal = await proposalsCollection.findOne({ _id: new ObjectId(proposalId), targetId: userId }, { session });
+            if (!proposal) throw new Error("Antrag nicht gefunden.");
+
+            if (action === 'decline') {
+                // Bei "Nein" bekommt der Antragsteller sein Geld zurück (Kulanz des Juweliers)
+                await usersCollection.updateOne({ _id: proposal.senderId }, { $inc: { balance: proposal.ringDetails.price } }, { session });
+                await proposalsCollection.deleteOne({ _id: proposal._id }, { session });
+                responseMessage = `Du hast ${proposal.senderName} einen Korb gegeben.`;
+            } 
+            else if (action === 'accept') {
+                const date = new Date();
+                
+                // Trage Partner A bei Partner B ein
+                const spouseA = { id: proposal.senderId, name: proposal.senderName, ring: proposal.ringDetails.name, date: date };
+                const spouseB = { id: userId, name: userName, ring: proposal.ringDetails.name, date: date };
+
+                await usersCollection.updateOne({ _id: userId }, { $addToSet: { spouses: spouseA } }, { session });
+                await usersCollection.updateOne({ _id: proposal.senderId }, { $addToSet: { spouses: spouseB } }, { session });
+
+                await proposalsCollection.deleteOne({ _id: proposal._id }, { session });
+
+                // LNN NEWS BREAKER!
+                await newsCollection.insertOne({
+                    headline: `HOCHZEITSGLOCKEN! 💒`,
+                    content: `${userName} hat 'JA' gesagt! ${proposal.senderName} und ${userName} sind nun offiziell verheiratet. (Der Ring war ein ${proposal.ringDetails.name}). Glückwunsch!`,
+                    author: "LNN Standesamt",
+                    category: "Community",
+                    createdAt: date,
+                    likes: 0
+                }, { session });
+                updateDataVersion('news');
+
+                responseMessage = `JA! Du bist nun mit ${proposal.senderName} verheiratet. Genießt das Ehegattensplitting!`;
+            } else {
+                throw new Error("Ungültige Aktion.");
+            }
+        });
+
+        res.json({ success: true, message: responseMessage });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// 4. Scheidung (Polygamie-freundlich)
+app.post('/api/standesamt/divorce', isAuthenticated, async (req, res) => {
+    const { targetId } = req.body; // Wer soll geschieden werden?
+    const userId = new ObjectId(req.session.userId);
+    const userName = req.session.username;
+    const DIVORCE_COST = 25000; // Anwaltskosten
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (user.balance < DIVORCE_COST) throw new Error(`Du brauchst $${DIVORCE_COST.toLocaleString()} für den Anwalt.`);
+
+            const targetObjId = new ObjectId(targetId);
+            
+            // Checken ob sie wirklich verheiratet sind
+            if (!user.spouses || !user.spouses.some(s => s.id.equals(targetObjId))) {
+                throw new Error("Ihr seid nicht verheiratet.");
+            }
+
+            const exSpouse = await usersCollection.findOne({ _id: targetObjId }, { session });
+
+            // Geld abziehen
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -DIVORCE_COST } }, { session });
+
+            // Aus den Arrays löschen
+            await usersCollection.updateOne({ _id: userId }, { $pull: { spouses: { id: targetObjId } } }, { session });
+            await usersCollection.updateOne({ _id: targetObjId }, { $pull: { spouses: { id: userId } } }, { session });
+
+            // LNN News Drama!
+            await newsCollection.insertOne({
+                headline: `BITTERE SCHEIDUNG! 💔`,
+                content: `Das Märchen ist vorbei! ${userName} hat die Scheidung von ${exSpouse.username} eingereicht. Die Anwälte reiben sich die Hände.`,
+                author: "LNN Klatsch & Tratsch",
+                category: "Community",
+                createdAt: new Date(),
+                likes: 0
+            }, { session });
+            updateDataVersion('news');
+        });
+
+        res.json({ success: true, message: `Scheidung vollzogen. Das kostet dich $${DIVORCE_COST}.` });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
     }
 });
 
