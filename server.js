@@ -13137,15 +13137,57 @@ setInterval(async () => {
 // === 🚚 LIMO LOGISTICS API (LIEFERSERVICE) ===
 // =========================================================
 
-// NEU: 1. Inventar für das Dropdown-Menü abrufen
+// 1. Inventar für das Dropdown-Menü abrufen (FIXED: Mit Namen und Kategorien!)
 app.get('/api/delivery/inventory', isAuthenticated, async (req, res) => {
     try {
-        const items = await inventoriesCollection.find({ 
+        // A) Rohes Inventar laden (nur IDs und Mengen)
+        const rawInventory = await inventoriesCollection.find({ 
             userId: new ObjectId(req.session.userId), 
             quantityOwned: { $gt: 0 } 
         }).toArray();
-        res.json(items);
+
+        if (rawInventory.length === 0) return res.json([]);
+
+        // B) Alle echten Shop-Produkte aus der Datenbank holen
+        const productIds = rawInventory.map(item => item.productId);
+        const dbProducts = await productsCollection.find({ id: { $in: productIds } }).toArray();
+        const dbProductMap = new Map(dbProducts.map(p => [p.id, p]));
+
+        // C) Daten anreichern und kategorisieren
+        const enrichedItems = rawInventory.map(item => {
+            let name = "Unbekanntes Item";
+            let icon = "📦";
+            let category = "Sonstiges";
+
+            // Check 1: Ist es ein Shop-Produkt?
+            if (dbProductMap.has(item.productId)) {
+                const p = dbProductMap.get(item.productId);
+                name = p.name;
+                icon = '🛒'; 
+                category = "Produkte";
+            } 
+            // Check 2: Ist es ein Möbelstück aus Limea?
+            else {
+                const limeaItem = LIMEA_CATALOG.find(l => l.id === item.productId);
+                if (limeaItem) {
+                    name = limeaItem.name;
+                    icon = limeaItem.icon;
+                    category = "Möbel";
+                }
+            }
+
+            return {
+                productId: item.productId,
+                quantityOwned: item.quantityOwned,
+                name: name,
+                icon: icon,
+                category: category
+            };
+        });
+
+        res.json(enrichedItems);
     } catch (e) {
+        console.error("Inventar Ladefehler:", e);
         res.status(500).json({ error: "Fehler beim Laden des Inventars." });
     }
 });
@@ -13162,38 +13204,38 @@ app.get('/api/delivery/providers', isAuthenticated, (req, res) => {
     ];
     
     providers.sort((a, b) => b.cost - a.cost);
-    
-    // GANZ WICHTIG: Wir merken uns die gewürfelten Preise für DIESEN User in seiner Session!
     req.session.deliveryQuotes = providers;
-
     res.json(providers);
 });
 
-// 3. Paket versenden (Nutzt die sicheren Session-Werte)
+// 3. Paket versenden (FIXED: Sucht sich den korrekten Namen für die E-Mail!)
 app.post('/api/delivery/send', isAuthenticated, async (req, res) => {
-    // Wir fordern vom Frontend NICHT MEHR den Preis an, sondern nur noch die "providerId" (z.B. 'dhl')
     const { targetUsername, productId, quantity, providerId } = req.body; 
     const senderId = new ObjectId(req.session.userId);
     const senderName = req.session.username;
     const qty = parseInt(quantity);
 
-    if (!targetUsername || !productId || !providerId || qty <= 0) {
-        return res.status(400).json({ error: "Fehlende Angaben." });
-    }
+    if (!targetUsername || !productId || !providerId || qty <= 0) return res.status(400).json({ error: "Fehlende Angaben." });
+    if (targetUsername.toLowerCase() === senderName.toLowerCase()) return res.status(400).json({ error: "Du kannst dir selbst keine Pakete schicken." });
+    if (!req.session.deliveryQuotes) return res.status(400).json({ error: "Tarife abgelaufen. Lade neu." });
 
-    if (targetUsername.toLowerCase() === senderName.toLowerCase()) {
-        return res.status(400).json({ error: "Du kannst dir selbst keine Pakete schicken." });
-    }
-
-    // CHECK: Hat der User überhaupt vorher Preise abgefragt?
-    if (!req.session.deliveryQuotes) {
-        return res.status(400).json({ error: "Die Tarife sind abgelaufen. Bitte lade die Seite neu." });
-    }
-
-    // SICHERHEIT: Wir suchen den Preis aus UNSEREN Notizen, nicht aus dem Frontend!
     const provider = req.session.deliveryQuotes.find(p => p.id === providerId);
-    if (!provider) {
-        return res.status(400).json({ error: "Diesen Lieferdienst gibt es nicht." });
+    if (!provider) return res.status(400).json({ error: "Diesen Lieferdienst gibt es nicht." });
+
+    // Finde den echten Namen für die E-Mail heraus
+    let itemName = "Unbekanntes Item";
+    let itemIcon = "📦";
+    
+    const dbProduct = await productsCollection.findOne({ id: productId });
+    if (dbProduct) {
+        itemName = dbProduct.name;
+        itemIcon = '🛒';
+    } else {
+        const limeaItem = LIMEA_CATALOG.find(l => l.id === productId);
+        if (limeaItem) {
+            itemName = limeaItem.name;
+            itemIcon = limeaItem.icon;
+        }
     }
 
     const session = client.startSession();
@@ -13210,11 +13252,9 @@ app.post('/api/delivery/send', isAuthenticated, async (req, res) => {
                 throw new Error("Du hast nicht genug von diesem Item im Inventar.");
             }
 
-            // Geld und Item abziehen
             await usersCollection.updateOne({ _id: senderId }, { $inc: { balance: -provider.cost } }, { session });
             await inventoriesCollection.updateOne({ _id: inventoryItem._id }, { $inc: { quantityOwned: -qty } }, { session });
 
-            // Lieferzeit berechnen
             const arrivalDate = new Date(Date.now() + provider.timeMins * 60 * 1000);
 
             await deliveriesCollection.insertOne({
@@ -13223,9 +13263,8 @@ app.post('/api/delivery/send', isAuthenticated, async (req, res) => {
                 targetId: target._id,
                 targetName: target.username,
                 productId: productId,
-                productName: inventoryItem.name,
-                productIcon: inventoryItem.icon,
-                productType: inventoryItem.type,
+                productName: itemName, // Jetzt steht hier der ECHTE Name!
+                productIcon: itemIcon,
                 quantity: qty,
                 providerName: provider.name,
                 cost: provider.cost,
@@ -13235,9 +13274,7 @@ app.post('/api/delivery/send', isAuthenticated, async (req, res) => {
             }, { session });
         });
 
-        // Die Quotes löschen, damit er für das nächste Paket neu anfragen muss
         req.session.deliveryQuotes = null;
-
         res.json({ message: `📦 Paket an ${provider.name} übergeben! Es kommt in ca. ${provider.timeMins} Minuten an.` });
 
     } catch (e) {
