@@ -13208,30 +13208,36 @@ app.get('/api/delivery/providers', isAuthenticated, (req, res) => {
     res.json(providers);
 });
 
-// 3. Paket versenden (FIXED: Sucht sich den korrekten Namen für die E-Mail!)
+// 3. Paket versenden
 app.post('/api/delivery/send', isAuthenticated, async (req, res) => {
     const { targetUsername, productId, quantity, providerId } = req.body; 
     const senderId = new ObjectId(req.session.userId);
     const senderName = req.session.username;
     const qty = parseInt(quantity);
 
-    if (!targetUsername || !productId || !providerId || qty <= 0) return res.status(400).json({ error: "Fehlende Angaben." });
+    // --- DER FIX: Typen-Konvertierung ---
+    // HTML Dropdowns senden immer Strings. Wir wandeln Shop-IDs zurück in Zahlen!
+    const parsedId = Number(productId);
+    const finalProductId = isNaN(parsedId) ? productId : parsedId;
+    // ------------------------------------
+
+    if (!targetUsername || !finalProductId || !providerId || qty <= 0) return res.status(400).json({ error: "Fehlende Angaben." });
     if (targetUsername.toLowerCase() === senderName.toLowerCase()) return res.status(400).json({ error: "Du kannst dir selbst keine Pakete schicken." });
     if (!req.session.deliveryQuotes) return res.status(400).json({ error: "Tarife abgelaufen. Lade neu." });
 
     const provider = req.session.deliveryQuotes.find(p => p.id === providerId);
     if (!provider) return res.status(400).json({ error: "Diesen Lieferdienst gibt es nicht." });
 
-    // Finde den echten Namen für die E-Mail heraus
+    // Finde den echten Namen für die E-Mail heraus (mit finalProductId!)
     let itemName = "Unbekanntes Item";
     let itemIcon = "📦";
     
-    const dbProduct = await productsCollection.findOne({ id: productId });
+    const dbProduct = await productsCollection.findOne({ id: finalProductId });
     if (dbProduct) {
         itemName = dbProduct.name;
         itemIcon = '🛒';
     } else {
-        const limeaItem = LIMEA_CATALOG.find(l => l.id === productId);
+        const limeaItem = LIMEA_CATALOG.find(l => l.id === finalProductId);
         if (limeaItem) {
             itemName = limeaItem.name;
             itemIcon = limeaItem.icon;
@@ -13247,7 +13253,8 @@ app.post('/api/delivery/send', isAuthenticated, async (req, res) => {
             const target = await usersCollection.findOne({ username: { $regex: new RegExp(`^${targetUsername}$`, 'i') } }, { session });
             if (!target) throw new Error("Empfänger existiert nicht.");
 
-            const inventoryItem = await inventoriesCollection.findOne({ userId: senderId, productId: productId }, { session });
+            // Wir suchen im Inventar jetzt mit der korrekten finalProductId
+            const inventoryItem = await inventoriesCollection.findOne({ userId: senderId, productId: finalProductId }, { session });
             if (!inventoryItem || inventoryItem.quantityOwned < qty) {
                 throw new Error("Du hast nicht genug von diesem Item im Inventar.");
             }
@@ -13262,8 +13269,8 @@ app.post('/api/delivery/send', isAuthenticated, async (req, res) => {
                 senderName: senderName,
                 targetId: target._id,
                 targetName: target.username,
-                productId: productId,
-                productName: itemName, // Jetzt steht hier der ECHTE Name!
+                productId: finalProductId, // WICHTIG: Die echte ID mitsenden
+                productName: itemName,
                 productIcon: itemIcon,
                 quantity: qty,
                 providerName: provider.name,
