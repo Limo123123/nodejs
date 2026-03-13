@@ -13086,52 +13086,55 @@ app.post('/api/standesamt/divorce', isAuthenticated, async (req, res) => {
 // =========================================================
 // === 📦 LIMO LOGISTICS (PAKETBOTE BACKGROUND WORKER) ===
 // =========================================================
-setInterval(async () => {
-    try {
-        // Suche alle Pakete, deren Lieferzeitpunkt in der Vergangenheit liegt und die noch 'pending' sind
-        const pendingDeliveries = await deliveriesCollection.find({ 
-            status: 'pending', 
-            arrivalDate: { $lte: new Date() } 
-        }).toArray();
 
-        for (const delivery of pendingDeliveries) {
-            // 1. Dem Empfänger das Item geben (Sicherstellen, dass es im Inventar landet)
-            await inventoriesCollection.updateOne(
-                { userId: delivery.targetId, productId: delivery.productId },
-                { 
-                    $inc: { quantityOwned: delivery.quantity },
-                    $setOnInsert: { 
-                        name: delivery.productName, 
-                        icon: delivery.productIcon || '📦',
-                        type: delivery.productType || 'item'
-                    }
-                },
-                { upsert: true }
-            );
+if (cluster.isPrimary) {
+    setInterval(async () => {
+        try {
+            // Suche alle Pakete, deren Lieferzeitpunkt in der Vergangenheit liegt und die noch 'pending' sind
+            const pendingDeliveries = await deliveriesCollection.find({ 
+                status: 'pending', 
+                arrivalDate: { $lte: new Date() } 
+            }).toArray();
 
-            // 2. Paket als 'delivered' markieren
-            await deliveriesCollection.updateOne(
-                { _id: delivery._id },
-                { $set: { status: 'delivered', deliveredAt: new Date() } }
-            );
+            for (const delivery of pendingDeliveries) {
+                // 1. Dem Empfänger das Item geben
+                await inventoriesCollection.updateOne(
+                    { userId: delivery.targetId, productId: delivery.productId },
+                    { 
+                        $inc: { quantityOwned: delivery.quantity },
+                        $setOnInsert: { 
+                            name: delivery.productName, 
+                            icon: delivery.productIcon || '📦',
+                            type: delivery.productType || 'item'
+                        }
+                    },
+                    { upsert: true }
+                );
 
-            // 3. Lieferschein per Limo-Mail an den Empfänger schicken!
-            await mailsCollection.insertOne({
-                userId: delivery.targetId,
-                sender: `🚚 ${delivery.providerName}`,
-                subject: `Paket von ${delivery.senderName} ist angekommen!`,
-                content: `Ding Dong! Dein Paket wurde erfolgreich zugestellt.\n\nInhalt: ${delivery.quantity}x ${delivery.productIcon || ''} ${delivery.productName}\nAbsender: ${delivery.senderName}\n\nViel Spaß damit!`,
-                isRead: false,
-                isClaimed: false,
-                createdAt: new Date()
-            });
-            
-            console.log(`[Limo Logistics] 📦 Paket von ${delivery.senderName} an ${delivery.targetName} zugestellt!`);
+                // 2. Paket als 'delivered' markieren
+                await deliveriesCollection.updateOne(
+                    { _id: delivery._id },
+                    { $set: { status: 'delivered', deliveredAt: new Date() } }
+                );
+
+                // 3. Lieferschein per Limo-Mail an den Empfänger schicken
+                await mailsCollection.insertOne({
+                    userId: delivery.targetId,
+                    sender: `🚚 ${delivery.providerName}`,
+                    subject: `Paket von ${delivery.senderName} ist angekommen!`,
+                    content: `Ding Dong! Dein Paket wurde erfolgreich zugestellt.\n\nInhalt: ${delivery.quantity}x ${delivery.productIcon || ''} ${delivery.productName}\nAbsender: ${delivery.senderName}\n\nViel Spaß damit!`,
+                    isRead: false,
+                    isClaimed: false,
+                    createdAt: new Date()
+                });
+                
+                console.log(`${LOG_PREFIX_SERVER} [Limo Logistics] 📦 Paket von ${delivery.senderName} an ${delivery.targetName} zugestellt!`);
+            }
+        } catch (e) {
+            console.error(`${LOG_PREFIX_SERVER} [Limo Logistics] Fehler beim Ausliefern:`, e);
         }
-    } catch (e) {
-        console.error("[Limo Logistics] Fehler beim Ausliefern:", e);
-    }
-}, 30 * 1000); // Checkt alle 30 Sekunden
+    }, 30 * 1000); // Checkt alle 30 Sekunden
+}
 
 // =========================================================
 // === 🚚 LIMO LOGISTICS API (LIEFERSERVICE) ===
