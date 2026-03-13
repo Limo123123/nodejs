@@ -13288,6 +13288,57 @@ app.post('/api/delivery/send', isAuthenticated, async (req, res) => {
     }
 });
 
+// =========================================================
+// === 🧹 NOTFALL: DOPPELTE PRODUKTE LÖSCHEN ===
+// =========================================================
+app.post('/api/admin/system/remove-duplicates', isAuthenticated, isAdmin, async (req, res) => {
+    console.log(`${LOG_PREFIX_SERVER} 🧹 Admin ${req.session.username} räumt doppelte Produkte auf...`);
+    
+    try {
+        // Alle Produkte holen (Token-Karten ignorieren wir sicherheitshalber)
+        // Die 1 bei sort bedeutet: "Aufsteigend". Das älteste Produkt kommt zuerst!
+        const allProducts = await productsCollection.find({ isTokenCard: { $ne: true } }).sort({ _id: 1 }).toArray();
+        
+        const seenNames = new Set();
+        const idsToDelete = [];
+
+        for (const prod of allProducts) {
+            if (!prod.name) continue;
+            
+            // Name normalisieren (Kleinschreibung, keine Leerzeichen am Rand), um sicher zu gehen
+            const normalizedName = prod.name.trim().toLowerCase();
+
+            if (seenNames.has(normalizedName)) {
+                // Wir haben diesen Namen schon gesehen! Das hier ist ein Klon. Auf die Abschussliste.
+                idsToDelete.push(prod._id);
+            } else {
+                // Erster seiner Art. Wir merken uns den Namen.
+                seenNames.add(normalizedName);
+            }
+        }
+
+        if (idsToDelete.length > 0) {
+            // Alle Klone mit einem einzigen Befehl aus der Datenbank werfen
+            await productsCollection.deleteMany({ _id: { $in: idsToDelete } });
+            
+            // Cache sofort aktualisieren, damit der Shop im Frontend stimmt!
+            if (typeof refreshProductCache === 'function') {
+                await refreshProductCache(true);
+            }
+        }
+
+        console.log(`${LOG_PREFIX_SERVER} 🧹 ${idsToDelete.length} Duplikate entfernt.`);
+        res.json({ 
+            success: true, 
+            message: `Putzaktion erfolgreich! ${idsToDelete.length} doppelte Produkte wurden aus dem Verkehr gezogen.` 
+        });
+
+    } catch (e) {
+        console.error("Fehler beim Löschen der Duplikate:", e);
+        res.status(500).json({ error: "Fehler bei der Putzaktion: " + e.message });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
