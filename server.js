@@ -4172,7 +4172,7 @@ const checkTradeCooldown = async (user) => {
 // ==========================================
 // 1. AKTIEN KAUFEN (FIX: portfoliosCollection)
 // ==========================================
-app.post('/pi/stonks/buy', isAuthenticated, async (req, res) => {
+app.post('/api/stonks/buy', isAuthenticated, async (req, res) => {
     const { productId, quantity } = req.body;
     const userIdStr = req.session.userId;
     const qty = parseInt(quantity);
