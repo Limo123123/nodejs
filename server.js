@@ -5247,7 +5247,7 @@ async function generateAiNews(force = false) {
 
     const promptData = contextData || "Es ist verdächtig ruhig. Die User planen wohl gerade den nächsten großen Coup.";
 
-    const modelName = "gemini-2.0-flash"; // Nutze das aktuellste Modell
+    const modelName = "gemini-3.1-flash-lite"; // Nutze das aktuellste Modell
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
 
     const prompt = `
@@ -6398,10 +6398,11 @@ const TAX_INTERVAL_MS = 24 * 60 * 60 * 1000; // Alle 24 Stunden
 async function collectTaxes() {
     console.log(`${LOG_PREFIX_SERVER} 📉 Der Steuer-Eintreiber macht seine Runde...`);
     try {
-		// Wenn kein Bürgermeister was eingestellt hat, ist der Standard 0.5% (0.005)
+        // 1. Bürgermeister-Konfiguration laden (Standard: 0.5% / 0.005)
         const taxConfig = await systemSettingsCollection.findOne({ id: 'tax_config' });
         const currentTaxRate = taxConfig ? taxConfig.rate : 0.005;
-        // Finde alle User, die mehr als das Limit haben UND keine Admins/Infinity-User sind
+
+        // 2. Steuerpflichtige User finden (Reich, kein Admin, kein Infinity)
         const richUsers = await usersCollection.find({
             balance: { $gt: TAX_THRESHOLD },
             isAdmin: { $ne: true },
@@ -6413,12 +6414,15 @@ async function collectTaxes() {
             return;
         }
 
+        // --- FIX: Variablen initialisieren ---
         let totalTaxCollected = 0;
+        let shieldedUsers = 0;
+        let taxedUsersCount = 0;
         const bulkOps = [];
-        const inventoryOps = []; // Für verbrauchte Schilde
+        const inventoryOps = [];
 
         for (const user of richUsers) {
-            // A. Hat der User ein Schild?
+            // A. Check auf Steuerschutz-Zertifikat
             const shield = await inventoriesCollection.findOne({
                 userId: user._id,
                 productId: 'tax_shield',
@@ -6427,25 +6431,22 @@ async function collectTaxes() {
 
             if (shield) {
                 shieldedUsers++;
-                // Schild verbrauchen (-1 quantity)
                 inventoryOps.push({
                     updateOne: {
                         filter: { _id: shield._id },
                         update: { $inc: { quantityOwned: -1 } }
                     }
                 });
-                continue; // Nächster User (keine Steuer)
+                continue; // User ist geschützt
             }
 
-            // --- BÜRGERMEISTER-STEUER & EHEGATTENSPLITTING KOMBINIERT ---
+            // B. Steuersatz berechnen (Ehegattensplitting!)
             let userTaxRate = currentTaxRate;
-            
-            // Wenn der User verheiratet ist, zahlt er nur die Hälfte der aktuellen Bürgermeister-Steuer!
             if (user.spouses && user.spouses.length > 0) {
-                userTaxRate = currentTaxRate / 2; 
+                userTaxRate = currentTaxRate / 2; // Nur 50% Steuer für Verheiratete
             }
 
-            // B. Steuer berechnen (Mit dem finalen Steuersatz)
+            // C. Steuerbetrag berechnen
             const taxAmount = Math.floor(user.balance * userTaxRate * 100) / 100;
 
             if (taxAmount > 0) {
@@ -6466,36 +6467,29 @@ async function collectTaxes() {
             }
         }
 
-        // Führe Datenbank-Operationen aus
-        if (inventoryOps.length > 0) {
-            await inventoriesCollection.bulkWrite(inventoryOps);
-        }
+        // D. Datenbank-Updates ausführen
+        if (inventoryOps.length > 0) await inventoriesCollection.bulkWrite(inventoryOps);
+        if (bulkOps.length > 0) await usersCollection.bulkWrite(bulkOps);
 
-        if (bulkOps.length > 0) {
-            await usersCollection.bulkWrite(bulkOps);
-
-            // News generieren, wenn Steuern geflossen sind
-            if (totalTaxCollected > 1000000) {
-                await newsCollection.insertOne({
-                    headline: "Das Finanzamt war da!",
-                    content: `Heute wurden insgesamt $${totalTaxCollected.toLocaleString()} Steuern eingezogen. ${inventoryOps.length} Reiche konnten sich durch Zertifikate retten.`,
-                    author: "Limo Tax Bot",
-                    category: "Wirtschaft",
-                    createdAt: new Date(),
-                    likes: 0
-                });
-            }
-        }
-
+        // E. Geld in die Staatskasse & News posten
         if (totalTaxCollected > 0) {
-            // GELD GEHT AN DEN SERVER, NICHT INS NICHTS!
             await addToStateTreasury(totalTaxCollected);
+
+            await newsCollection.insertOne({
+                headline: "DAS FINANZAMT HAT ZUGEGRIFFEN! 💸",
+                content: `In einer großangelegten Prüfung wurden $${totalTaxCollected.toLocaleString()} Steuern eingezogen. ${taxedUsersCount} Bürger zahlten, während ${shieldedUsers} sich hinter Zertifikaten versteckten.`,
+                author: "Limo Tax Bot",
+                category: "Wirtschaft",
+                createdAt: new Date(),
+                likes: 0
+            });
+            updateDataVersion('news');
         }
 
-        console.log(`${LOG_PREFIX_SERVER} 📉 Steuer-Lauf beendet. Summe: $${totalTaxCollected.toFixed(2)}. Geschützte User: ${inventoryOps.length}`);
+        console.log(`${LOG_PREFIX_SERVER} 📉 Steuer-Lauf beendet. Summe: $${totalTaxCollected.toFixed(2)}`);
 
     } catch (err) {
-        console.error(`${LOG_PREFIX_SERVER} Fehler beim Steuereintreiben:`, err);
+        console.error(`${LOG_PREFIX_SERVER} ❌ Fehler beim Steuereintreiben:`, err);
     }
 }
 
