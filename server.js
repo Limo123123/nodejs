@@ -790,19 +790,16 @@ async function seedProperties() {
     console.log(`${LOG_PREFIX_SERVER} 🏠 Immobilienmarkt aktualisiert.`);
 }
 
-async function refreshProductCache() {
+async function refreshProductCache(triggerFrontendUpdate = true) {
     try {
         // Hole ALLE Produkte aus der DB (ohne History für Speed)
-        // Sortieren nach ID sorgt für konsistente Reihenfolge
         const prods = await productsCollection.find({}, {
             projection: { priceHistory: 0 }
         }).sort({ id: 1 }).toArray();
 
-        // Datenbereinigung & Preis-Logik (wie gehabt)
+        // Datenbereinigung & Preis-Logik
         const sanitized = prods.map(p => {
             const s = { ...p };
-
-            // Preis Logik
             let stablePriceVal = 0;
             if (p.basePrice !== undefined && p.basePrice !== null) {
                 stablePriceVal = parseFloat(p.basePrice);
@@ -811,38 +808,35 @@ async function refreshProductCache() {
             }
             s.price = `$${stablePriceVal.toFixed(2)}`;
 
-            // Börsen Preis
             let volatilePriceVal = stablePriceVal;
             if (p.currentPrice !== undefined && p.currentPrice !== null) {
                 volatilePriceVal = parseFloat(p.currentPrice);
             }
             s.currentPrice = volatilePriceVal;
 
-            // Rest
             s.stock = (typeof p.stock === 'number' && p.stock >= 0) ? p.stock : 0;
             s.default_stock = (typeof p.default_stock === 'number' && p.default_stock >= 0) ? p.default_stock : (p.isTokenCard ? 99999 : 20);
 
-            // _id entfernen spart Speicher und Bandbreite beim Senden
             delete s._id;
             return s;
         });
 
-        // 1. Update RAM Objekt (für interne Logik wie Käufe)
+        // 1. Update RAM
         globalProductCache = sanitized;
-
-        // 2. Update RAM String (HIER IST DER PERFORMANCE TRICK)
-        // Wir berechnen das JSON EINMAL hier, statt 1000x pro Sekunde bei jedem Request.
         globalProductCacheString = JSON.stringify({ products: sanitized });
 
-        // 3. Update Datei (Asynchron, Fehler ignorieren wir hier, damit Server nicht crasht)
-        fs.writeFile(PRODUCTS_CACHE_FILE, JSON.stringify(sanitized), (err) => {
-            if (err) console.error("Cache-Write Error:", err);
-        });
+        // 🛑 FIX 1: NUR DER MASTER DARF AUF DIE FESTPLATTE SCHREIBEN!
+        if (cluster.isPrimary) {
+            fs.writeFile(PRODUCTS_CACHE_FILE, JSON.stringify(sanitized), (err) => {
+                if (err) console.error("Cache-Write Error:", err);
+            });
+        }
 
-        // Trigger für Smart Polling (Frontend merkt: "Ah, neue Daten!")
-        updateDataVersion('products');
+        // 🛑 FIX 2: Polling-Spam verhindern (nur der Master ruft das Frontend herbei)
+        if (triggerFrontendUpdate && typeof updateDataVersion === 'function') {
+            updateDataVersion('products');
+        }
 
-        // console.log(`${LOG_PREFIX_SERVER} ♻️ Produkt-Cache aktualisiert (${sanitized.length} Items).`);
         return sanitized;
     } catch (err) {
         console.error(`${LOG_PREFIX_SERVER} ❌ Fehler beim Refreshing des Product Caches:`, err);
@@ -1359,7 +1353,7 @@ MongoClient.connect(mongoUri)
             });
 
             redisSub.subscribe('sync-product-cache', async () => {
-                await refreshProductCache();
+                await refreshProductCache(false); 
             });
 
             // NEU: Teachermon-Cache auf allen Kernen leeren
