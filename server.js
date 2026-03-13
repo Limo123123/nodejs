@@ -13137,95 +13137,84 @@ setInterval(async () => {
 // === 🚚 LIMO LOGISTICS API (LIEFERSERVICE) ===
 // =========================================================
 
-// 1. Lieferdienste & Preise abrufen (Jedes Mal zufällig!)
+// NEU: 1. Inventar für das Dropdown-Menü abrufen
+app.get('/api/delivery/inventory', isAuthenticated, async (req, res) => {
+    try {
+        const items = await inventoriesCollection.find({ 
+            userId: new ObjectId(req.session.userId), 
+            quantityOwned: { $gt: 0 } 
+        }).toArray();
+        res.json(items);
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden des Inventars." });
+    }
+});
+
+// 2. Lieferdienste generieren UND SICHERN
 app.get('/api/delivery/providers', isAuthenticated, (req, res) => {
-    // Generiert zufällige Minuten und Preise für echte Paketdienste
     const providers = [
-        { 
-            id: 'prime', 
-            name: 'Limo Prime Express 🚀', 
-            timeMins: Math.floor(Math.random() * 3) + 1, // 1-3 Minuten
-            cost: Math.floor(Math.random() * 5000) + 5000 // 5.000 - 10.000$
-        },
-        { 
-            id: 'ups', 
-            name: 'UPS (Ups, wo ist das Paket?) 🟫', 
-            timeMins: Math.floor(Math.random() * 8) + 3, // 3-10 Minuten
-            cost: Math.floor(Math.random() * 2000) + 2000 // 2.000 - 4.000$
-        },
-        { 
-            id: 'dhl', 
-            name: 'DHL (Drop & Hide Logistics) 🟨', 
-            timeMins: Math.floor(Math.random() * 15) + 5, // 5-20 Minuten
-            cost: Math.floor(Math.random() * 1000) + 500 // 500 - 1.500$
-        },
-        { 
-            id: 'dpd', 
-            name: 'DPD (Dein Paket Dauert) 🟥', 
-            timeMins: Math.floor(Math.random() * 26) + 10, // 10-35 Minuten
-            cost: Math.floor(Math.random() * 500) + 250 // 250 - 750$
-        },
-        { 
-            id: 'hermes', 
-            name: 'Hermes (Götterbote auf Valium) 🟦', 
-            timeMins: Math.floor(Math.random() * 60) + 30, // 30-90 Minuten
-            cost: Math.floor(Math.random() * 100) + 10 // 10 - 110$
-        },
-        { 
-            id: 'gls', 
-            name: 'GLS (Ganz Langsamer Service) 🐌', 
-            timeMins: Math.floor(Math.random() * 60) + 60, // 60-120 Minuten
-            cost: Math.floor(Math.random() * 45) + 5 // 5 - 50$
-        }
+        { id: 'prime', name: 'Limo Prime Express 🚀', timeMins: Math.floor(Math.random() * 3) + 1, cost: Math.floor(Math.random() * 5000) + 5000 },
+        { id: 'ups', name: 'UPS (Ups, wo ist das Paket?) 🟫', timeMins: Math.floor(Math.random() * 8) + 3, cost: Math.floor(Math.random() * 2000) + 2000 },
+        { id: 'dhl', name: 'DHL (Drop & Hide Logistics) 🟨', timeMins: Math.floor(Math.random() * 15) + 5, cost: Math.floor(Math.random() * 1000) + 500 },
+        { id: 'dpd', name: 'DPD (Dein Paket Dauert) 🟥', timeMins: Math.floor(Math.random() * 26) + 10, cost: Math.floor(Math.random() * 500) + 250 },
+        { id: 'hermes', name: 'Hermes (Götterbote auf Valium) 🟦', timeMins: Math.floor(Math.random() * 60) + 30, cost: Math.floor(Math.random() * 100) + 10 },
+        { id: 'gls', name: 'GLS (Ganz Langsamer Service) 🐌', timeMins: Math.floor(Math.random() * 60) + 60, cost: Math.floor(Math.random() * 45) + 5 }
     ];
     
-    // Sortiert die Liste automatisch nach Preis (Teuerster = Schnellster oben)
     providers.sort((a, b) => b.cost - a.cost);
     
+    // GANZ WICHTIG: Wir merken uns die gewürfelten Preise für DIESEN User in seiner Session!
+    req.session.deliveryQuotes = providers;
+
     res.json(providers);
 });
 
-// 2. Paket versenden
+// 3. Paket versenden (Nutzt die sicheren Session-Werte)
 app.post('/api/delivery/send', isAuthenticated, async (req, res) => {
-    const { targetUsername, productId, quantity, provider } = req.body;
+    // Wir fordern vom Frontend NICHT MEHR den Preis an, sondern nur noch die "providerId" (z.B. 'dhl')
+    const { targetUsername, productId, quantity, providerId } = req.body; 
     const senderId = new ObjectId(req.session.userId);
     const senderName = req.session.username;
     const qty = parseInt(quantity);
 
-    if (!targetUsername || !productId || !provider || qty <= 0) {
-        return res.status(400).json({ error: "Fehlende Angaben oder ungültige Menge." });
+    if (!targetUsername || !productId || !providerId || qty <= 0) {
+        return res.status(400).json({ error: "Fehlende Angaben." });
     }
 
     if (targetUsername.toLowerCase() === senderName.toLowerCase()) {
         return res.status(400).json({ error: "Du kannst dir selbst keine Pakete schicken." });
     }
 
+    // CHECK: Hat der User überhaupt vorher Preise abgefragt?
+    if (!req.session.deliveryQuotes) {
+        return res.status(400).json({ error: "Die Tarife sind abgelaufen. Bitte lade die Seite neu." });
+    }
+
+    // SICHERHEIT: Wir suchen den Preis aus UNSEREN Notizen, nicht aus dem Frontend!
+    const provider = req.session.deliveryQuotes.find(p => p.id === providerId);
+    if (!provider) {
+        return res.status(400).json({ error: "Diesen Lieferdienst gibt es nicht." });
+    }
+
     const session = client.startSession();
     try {
         await session.withTransaction(async () => {
-            // 1. Kostencheck
             const sender = await usersCollection.findOne({ _id: senderId }, { session });
-            if (sender.balance < provider.cost) throw new Error(`Du hast nicht genug Geld für ${provider.name}.`);
+            if (sender.balance < provider.cost) throw new Error(`Du hast nicht genug Geld für ${provider.name}. Es kostet $${provider.cost}.`);
 
-            // 2. Ziel-User suchen
             const target = await usersCollection.findOne({ username: { $regex: new RegExp(`^${targetUsername}$`, 'i') } }, { session });
             if (!target) throw new Error("Empfänger existiert nicht.");
 
-            // 3. Item im Inventar des Absenders prüfen
             const inventoryItem = await inventoriesCollection.findOne({ userId: senderId, productId: productId }, { session });
             if (!inventoryItem || inventoryItem.quantityOwned < qty) {
-                throw new Error("Du besitzt dieses Item nicht (oder nicht in der Menge).");
+                throw new Error("Du hast nicht genug von diesem Item im Inventar.");
             }
 
-            // 4. Geld und Item beim Absender abziehen
+            // Geld und Item abziehen
             await usersCollection.updateOne({ _id: senderId }, { $inc: { balance: -provider.cost } }, { session });
-            await inventoriesCollection.updateOne(
-                { _id: inventoryItem._id }, 
-                { $inc: { quantityOwned: -qty } }, 
-                { session }
-            );
+            await inventoriesCollection.updateOne({ _id: inventoryItem._id }, { $inc: { quantityOwned: -qty } }, { session });
 
-            // 5. Paket in die Logistik übergeben (Berechnung der Ankunftszeit)
+            // Lieferzeit berechnen
             const arrivalDate = new Date(Date.now() + provider.timeMins * 60 * 1000);
 
             await deliveriesCollection.insertOne({
@@ -13246,7 +13235,10 @@ app.post('/api/delivery/send', isAuthenticated, async (req, res) => {
             }, { session });
         });
 
-        res.json({ message: `Paket wurde an ${provider.name} übergeben! Es wird in ca. ${provider.timeMins} Minuten zugestellt.` });
+        // Die Quotes löschen, damit er für das nächste Paket neu anfragen muss
+        req.session.deliveryQuotes = null;
+
+        res.json({ message: `📦 Paket an ${provider.name} übergeben! Es kommt in ca. ${provider.timeMins} Minuten an.` });
 
     } catch (e) {
         res.status(400).json({ error: e.message });
