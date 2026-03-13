@@ -172,6 +172,7 @@ let limeaLayoutsCollection;
 let tindaFamiliesCollection;
 let mailsCollection;
 let proposalsCollection;
+let deliveriesCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -1106,6 +1107,7 @@ MongoClient.connect(mongoUri)
 		tindaFamiliesCollection = db.collection('tindaFamilies');
 		mailsCollection = db.collection('mails');
 		proposalsCollection = db.collection('proposals');
+		deliveriesCollection = db.collection('deliveries');
 
         authCodesCollection = db.collection(authCodesCollectionName);
 
@@ -13074,6 +13076,178 @@ app.post('/api/standesamt/divorce', isAuthenticated, async (req, res) => {
         });
 
         res.json({ success: true, message: `Scheidung vollzogen. Das kostet dich $${DIVORCE_COST}.` });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// =========================================================
+// === 📦 LIMO LOGISTICS (PAKETBOTE BACKGROUND WORKER) ===
+// =========================================================
+setInterval(async () => {
+    try {
+        // Suche alle Pakete, deren Lieferzeitpunkt in der Vergangenheit liegt und die noch 'pending' sind
+        const pendingDeliveries = await deliveriesCollection.find({ 
+            status: 'pending', 
+            arrivalDate: { $lte: new Date() } 
+        }).toArray();
+
+        for (const delivery of pendingDeliveries) {
+            // 1. Dem Empfänger das Item geben (Sicherstellen, dass es im Inventar landet)
+            await inventoriesCollection.updateOne(
+                { userId: delivery.targetId, productId: delivery.productId },
+                { 
+                    $inc: { quantityOwned: delivery.quantity },
+                    $setOnInsert: { 
+                        name: delivery.productName, 
+                        icon: delivery.productIcon || '📦',
+                        type: delivery.productType || 'item'
+                    }
+                },
+                { upsert: true }
+            );
+
+            // 2. Paket als 'delivered' markieren
+            await deliveriesCollection.updateOne(
+                { _id: delivery._id },
+                { $set: { status: 'delivered', deliveredAt: new Date() } }
+            );
+
+            // 3. Lieferschein per Limo-Mail an den Empfänger schicken!
+            await mailsCollection.insertOne({
+                userId: delivery.targetId,
+                sender: `🚚 ${delivery.providerName}`,
+                subject: `Paket von ${delivery.senderName} ist angekommen!`,
+                content: `Ding Dong! Dein Paket wurde erfolgreich zugestellt.\n\nInhalt: ${delivery.quantity}x ${delivery.productIcon || ''} ${delivery.productName}\nAbsender: ${delivery.senderName}\n\nViel Spaß damit!`,
+                isRead: false,
+                isClaimed: false,
+                createdAt: new Date()
+            });
+            
+            console.log(`[Limo Logistics] 📦 Paket von ${delivery.senderName} an ${delivery.targetName} zugestellt!`);
+        }
+    } catch (e) {
+        console.error("[Limo Logistics] Fehler beim Ausliefern:", e);
+    }
+}, 30 * 1000); // Checkt alle 30 Sekunden
+
+// =========================================================
+// === 🚚 LIMO LOGISTICS API (LIEFERSERVICE) ===
+// =========================================================
+
+// 1. Lieferdienste & Preise abrufen (Jedes Mal zufällig!)
+app.get('/api/delivery/providers', isAuthenticated, (req, res) => {
+    // Generiert zufällige Minuten und Preise für echte Paketdienste
+    const providers = [
+        { 
+            id: 'prime', 
+            name: 'Limo Prime Express 🚀', 
+            timeMins: Math.floor(Math.random() * 3) + 1, // 1-3 Minuten
+            cost: Math.floor(Math.random() * 5000) + 5000 // 5.000 - 10.000$
+        },
+        { 
+            id: 'ups', 
+            name: 'UPS (Ups, wo ist das Paket?) 🟫', 
+            timeMins: Math.floor(Math.random() * 8) + 3, // 3-10 Minuten
+            cost: Math.floor(Math.random() * 2000) + 2000 // 2.000 - 4.000$
+        },
+        { 
+            id: 'dhl', 
+            name: 'DHL (Drop & Hide Logistics) 🟨', 
+            timeMins: Math.floor(Math.random() * 15) + 5, // 5-20 Minuten
+            cost: Math.floor(Math.random() * 1000) + 500 // 500 - 1.500$
+        },
+        { 
+            id: 'dpd', 
+            name: 'DPD (Dein Paket Dauert) 🟥', 
+            timeMins: Math.floor(Math.random() * 26) + 10, // 10-35 Minuten
+            cost: Math.floor(Math.random() * 500) + 250 // 250 - 750$
+        },
+        { 
+            id: 'hermes', 
+            name: 'Hermes (Götterbote auf Valium) 🟦', 
+            timeMins: Math.floor(Math.random() * 60) + 30, // 30-90 Minuten
+            cost: Math.floor(Math.random() * 100) + 10 // 10 - 110$
+        },
+        { 
+            id: 'gls', 
+            name: 'GLS (Ganz Langsamer Service) 🐌', 
+            timeMins: Math.floor(Math.random() * 60) + 60, // 60-120 Minuten
+            cost: Math.floor(Math.random() * 45) + 5 // 5 - 50$
+        }
+    ];
+    
+    // Sortiert die Liste automatisch nach Preis (Teuerster = Schnellster oben)
+    providers.sort((a, b) => b.cost - a.cost);
+    
+    res.json(providers);
+});
+
+// 2. Paket versenden
+app.post('/api/delivery/send', isAuthenticated, async (req, res) => {
+    const { targetUsername, productId, quantity, provider } = req.body;
+    const senderId = new ObjectId(req.session.userId);
+    const senderName = req.session.username;
+    const qty = parseInt(quantity);
+
+    if (!targetUsername || !productId || !provider || qty <= 0) {
+        return res.status(400).json({ error: "Fehlende Angaben oder ungültige Menge." });
+    }
+
+    if (targetUsername.toLowerCase() === senderName.toLowerCase()) {
+        return res.status(400).json({ error: "Du kannst dir selbst keine Pakete schicken." });
+    }
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            // 1. Kostencheck
+            const sender = await usersCollection.findOne({ _id: senderId }, { session });
+            if (sender.balance < provider.cost) throw new Error(`Du hast nicht genug Geld für ${provider.name}.`);
+
+            // 2. Ziel-User suchen
+            const target = await usersCollection.findOne({ username: { $regex: new RegExp(`^${targetUsername}$`, 'i') } }, { session });
+            if (!target) throw new Error("Empfänger existiert nicht.");
+
+            // 3. Item im Inventar des Absenders prüfen
+            const inventoryItem = await inventoriesCollection.findOne({ userId: senderId, productId: productId }, { session });
+            if (!inventoryItem || inventoryItem.quantityOwned < qty) {
+                throw new Error("Du besitzt dieses Item nicht (oder nicht in der Menge).");
+            }
+
+            // 4. Geld und Item beim Absender abziehen
+            await usersCollection.updateOne({ _id: senderId }, { $inc: { balance: -provider.cost } }, { session });
+            await inventoriesCollection.updateOne(
+                { _id: inventoryItem._id }, 
+                { $inc: { quantityOwned: -qty } }, 
+                { session }
+            );
+
+            // 5. Paket in die Logistik übergeben (Berechnung der Ankunftszeit)
+            const arrivalDate = new Date(Date.now() + provider.timeMins * 60 * 1000);
+
+            await deliveriesCollection.insertOne({
+                senderId: senderId,
+                senderName: senderName,
+                targetId: target._id,
+                targetName: target.username,
+                productId: productId,
+                productName: inventoryItem.name,
+                productIcon: inventoryItem.icon,
+                productType: inventoryItem.type,
+                quantity: qty,
+                providerName: provider.name,
+                cost: provider.cost,
+                status: 'pending',
+                arrivalDate: arrivalDate,
+                createdAt: new Date()
+            }, { session });
+        });
+
+        res.json({ message: `Paket wurde an ${provider.name} übergeben! Es wird in ca. ${provider.timeMins} Minuten zugestellt.` });
+
     } catch (e) {
         res.status(400).json({ error: e.message });
     } finally {
