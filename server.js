@@ -5247,7 +5247,7 @@ async function generateAiNews(force = false) {
 
     const promptData = contextData || "Es ist verdächtig ruhig. Die User planen wohl gerade den nächsten großen Coup.";
 
-    const modelName = "gemini-3.1-flash-lite"; // Nutze das aktuellste Modell
+    const modelName = "gemini-3.1-flash-lite-preview"; // Nutze das aktuellste Modell
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
 
     const prompt = `
