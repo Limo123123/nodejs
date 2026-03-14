@@ -173,6 +173,7 @@ let tindaFamiliesCollection;
 let mailsCollection;
 let proposalsCollection;
 let deliveriesCollection;
+let reviewsCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -1102,6 +1103,7 @@ MongoClient.connect(mongoUri)
 		mailsCollection = db.collection('mails');
 		proposalsCollection = db.collection('proposals');
 		deliveriesCollection = db.collection('deliveries');
+		reviewsCollection = db.collection('reviews');
 
         authCodesCollection = db.collection(authCodesCollectionName);
 
@@ -13302,6 +13304,71 @@ app.post('/api/delivery/send', isAuthenticated, async (req, res) => {
         res.status(400).json({ error: e.message });
     } finally {
         await session.endSession();
+    }
+});
+
+// =========================================================
+// === ⭐ LIMO REVIEWS (BEWERTUNGSSYSTEM) ===
+// =========================================================
+
+// 1. Bewertungen für einen Service abrufen
+app.get('/api/reviews/:serviceId', async (req, res) => {
+    const { serviceId } = req.params;
+    try {
+        const reviews = await reviewsCollection.find({ serviceId }).sort({ createdAt: -1 }).limit(50).toArray();
+        
+        let average = 0;
+        if (reviews.length > 0) {
+            const sum = reviews.reduce((acc, r) => acc + r.stars, 0);
+            average = (sum / reviews.length).toFixed(1);
+        }
+
+        res.json({ average, count: reviews.length, reviews });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der Bewertungen." });
+    }
+});
+
+// 2. Bewertung abgeben (Upsert: Überschreibt alte Bewertung des Users)
+app.post('/api/reviews', isAuthenticated, async (req, res) => {
+    const { serviceId, stars, text } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const username = req.session.username;
+
+    if (!serviceId || !stars || stars < 1 || stars > 5) {
+        return res.status(400).json({ error: "Ungültige Bewertung. (1-5 Sterne erforderlich)" });
+    }
+    if (!text || text.trim().length < 5 || text.trim().length > 500) {
+        return res.status(400).json({ error: "Der Text muss zwischen 5 und 500 Zeichen lang sein." });
+    }
+
+    try {
+        await reviewsCollection.updateOne(
+            { serviceId, userId },
+            { 
+                $set: { 
+                    username, 
+                    stars: parseInt(stars), 
+                    text: text.trim(), 
+                    createdAt: new Date() 
+                } 
+            },
+            { upsert: true }
+        );
+
+        res.json({ message: "Deine Bewertung wurde gespeichert!" });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Speichern der Bewertung." });
+    }
+});
+
+// 3. Admin: Bewertung löschen
+app.delete('/api/admin/reviews/:id', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        await reviewsCollection.deleteOne({ _id: new ObjectId(req.params.id) });
+        res.json({ message: "Bewertung gelöscht." });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Löschen." });
     }
 });
 
