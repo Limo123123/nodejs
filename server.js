@@ -6652,8 +6652,8 @@ const JOB_LIST = [
     { id: 'dishwasher', title: 'Tellerwäscher', salary: 50, cooldownSeconds: 60, reqLevel: 0, cost: 0 },
     { id: 'delivery', title: 'Pizza-Bote', salary: 120, cooldownSeconds: 300, reqLevel: 2, cost: 500 }, // 5 Min
     { id: 'coder', title: 'Junior Dev', salary: 400, cooldownSeconds: 900, reqLevel: 5, cost: 2000 }, // 15 Min
-    { id: 'manager', title: 'Filialleiter', salary: 1500, cooldownSeconds: 3600, reqLevel: 10, cost: 10000 }, // 1 Std
-    { id: 'ceo', title: 'CEO', salary: 5000, cooldownSeconds: 14400, reqLevel: 20, cost: 100000 } // 4 Std
+    { id: 'ceo', title: 'CEO', salary: 5000, cooldownSeconds: 14400, reqLevel: 20, cost: 100000 }, // 4 Std
+    { id: 'idol', title: 'K-Pop Idol', salary: 12000, cooldownSeconds: 28800, reqLevel: 25, cost: 500000 } // 8 Std Cooldown, extrem hohes Gehalt
 ];
 
 // GET: Verfügbare Jobs & Mein Status
@@ -11638,16 +11638,21 @@ async function triggerTherapyAi(userId, chatId, userMessage) {
             .toArray();
         const lastMessages = recentMessages.slice(-8);
 
-        // Der verbesserte Prompt für Dr. Limo
-        // Der emphatischere Prompt für Dr. Limo
+        // Dynamischer Kontext für die KI
+        const hasCasinoProblem = user.casinoStats && user.casinoStats.totalWagered > 10000;
+        const problemContext = hasCasinoProblem
+            ? `Der Patient hat massive Spielschulden ($${user.casinoStats.totalWagered} verspielt). Konfrontiere ihn zynisch damit.`
+            : `Der Patient ist ein normaler Bürger. Erwähne das Casino NICHT, es sei denn, der Patient fängt damit an! Frag ihn stattdessen zynisch nach bizarren Einkäufen, übertriebener Blackpink-Fanliebe oder illegalen Tierkäufen.`;
+
         const systemPrompt = `Du bist Dr. Limo, der offizielle, virtuelle Therapeut von "Limazon". 
-Dein Patient heißt ${user.username}. Aktueller Kontostand: $${user.balance.toFixed(2)}. Im Casino verspielt: $${user.casinoStats ? user.casinoStats.totalWagered : 0}.
+Dein Patient heißt ${user.username}. Aktueller Kontostand: $${user.balance.toFixed(2)}.
 
 REGELN:
-1. GRUND-PERSONA: Du behandelst den Patienten wegen Spielsucht. Du bist professionell, sarkastisch und kaufst ihm seine Ausreden nicht ab.
-2. NOTFALL-MODUS (EXTREM WICHTIG): Wenn der Patient von Schicksalsschlägen, Tod (wie z.B. toten Haustieren) oder tiefer Trauer berichtet, ENDET DEIN SARKASMUS SOFORT. Werde extrem lieb, tröstend und einfühlsam. Erwähne in dieser Nachricht das Casino oder Geld mit KEINEM WORT! Sei einfach ein guter Zuhörer.
-3. FORMAT: Antworte sehr kurz (Max. 2-3 Sätze).
-4. Du bist kein Standard-KI-Assistent, bleib in deiner Rolle als Psychologe.`;
+1. GRUND-PERSONA: Du bist professionell, sarkastisch und kaufst ihm seine Ausreden nicht ab.
+2. FOKUS: ${problemContext}
+3. NOTFALL-MODUS (EXTREM WICHTIG): Wenn der Patient von Schicksalsschlägen oder Tod berichtet, ENDET DEIN SARKASMUS SOFORT. Werde extrem lieb, tröstend und einfühlsam. 
+4. FORMAT: Antworte sehr kurz (Max. 2-3 Sätze).
+5. Du bist kein Standard-KI-Assistent, bleib in deiner Rolle als Psychologe.`;
 
         const apiMessages = [{ role: "system", content: systemPrompt }];
 
@@ -11731,11 +11736,20 @@ app.get('/api/therapy/chat', isAuthenticated, async (req, res) => {
             chat = { _id: insertRes.insertedId, ...newChat };
 
             // Begrüßungsnachricht
+            // Checken, ob er WIRKLICH ein Casino-Problem hat
+            const user = await usersCollection.findOne({ _id: userId });
+            const hasCasinoProblem = user.casinoStats && user.casinoStats.totalWagered > 10000;
+            
+            const greetingText = hasCasinoProblem
+                ? `Hallo ${req.session.username}. Ich bin Dr. Limo. Ich sehe an den Akten, du hast bereits $${user.casinoStats.totalWagered.toLocaleString()} im Casino verpulvert. Leg dich auf die Couch. Wir müssen reden.`
+                : `Hallo ${req.session.username}. Ich bin Dr. Limo. Leg dich auf die virtuelle Couch. Was bedrückt dich? Zu viel K-Pop gehört, Probleme mit dem neuen Alpaka oder einfach nur der normale Limazon-Wahnsinn?`;
+
+            // Begrüßungsnachricht
             await limMessagesCollection.insertOne({
                 chatId: chat._id,
                 senderId: new ObjectId("000000000000000000000000"),
                 senderUsername: "Dr. Limo",
-                content: `Hallo ${req.session.username}. Ich bin Dr. Limo. Ich sehe, du hast den Weg in meine Praxis gefunden. Leg dich auf die virtuelle Couch. Was bedrückt dich? Ist es wieder das Casino?`,
+                content: greetingText,
                 timestamp: new Date(),
                 isAi: true
             });
@@ -12141,7 +12155,6 @@ app.delete('/api/limea/admin/layouts/:id', isAuthenticated, isAdmin, async (req,
 // =========================================================
 
 // Katalog: starvationTimeHours = Nach wie vielen Stunden OHNE Futter das Tier stirbt.
-// Katalog: starvationTimeHours = Nach wie vielen Stunden OHNE Futter das Tier stirbt.
 const PET_CATALOG = [
     { id: 'dog', name: 'Hund', icon: '🐶', enclosure: 'Hundehütte 🛖', price: 500, starvationTimeHours: 24 },
     { id: 'cat', name: 'Katze', icon: '🐱', enclosure: 'Kratzbaum 🗼', price: 500, starvationTimeHours: 24 },
@@ -12172,6 +12185,10 @@ const PET_CATALOG = [
     { id: 'turtle', name: 'Schildkröte', icon: '🐢', enclosure: 'Teich 🦆', price: 600, starvationTimeHours: 120 },
     { id: 'lynx', name: 'Luchs', icon: '🐈', enclosure: 'Waldgehege 🌲', price: 2500, starvationTimeHours: 24 },
     { id: 'pufferfish', name: 'Kugelfisch', icon: '🐡', enclosure: 'Aquarium 💧', price: 500, starvationTimeHours: 24 }
+	{ id: 'unicorn', name: 'Einhorn', icon: '🦄', enclosure: 'Regenbogen-Wald 🌈', price: 50000, starvationTimeHours: 72 },
+    { id: 'phoenix', name: 'Phönix', icon: '🐦🔥', enclosure: 'Asche-Nest 🌋', price: 75000, starvationTimeHours: 120 },
+    { id: 'basilisk', name: 'Basilisk', icon: '🐍👁️', enclosure: 'Dunkle Kammer 🕳️', price: 60000, starvationTimeHours: 96 },
+    { id: 'alpaca', name: 'Alpaka', icon: '🦙', enclosure: 'Anden-Wiese 🏔️', price: 3000, starvationTimeHours: 48 },
 ];
 
 const FEED_COST = 15; // $15 pro Fütterung
