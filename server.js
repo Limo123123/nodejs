@@ -13372,6 +13372,106 @@ app.delete('/api/admin/reviews/:id', isAuthenticated, isAdmin, async (req, res) 
     }
 });
 
+// =========================================================
+// === 🌳 LIMO TIERPARK (MULTIPLAYER ZOO) ===
+// =========================================================
+
+// 1. Alle Tiere abrufen, die gerade im Park sind
+app.get('/api/park/pets', isAuthenticated, async (req, res) => {
+    try {
+        // Wir suchen alle User, die ein aktives Pet haben und bei denen inPark = true ist
+        const usersInPark = await usersCollection.find({ "activePet.inPark": true }).toArray();
+        
+        const parkPets = usersInPark.map(u => ({
+            userId: u._id,
+            username: u.username,
+            petName: u.activePet.name || 'Unbekanntes Tier',
+            petIcon: u.activePet.icon || '🐾',
+            petType: u.activePet.id
+        }));
+
+        res.json(parkPets);
+    } catch (e) {
+        res.status(500).json({ error: "Konnte den Park nicht laden." });
+    }
+});
+
+// 2. Das eigene Tier in den Park schicken / nach Hause holen
+app.post('/api/park/toggle', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        if (!user || !user.activePet) {
+            return res.status(400).json({ error: "Du hast gerade kein aktives Haustier ausgerüstet!" });
+        }
+
+        const isCurrentlyInPark = user.activePet.inPark === true;
+        const newState = !isCurrentlyInPark;
+
+        // Status aktualisieren
+        await usersCollection.updateOne(
+            { _id: userId },
+            { $set: { "activePet.inPark": newState } }
+        );
+
+        res.json({ 
+            message: newState 
+                ? `${user.activePet.name || 'Dein Tier'} tollt jetzt glücklich im Park herum!` 
+                : `${user.activePet.name || 'Dein Tier'} ist wieder sicher auf deinem Profil.`,
+            inPark: newState
+        });
+    } catch (e) {
+        res.status(500).json({ error: "Das Park-Tor klemmt." });
+    }
+});
+
+// 3. Tiere beobachten (Zufalls-Event & Fütterungs-Bonus!)
+app.post('/api/park/interact', isAuthenticated, async (req, res) => {
+    try {
+        const usersInPark = await usersCollection.find({ "activePet.inPark": true }).toArray();
+        
+        if (usersInPark.length === 0) {
+            return res.json({ message: "Der Park ist komplett leer. Nur der Wind pfeift...", icon: "🍃" });
+        }
+
+        // 1 oder 2 zufällige Tiere für das Drama auswählen
+        const randomUser1 = usersInPark[Math.floor(Math.random() * usersInPark.length)];
+        let randomUser2 = usersInPark[Math.floor(Math.random() * usersInPark.length)];
+        
+        const pet1 = `${randomUser1.username}'s ${randomUser1.activePet.icon} ${randomUser1.activePet.name}`;
+        const pet2 = `${randomUser2.username}'s ${randomUser2.activePet.icon} ${randomUser2.activePet.name}`;
+
+        const events = [
+            { msg: `${pet1} hat einem kleinen Kind das Eis geklaut und rennt triumphierend weg!`, icon: "🍦" },
+            { msg: `${pet1} versucht, einen Baum zu fressen. Es klappt nicht so ganz.`, icon: "🌳" },
+            { msg: `${pet1} und ${pet2} starren sich seit 5 Minuten regungslos an. Wer blinzelt zuerst?`, icon: "👁️" },
+            { msg: `${pet1} hat ein tiefes Loch gegraben und ${pet2} ist fast reingefallen!`, icon: "🕳️" },
+            { msg: `${pet1} jagt seinen eigenen Schwanz und wird langsam schwindelig.`, icon: "💫" },
+            { msg: `${pet1} teilt sein Futter mit ${pet2}. Wahre Freundschaft!`, icon: "💖" }
+        ];
+
+        let randomEvent = events[Math.floor(Math.random() * events.length)];
+
+        // Spezielles K-Pop Stan Easter-Egg
+        if (randomUser1.username.toLowerCase() === "k-pop stan" || randomUser2.username.toLowerCase() === "k-pop stan") {
+            randomEvent = { 
+                msg: `Jemand hat heimlich die Park-Lautsprecher gehackt! ${pet1} und ${pet2} tanzen synchron zu Blackpink!`, 
+                icon: "🕺🎵" 
+            };
+        }
+
+        // Gameplay-Bonus: Durch das Spielen im Park wird der Hunger-Timer ALLER Tiere im Park zurückgesetzt!
+        await usersCollection.updateMany(
+            { "activePet.inPark": true },
+            { $set: { "activePet.lastFed": new Date() } } 
+        );
+
+        res.json({ message: randomEvent.msg, icon: randomEvent.icon });
+    } catch (e) {
+        res.status(500).json({ error: "Die Tiere streiken gerade." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
