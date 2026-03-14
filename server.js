@@ -12184,7 +12184,7 @@ const PET_CATALOG = [
     { id: 'ladybug', name: 'Marienkäfer', icon: '🐞', enclosure: 'Graslandschaft 🌿', price: 10, starvationTimeHours: 48 },
     { id: 'turtle', name: 'Schildkröte', icon: '🐢', enclosure: 'Teich 🦆', price: 600, starvationTimeHours: 120 },
     { id: 'lynx', name: 'Luchs', icon: '🐈', enclosure: 'Waldgehege 🌲', price: 2500, starvationTimeHours: 24 },
-    { id: 'pufferfish', name: 'Kugelfisch', icon: '🐡', enclosure: 'Aquarium 💧', price: 500, starvationTimeHours: 24 }
+    { id: 'pufferfish', name: 'Kugelfisch', icon: '🐡', enclosure: 'Aquarium 💧', price: 500, starvationTimeHours: 24 },
 	{ id: 'unicorn', name: 'Einhorn', icon: '🦄', enclosure: 'Regenbogen-Wald 🌈', price: 50000, starvationTimeHours: 72 },
     { id: 'phoenix', name: 'Phönix', icon: '🐦🔥', enclosure: 'Asche-Nest 🌋', price: 75000, starvationTimeHours: 120 },
     { id: 'basilisk', name: 'Basilisk', icon: '🐍👁️', enclosure: 'Dunkle Kammer 🕳️', price: 60000, starvationTimeHours: 96 },
