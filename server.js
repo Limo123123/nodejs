@@ -704,6 +704,27 @@ function generateFastTokenCode() {
     return `LMTKN-${p1}-${p2}`;
 }
 
+// --- ZENTRALE LOG-FUNKTION ---
+async function logActivity(req, action, details = {}) {
+    try {
+        const userId = req?.session?.userId ? new ObjectId(req.session.userId) : null;
+        const username = req?.session?.username || "System";
+        const ip = req?.headers['x-forwarded-for']?.split(',')[0] || req?.socket?.remoteAddress || "Internal";
+
+        await db.collection('activityLogs').insertOne({
+            timestamp: new Date(),
+            userId,
+            username,
+            action,
+            details,
+            ip,
+            path: req?.originalUrl || "N/A"
+        });
+    } catch (err) {
+        console.error("Logging fehlgeschlagen:", err);
+    }
+}
+
 // =========================================================
 // === GLOBAL API RATE LIMITER (RAM BASED) ===
 // =========================================================
@@ -1160,6 +1181,13 @@ MongoClient.connect(mongoUri)
 			await seedTeachermonUniverses();
 			await seedProperties();
 			await mailsCollection.createIndex({ userId: 1, createdAt: -1 });
+			await db.collection('activityLogs').createIndex({ "timestamp": 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60 });
+			// Aktivitäts-Logs nach 30 Tagen automatisch löschen (TTL)
+			await db.collection('activityLogs').createIndex(
+    			{ "timestamp": 1 }, 
+    			{ expireAfterSeconds: 30 * 24 * 60 * 60 } 
+			);
+			console.log(`${LOG_PREFIX_SERVER} ⏱️ TTL-Index für Activity-Logs aktiv (30 Tage).`);
 
             if (tokenTransactionsCollection) {
                 await tokenTransactionsCollection.createIndex({ userId: 1 });
@@ -1642,6 +1670,7 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
             if (req.loginRateLimitKey && global.redisPub) {
                 global.redisPub.del(req.loginRateLimitKey).catch(e => console.error("Redis Del Error", e));
             }
+			await logActivity(req, "USER_LOGIN", { status: "success" });
 
             // =========================================================
             // 🛑 NEU: BAN-CHECK & IP-UPDATE
@@ -1935,7 +1964,7 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
 
     // --- Performance & Security Limits ---
-    const MAX_ITEMS_PER_TYPE = 1000;
+    const MAX_ITEMS_PER_TYPE = 500;
     const MAX_CART_SIZE = 500;
 
     if (!Array.isArray(cart) || cart.length === 0) return res.status(400).json({ error: 'Warenkorb leer/ungültig.' });
@@ -2168,6 +2197,8 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
                 productSellCooldowns: finalUser.productSellCooldowns || {}
             }
         });
+		
+		await logActivity(req, "SHOP_PURCHASE", { total: totalOrderValue, items: cart.length });
 
     } catch (err) {
         console.error(`${LOG_PREFIX_SERVER} ❌ Kauf fehlgeschlagen (${req.session.username}):`, err.message);
@@ -3120,6 +3151,7 @@ app.post('/api/chat/chats/:chatId/messages', isAuthenticated, isChatParticipant,
         // ======================================
 
         res.status(201).json({ message: "Nachricht gesendet.", sentMessage: newMessage });
+		await logActivity(req, "CHAT_MESSAGE", { chatId: req.params.chatId, preview: content.substring(0, 50) });
 
     } catch (err) {
         console.error(`${LOG_PREFIX_CHAT} Fehler bei POST /api/chat/chats/:chatId/messages:`, err);
@@ -4257,6 +4289,7 @@ app.post('/api/stonks/buy', isAuthenticated, async (req, res) => {
             message: `Kauf erfolgreich! -${totalCost.toFixed(2)}€`,
             newBalance: updatedUser.balance
         });
+		await logActivity(req, "STOCK_BUY", { productId, quantity, totalCost });
 
     } catch (e) {
         console.error(`${LOG_PREFIX_SERVER} Fehler beim Kaufen:`, e);
@@ -10276,6 +10309,7 @@ app.post('/api/finance/trade', isAuthenticated, async (req, res) => {
         }
 
         res.json({ success: true, message: "Transaktion erfolgreich!" });
+		await logActivity(req, "CRYPTO_TRADE", { coinId, amount, type, price: CRYPTO_MARKET[coinId].price });
 
     } catch (e) { res.status(500).json({ error: "Handel fehlgeschlagen." }); }
 });
@@ -12232,6 +12266,7 @@ app.post('/api/pets/adopt', isAuthenticated, async (req, res) => {
             }, { session });
         });
         res.json({ message: `Herzlichen Glückwunsch! ${customName.trim()} gehört jetzt dir.` });
+		await logActivity(req, "PET_ADOPTION", { petId, petName: customName });
     } catch (e) {
         res.status(400).json({ error: e.message });
     } finally {
@@ -13517,6 +13552,33 @@ app.post('/api/pets/equip', isAuthenticated, async (req, res) => {
     } catch (e) {
         console.error(`${LOG_PREFIX_SERVER} Ausrüst-Fehler:`, e);
         res.status(500).json({ error: "Fehler beim Ausrüsten des Tieres." });
+    }
+});
+
+// GET: Alle Logs für Admins (mit Paginierung, damit der Server nicht crasht)
+app.get('/api/admin/activity-logs', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = 100; // Letzte 100 Einträge
+        const skip = (page - 1) * limit;
+
+        const logs = await db.collection('activityLogs')
+            .find({})
+            .sort({ timestamp: -1 })
+            .skip(skip)
+            .limit(limit)
+            .toArray();
+
+        const total = await db.collection('activityLogs').countDocuments();
+
+        res.json({ 
+            logs, 
+            total, 
+            pages: Math.ceil(total / limit),
+            currentPage: page 
+        });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der Logs." });
     }
 });
 
