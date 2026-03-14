@@ -13434,9 +13434,16 @@ app.post('/api/park/interact', isAuthenticated, async (req, res) => {
             return res.json({ message: "Der Park ist komplett leer. Nur der Wind pfeift...", icon: "🍃" });
         }
 
-        // 1 oder 2 zufällige Tiere für das Drama auswählen
+        // Zufälliges Tier 1
         const randomUser1 = usersInPark[Math.floor(Math.random() * usersInPark.length)];
+        
+        // Zufälliges Tier 2 (darf nicht Tier 1 sein, wenn mehr als einer da ist)
         let randomUser2 = usersInPark[Math.floor(Math.random() * usersInPark.length)];
+        if (usersInPark.length > 1) {
+            while (randomUser2._id.toString() === randomUser1._id.toString()) {
+                randomUser2 = usersInPark[Math.floor(Math.random() * usersInPark.length)];
+            }
+        }
         
         const pet1 = `${randomUser1.username}'s ${randomUser1.activePet.icon} ${randomUser1.activePet.name}`;
         const pet2 = `${randomUser2.username}'s ${randomUser2.activePet.icon} ${randomUser2.activePet.name}`;
@@ -13444,23 +13451,30 @@ app.post('/api/park/interact', isAuthenticated, async (req, res) => {
         const events = [
             { msg: `${pet1} hat einem kleinen Kind das Eis geklaut und rennt triumphierend weg!`, icon: "🍦" },
             { msg: `${pet1} versucht, einen Baum zu fressen. Es klappt nicht so ganz.`, icon: "🌳" },
-            { msg: `${pet1} und ${pet2} starren sich seit 5 Minuten regungslos an. Wer blinzelt zuerst?`, icon: "👁️" },
-            { msg: `${pet1} hat ein tiefes Loch gegraben und ${pet2} ist fast reingefallen!`, icon: "🕳️" },
-            { msg: `${pet1} jagt seinen eigenen Schwanz und wird langsam schwindelig.`, icon: "💫" },
-            { msg: `${pet1} teilt sein Futter mit ${pet2}. Wahre Freundschaft!`, icon: "💖" }
+            { msg: `${pet1} jagt seinen eigenen Schwanz und wird langsam schwindelig.`, icon: "💫" }
         ];
+
+        // Interaktions-Events (nur wenn mindestens 2 verschiedene Tiere da sind)
+        if (randomUser1._id.toString() !== randomUser2._id.toString()) {
+            events.push(
+                { msg: `${pet1} und ${pet2} starren sich seit 5 Minuten regungslos an. Wer blinzelt zuerst?`, icon: "👁️" },
+                { msg: `${pet1} hat ein tiefes Loch gegraben und ${pet2} ist fast reingefallen!`, icon: "🕳️" },
+                { msg: `${pet1} teilt sein Futter mit ${pet2}. Wahre Freundschaft!`, icon: "💖" }
+            );
+        }
 
         let randomEvent = events[Math.floor(Math.random() * events.length)];
 
-        // Spezielles K-Pop Stan Easter-Egg
-        if (randomUser1.username.toLowerCase() === "k-pop stan" || randomUser2.username.toLowerCase() === "k-pop stan") {
+        // K-Pop Easter Egg (Chance auf 20% reduziert, statt 100% wenn k-pop stan da ist)
+        const isKpopPresent = randomUser1.username.toLowerCase() === "k-pop stan" || randomUser2.username.toLowerCase() === "k-pop stan";
+        if (isKpopPresent && Math.random() < 0.2) {
             randomEvent = { 
                 msg: `Jemand hat heimlich die Park-Lautsprecher gehackt! ${pet1} und ${pet2} tanzen synchron zu Blackpink!`, 
                 icon: "🕺🎵" 
             };
         }
 
-        // Gameplay-Bonus: Durch das Spielen im Park wird der Hunger-Timer ALLER Tiere im Park zurückgesetzt!
+        // Hunger-Reset für alle Park-Teilnehmer
         await usersCollection.updateMany(
             { "activePet.inPark": true },
             { $set: { "activePet.lastFed": new Date() } } 
