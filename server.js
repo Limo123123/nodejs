@@ -174,6 +174,7 @@ let mailsCollection;
 let proposalsCollection;
 let deliveriesCollection;
 let reviewsCollection;
+let requestsCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -894,7 +895,8 @@ const AVAILABLE_PERMISSIONS = {
     'manage_economy': { name: 'Wirtschaftskontrolle', desc: 'Steuer-Razzia erzwingen, Vermögen kappen und Infinity-Money entziehen.' },
     'manage_chats': { name: 'Chat Inspektor', desc: 'Tinda-Chats und private Nachrichten lesen sowie als Admin Systemnachrichten senden.' },
     'system_maintenance': { name: 'System & Wartung', desc: 'Health-Check, Stats, Reports abrufen und System-Reparaturen durchführen.' },
-    'super_admin': { name: 'Super Admin (Engine)', desc: 'Gefährlich: Voller, ungefilterter Zugriff auf die MongoDB-Engine.' }
+    'super_admin': { name: 'Super Admin (Engine)', desc: 'Gefährlich: Voller, ungefilterter Zugriff auf die MongoDB-Engine.' },
+	'manage_requests': { name: 'Support-Anträge', desc: 'Erlaubt das Einsehen und Bearbeiten von User-Formularen (Geld, Account etc.).' },
 };
 
 // 2. MAPPING: WELCHER ENDPOINT BRAUCHT WELCHES RECHT
@@ -918,8 +920,8 @@ const ENDPOINT_PERMISSIONS = {
     'POST /api/admin/users/:id/reset-pw': 'manage_users_critical',
     'DELETE /api/admin/users/:id': 'manage_users_critical',
     'POST /api/admin/banUser': 'manage_users_critical', 
-    'GET /api/admin/roles': 'manage_users_critical', // NEU
-    'GET /api/admin/permissions': 'manage_users_critical', // NEU
+    'GET /api/admin/roles': 'manage_users_critical',
+    'GET /api/admin/permissions': 'manage_users_critical',
 
     // --- LNN News ---
     'POST /api/admin/news': 'manage_news',
@@ -982,6 +984,9 @@ const ENDPOINT_PERMISSIONS = {
 
     // --- Admin Engine ---
     'POST /api/admin/engine': 'super_admin'
+	
+	'GET /api/admin/requests': 'manage_requests',
+	'POST /api/admin/requests/:id/process': 'manage_requests',
 };
 
 // 3. VORGEFERTIGTE GRUPPEN (ROLES)
@@ -1001,7 +1006,8 @@ const PREDEFINED_ROLES = {
             'manage_bugs',
             'manage_human_grades', 
             'manage_human_ratings', 
-            'manage_chats'
+            'manage_chats',
+			'manage_requests'
         ]
     },
     'shop_manager': {
@@ -1125,6 +1131,7 @@ MongoClient.connect(mongoUri)
 		proposalsCollection = db.collection('proposals');
 		deliveriesCollection = db.collection('deliveries');
 		reviewsCollection = db.collection('reviews');
+		requestsCollection = db.collection('userRequests');
 
         authCodesCollection = db.collection(authCodesCollectionName);
 
@@ -13579,6 +13586,83 @@ app.get('/api/admin/activity-logs', isAuthenticated, isAdmin, async (req, res) =
         });
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Laden der Logs." });
+    }
+});
+
+// POST: User stellt einen Antrag
+app.post('/api/requests', isAuthenticated, async (req, res) => {
+    const { type, amount, reason } = req.body; 
+    // type könnte z.B. 'refund', 'delete_account', 'bug_compensation' sein
+    const userId = new ObjectId(req.session.userId);
+
+    if (!type || !reason) {
+        return res.status(400).json({ error: "Typ und Grund sind erforderlich." });
+    }
+
+    try {
+        const newRequest = {
+            userId: userId,
+            username: req.session.username,
+            type: type,
+            amount: parseFloat(amount) || 0,
+            reason: reason.trim(),
+            status: 'pending', // pending, approved, rejected
+            createdAt: new Date()
+        };
+
+        await requestsCollection.insertOne(newRequest);
+        res.status(201).json({ message: "Dein Antrag wurde erfolgreich eingereicht und wird geprüft." });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Speichern des Antrags:`, err);
+        res.status(500).json({ error: "Fehler beim Einreichen des Antrags." });
+    }
+});
+
+// POST: Admin bearbeitet einen Antrag
+app.post('/api/admin/requests/:id/process', isAuthenticated, isAdmin, async (req, res) => {
+    const { action } = req.body; // 'approve' oder 'reject'
+    const requestId = new ObjectId(req.params.id);
+    const adminName = req.session.username;
+
+    try {
+        const request = await requestsCollection.findOne({ _id: requestId });
+        if (!request || request.status !== 'pending') {
+            return res.status(400).json({ error: "Antrag nicht gefunden oder bereits bearbeitet." });
+        }
+
+        if (action === 'approve') {
+            // Logik je nach Antragstyp ausführen
+            if (request.type === 'refund' || request.type === 'compensation') {
+                if (request.amount > 0) {
+                    await usersCollection.updateOne(
+                        { _id: request.userId },
+                        { $inc: { balance: request.amount } }
+                    );
+                }
+            } else if (request.type === 'delete_account') {
+                // Hier könntest du deine Lösch-Logik triggern oder den User flaggen
+                // z.B. await usersCollection.deleteOne({ _id: request.userId });
+            }
+
+            await requestsCollection.updateOne(
+                { _id: requestId },
+                { $set: { status: 'approved', processedAt: new Date(), processedBy: adminName } }
+            );
+            res.json({ message: "Antrag genehmigt und Aktion ausgeführt!" });
+
+        } else if (action === 'reject') {
+            await requestsCollection.updateOne(
+                { _id: requestId },
+                { $set: { status: 'rejected', processedAt: new Date(), processedBy: adminName } }
+            );
+            res.json({ message: "Antrag wurde abgelehnt." });
+        } else {
+            res.status(400).json({ error: "Ungültige Aktion." });
+        }
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Bearbeiten des Antrags:`, err);
+        res.status(500).json({ error: "Serverfehler bei der Bearbeitung." });
     }
 });
 
