@@ -13666,6 +13666,18 @@ app.post('/api/admin/requests/:id/process', isAuthenticated, isAdmin, async (req
     }
 });
 
+// GET: Admin ruft alle offenen Anträge ab
+app.get('/api/admin/requests', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        // Lädt alle offenen Anträge, die neuesten zuerst
+        const pendingRequests = await requestsCollection.find({ status: 'pending' }).sort({ createdAt: -1 }).toArray();
+        res.json({ requests: pendingRequests });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Laden der Anträge:`, err);
+        res.status(500).json({ error: "Fehler beim Laden der Anträge." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
