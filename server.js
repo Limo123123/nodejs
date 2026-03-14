@@ -13478,25 +13478,30 @@ app.post('/api/pets/equip', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
 
     try {
-        const user = await usersCollection.findOne({ _id: userId });
-        
-        // Schauen, ob der User das Tier überhaupt besitzt
-        const ownedPet = user.ownedPets ? user.ownedPets.find(p => p.id === petId) : null;
+        // WICHTIG: Wir suchen in der petsCollection, nicht im user!
+        const pet = await petsCollection.findOne({ _id: new ObjectId(petId), userId: userId });
 
-        if (!ownedPet) {
-            return res.status(400).json({ error: "Du besitzt dieses Tier gar nicht!" });
+        if (!pet) {
+            return res.status(404).json({ error: "Du besitzt dieses Tier gar nicht!" });
         }
 
-        // Tier als aktiv setzen (und sicherstellen, dass inPark auf false steht)
-        ownedPet.inPark = false; 
+        // Die Daten zusammenstellen, die der Tierpark braucht
+        const activePetData = {
+            dbId: pet._id.toString(), // Die einmalige Datenbank-ID des gekauften Tieres
+            id: pet.typeId,           // Die Art (z.B. 'alpaca')
+            name: pet.name,
+            icon: pet.icon,
+            inPark: false
+        };
         
         await usersCollection.updateOne(
             { _id: userId },
-            { $set: { activePet: ownedPet } }
+            { $set: { activePet: activePetData } }
         );
 
-        res.json({ message: `${ownedPet.icon} ${ownedPet.name} ist jetzt dein aktives Haustier!` });
+        res.json({ message: `${pet.icon} ${pet.name} ist jetzt dein aktives Haustier!` });
     } catch (e) {
+        console.error(`${LOG_PREFIX_SERVER} Ausrüst-Fehler:`, e);
         res.status(500).json({ error: "Fehler beim Ausrüsten des Tieres." });
     }
 });
