@@ -13472,6 +13472,35 @@ app.post('/api/park/interact', isAuthenticated, async (req, res) => {
     }
 });
 
+// 🐾 Haustier ausrüsten (Aktiv setzen)
+app.post('/api/pets/equip', isAuthenticated, async (req, res) => {
+    const { petId } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        
+        // Schauen, ob der User das Tier überhaupt besitzt
+        const ownedPet = user.ownedPets ? user.ownedPets.find(p => p.id === petId) : null;
+
+        if (!ownedPet) {
+            return res.status(400).json({ error: "Du besitzt dieses Tier gar nicht!" });
+        }
+
+        // Tier als aktiv setzen (und sicherstellen, dass inPark auf false steht)
+        ownedPet.inPark = false; 
+        
+        await usersCollection.updateOne(
+            { _id: userId },
+            { $set: { activePet: ownedPet } }
+        );
+
+        res.json({ message: `${ownedPet.icon} ${ownedPet.name} ist jetzt dein aktives Haustier!` });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Ausrüsten des Tieres." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
