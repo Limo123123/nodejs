@@ -983,7 +983,7 @@ const ENDPOINT_PERMISSIONS = {
     'POST /api/admin/system/fix-decimals': 'system_maintenance',
 
     // --- Admin Engine ---
-    'POST /api/admin/engine': 'super_admin'
+    'POST /api/admin/engine': 'super_admin',
 	
 	'GET /api/admin/requests': 'manage_requests',
 	'POST /api/admin/requests/:id/process': 'manage_requests',
@@ -1017,7 +1017,7 @@ const PREDEFINED_ROLES = {
             'manage_products',
             'manage_teachermon',
             'manage_universes',
-            'manage_limea', // Hab ich dem Shop Manager gegeben
+            'manage_limea',
             'manage_cdn'
         ]
     },
