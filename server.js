@@ -12308,6 +12308,7 @@ app.get('/api/pets/my', isAuthenticated, async (req, res) => {
                 enclosure: pet.enclosure,
                 hunger: Math.round(hungerPercent),
                 ageDays: ageInDays,
+				inPension: pet.inPension,
                 isDying: hungerPercent <= 15
             };
         });
@@ -12367,7 +12368,7 @@ if (cluster.isPrimary) {
     setInterval(async () => {
         try {
             const now = new Date();
-            const allPets = await petsCollection.find({}).toArray();
+            const allPets = await petsCollection.find({ inPension: { $ne: true } }).toArray();
             
             const deaths = [];
             const idsToDelete = [];
@@ -12941,6 +12942,80 @@ app.post('/api/admin/mail/send', isAuthenticated, isAdmin, async (req, res) => {
     } catch (e) {
         console.error(e);
         res.status(500).json({ error: "Fehler beim Versenden." });
+    }
+});
+
+app.post('/api/delivery/send-all', isAuthenticated, async (req, res) => {
+    const { targetUsername, providerId } = req.body; 
+    const senderId = new ObjectId(req.session.userId);
+    
+    if (!targetUsername || !providerId) return res.status(400).json({ error: "Fehlende Angaben." });
+    if (!req.session.deliveryQuotes) return res.status(400).json({ error: "Tarife abgelaufen. Lade neu." });
+
+    const provider = req.session.deliveryQuotes.find(p => p.id === providerId);
+    if (!provider) return res.status(400).json({ error: "Lieferdienst existiert nicht." });
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const sender = await usersCollection.findOne({ _id: senderId }, { session });
+            const target = await usersCollection.findOne({ username: { $regex: new RegExp(`^${targetUsername.trim()}$`, 'i') } }, { session });
+            
+            if (!target) throw new Error("Empfänger existiert nicht.");
+            if (target._id.equals(senderId)) throw new Error("Kein Selbstversand.");
+
+            // Ganzes Inventar holen
+            const inventory = await inventoriesCollection.find({ userId: senderId, quantityOwned: { $gt: 0 } }, { session }).toArray();
+            if (inventory.length === 0) throw new Error("Dein Inventar ist leer.");
+
+            // Umzugs-LKW kostet das 3-fache des normalen Tarifs
+            const bulkCost = provider.cost * 3; 
+            if (sender.balance < bulkCost) throw new Error(`Ein kompletter Umzug mit ${provider.name} kostet $${bulkCost.toLocaleString()}.`);
+
+            await usersCollection.updateOne({ _id: senderId }, { $inc: { balance: -bulkCost } }, { session });
+
+            // Produktdaten holen für die Namen
+            const productIds = inventory.map(i => i.productId);
+            const dbProducts = await productsCollection.find({ id: { $in: productIds } }, { session }).toArray();
+            const dbProductMap = new Map(dbProducts.map(p => [p.id, p]));
+
+            const arrivalDate = new Date(Date.now() + provider.timeMins * 60 * 1000);
+            const deliveries = [];
+
+            for (const item of inventory) {
+                let itemName = "Unbekanntes Item";
+                let itemIcon = "📦";
+                
+                if (dbProductMap.has(item.productId)) {
+                    itemName = dbProductMap.get(item.productId).name;
+                    itemIcon = '🛒';
+                } else {
+                    // Limea Check
+                    const limeaItem = LIMEA_CATALOG.find(l => l.id === item.productId);
+                    if (limeaItem) { itemName = limeaItem.name; itemIcon = limeaItem.icon; }
+                }
+
+                deliveries.push({
+                    senderId, senderName: req.session.username,
+                    targetId: target._id, targetName: target.username,
+                    productId: item.productId, productName: itemName, productIcon: itemIcon,
+                    quantity: item.quantityOwned,
+                    providerName: provider.name + " (Umzug LKW)",
+                    cost: 0, // In Bulk-Kosten verrechnet
+                    status: 'pending', arrivalDate, createdAt: new Date()
+                });
+            }
+
+            // In die Lieferung werfen & altes Inventar löschen
+            await deliveriesCollection.insertMany(deliveries, { session });
+            await inventoriesCollection.deleteMany({ userId: senderId }, { session });
+        });
+
+        res.json({ message: `📦 KOMPLETTER UMZUG an ${provider.name} übergeben! Alles kommt in ca. ${provider.timeMins} Minuten an.` });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
     }
 });
 
@@ -13559,6 +13634,73 @@ app.post('/api/pets/equip', isAuthenticated, async (req, res) => {
     } catch (e) {
         console.error(`${LOG_PREFIX_SERVER} Ausrüst-Fehler:`, e);
         res.status(500).json({ error: "Fehler beim Ausrüsten des Tieres." });
+    }
+});
+
+// Tier an einen anderen Spieler senden
+app.post('/api/pets/:id/transfer', isAuthenticated, async (req, res) => {
+    const petId = new ObjectId(req.params.id);
+    const senderId = new ObjectId(req.session.userId);
+    const { targetUsername } = req.body;
+
+    if (!targetUsername) return res.status(400).json({ error: "Empfänger fehlt." });
+    if (targetUsername.toLowerCase() === req.session.username.toLowerCase()) return res.status(400).json({ error: "Du kannst dir selbst kein Tier schicken." });
+
+    try {
+        const targetUser = await usersCollection.findOne({ username: { $regex: new RegExp(`^${targetUsername.trim()}$`, 'i') } });
+        if (!targetUser) return res.status(404).json({ error: "Empfänger nicht gefunden." });
+
+        const result = await petsCollection.updateOne(
+            { _id: petId, userId: senderId },
+            { $set: { userId: targetUser._id, ownerName: targetUser.username, inPark: false, inPension: false } }
+        );
+
+        if (result.modifiedCount === 0) return res.status(404).json({ error: "Tier nicht gefunden." });
+
+        // Falls das Tier ausgerüstet war, beim Sender entfernen
+        await usersCollection.updateOne(
+            { _id: senderId, "activePet.dbId": petId.toString() },
+            { $unset: { activePet: "" } }
+        );
+
+        res.json({ message: `Tier erfolgreich an ${targetUser.username} übergeben!` });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Transfer." });
+    }
+});
+
+// Tier in die Pension geben / abholen
+app.post('/api/pets/:id/pension', isAuthenticated, async (req, res) => {
+    const petId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+    const { action } = req.body; // 'deposit' oder 'retrieve'
+    const PENSION_COST = 1000; // Einmalige Gebühr für die Betreuung
+
+    try {
+        if (action === 'deposit') {
+            const user = await usersCollection.findOne({ _id: userId });
+            if (user.balance < PENSION_COST) return res.status(400).json({ error: `Die Pension kostet $${PENSION_COST}.` });
+
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -PENSION_COST } });
+            await petsCollection.updateOne(
+                { _id: petId, userId },
+                { $set: { inPension: true, lastFedAt: new Date() } } // Wird voll gefüttert abgegeben
+            );
+            
+            // Falls ausgerüstet, entfernen
+            await usersCollection.updateOne({ _id: userId, "activePet.dbId": petId.toString() }, { $unset: { activePet: "" } });
+            
+            res.json({ message: "Tier ist nun in der Pension und verhungert nicht mehr." });
+        } else {
+            // Abholen
+            await petsCollection.updateOne(
+                { _id: petId, userId },
+                { $set: { inPension: false, lastFedAt: new Date() } } // Frisch gefüttert zurück
+            );
+            res.json({ message: "Tier aus der Pension abgeholt!" });
+        }
+    } catch (e) {
+        res.status(500).json({ error: "Fehler in der Pension." });
     }
 });
 
