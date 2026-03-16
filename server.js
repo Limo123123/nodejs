@@ -6436,11 +6436,9 @@ const TAX_INTERVAL_MS = 24 * 60 * 60 * 1000; // Alle 24 Stunden
 async function collectTaxes() {
     console.log(`${LOG_PREFIX_SERVER} 📉 Der Steuer-Eintreiber macht seine Runde...`);
     try {
-        // 1. Bürgermeister-Konfiguration laden (Standard: 0.5% / 0.005)
         const taxConfig = await systemSettingsCollection.findOne({ id: 'tax_config' });
         const currentTaxRate = taxConfig ? taxConfig.rate : 0.005;
 
-        // 2. Steuerpflichtige User finden (Reich, kein Admin, kein Infinity)
         const richUsers = await usersCollection.find({
             balance: { $gt: TAX_THRESHOLD },
             isAdmin: { $ne: true },
@@ -6452,7 +6450,6 @@ async function collectTaxes() {
             return;
         }
 
-        // --- FIX: Variablen initialisieren ---
         let totalTaxCollected = 0;
         let shieldedUsers = 0;
         let taxedUsersCount = 0;
@@ -6460,7 +6457,6 @@ async function collectTaxes() {
         const inventoryOps = [];
 
         for (const user of richUsers) {
-            // A. Check auf Steuerschutz-Zertifikat
             const shield = await inventoriesCollection.findOne({
                 userId: user._id,
                 productId: 'tax_shield',
@@ -6470,21 +6466,22 @@ async function collectTaxes() {
             if (shield) {
                 shieldedUsers++;
                 inventoryOps.push({
-                    updateOne: {
-                        filter: { _id: shield._id },
-                        update: { $inc: { quantityOwned: -1 } }
-                    }
+                    updateOne: { filter: { _id: shield._id }, update: { $inc: { quantityOwned: -1 } } }
                 });
-                continue; // User ist geschützt
+                continue; 
             }
 
-            // B. Steuersatz berechnen (Ehegattensplitting!)
+            // B. Steuersatz berechnen
             let userTaxRate = currentTaxRate;
+            
+            // Rabatte stapeln
+            if (user.activeSubscriptions && user.activeSubscriptions.includes('prime')) {
+                userTaxRate = userTaxRate * 0.75; // 25% Rabatt
+            }
             if (user.spouses && user.spouses.length > 0) {
-                userTaxRate = currentTaxRate / 2; // Nur 50% Steuer für Verheiratete
+                userTaxRate = userTaxRate / 2; // Nur 50% Steuer für Verheiratete
             }
 
-            // C. Steuerbetrag berechnen
             const taxAmount = Math.floor(user.balance * userTaxRate * 100) / 100;
 
             if (taxAmount > 0) {
@@ -6505,11 +6502,9 @@ async function collectTaxes() {
             }
         }
 
-        // D. Datenbank-Updates ausführen
         if (inventoryOps.length > 0) await inventoriesCollection.bulkWrite(inventoryOps);
         if (bulkOps.length > 0) await usersCollection.bulkWrite(bulkOps);
 
-        // E. Geld in die Staatskasse & News posten
         if (totalTaxCollected > 0) {
             await addToStateTreasury(totalTaxCollected);
 
@@ -6521,7 +6516,7 @@ async function collectTaxes() {
                 createdAt: new Date(),
                 likes: 0
             });
-            updateDataVersion('news');
+            if (typeof updateDataVersion === 'function') updateDataVersion('news');
         }
 
         console.log(`${LOG_PREFIX_SERVER} 📉 Steuer-Lauf beendet. Summe: $${totalTaxCollected.toFixed(2)}`);
@@ -6534,6 +6529,7 @@ async function collectTaxes() {
 // Starte den Steuer-Intervall (läuft einmal am Tag)
 if (cluster.isPrimary) {
     setInterval(collectTaxes, TAX_INTERVAL_MS);
+	
 }
 
 
@@ -6781,22 +6777,27 @@ app.post('/api/jobs/work', isAuthenticated, async (req, res) => {
         const now = Date.now();
         const lastWork = user.lastWorkedAt ? new Date(user.lastWorkedAt).getTime() : 0;
         const cooldownMs = jobDef.cooldownSeconds * 1000;
+        
+        let finalCooldown = cooldownMs;
+        if (user.activeSubscriptions && user.activeSubscriptions.includes('hustler')) {
+            finalCooldown = cooldownMs * 0.70; // 30% kürzer (Hustler Pass)
+        }
 
-        if (now - lastWork < cooldownMs) {
-            const waitSec = Math.ceil((cooldownMs - (now - lastWork)) / 1000);
+        if (now - lastWork < finalCooldown) {
+            const waitSec = Math.ceil((finalCooldown - (now - lastWork)) / 1000);
             return res.status(429).json({ error: `Du bist erschöpft. Warte noch ${waitSec}s.` });
         }
 
         // Gehaltsberechnung: Basis + (Level * 10%)
         const level = user.jobLevel || 1;
-        const multiplier = 1 + ((level - 1) * 0.1); // Level 1 = 1.0x, Level 2 = 1.1x
+        const multiplier = 1 + ((level - 1) * 0.1); 
         const payout = Math.floor(jobDef.salary * multiplier);
 
-        // Zufälliges Event? (Optional: Beförderungschance 5%)
+        // Zufälliges Event
         let message = `Du hast als ${jobDef.title} gearbeitet und $${payout} verdient.`;
         let levelUp = false;
 
-        if (Math.random() < 0.05 && level < 10) { // Max Level 10
+        if (Math.random() < 0.05 && level < 10) { 
             levelUp = true;
             message += " Gute Arbeit! Du wurdest befördert (Level Up)!";
         }
@@ -13264,6 +13265,55 @@ if (cluster.isPrimary) {
             console.error(`${LOG_PREFIX_SERVER} [Limo Logistics] Fehler beim Ausliefern:`, e);
         }
     }, 30 * 1000); // Checkt alle 30 Sekunden
+	
+	// Limazon+ Daily Charge Job (Läuft alle 24 Stunden)
+    setInterval(async () => {
+        console.log(`${LOG_PREFIX_SERVER} 💎 Limazon+ Abos werden abgerechnet...`);
+        try {
+            // Alle User mit mindestens einem aktiven Abo
+            const subbedUsers = await usersCollection.find({ "activeSubscriptions.0": { $exists: true } }).toArray();
+
+            for (const user of subbedUsers) {
+                let dailyCost = 0;
+                let activeSubs = user.activeSubscriptions || [];
+                
+                activeSubs.forEach(subId => {
+                    if (LIMO_PLUS_SUBS[subId]) dailyCost += LIMO_PLUS_SUBS[subId].costPerDay;
+                });
+
+                if (user.balance >= dailyCost) {
+                    await usersCollection.updateOne({ _id: user._id }, { $inc: { balance: -dailyCost } });
+                    
+                    // Teachermon Pro Feature: Automatisches Pack droppen!
+                    if (activeSubs.includes('teachermon_pro')) {
+                        for(let i=0; i<3; i++) {
+                            const card = await drawRandomCard('teachermon'); 
+                            await teachermonInvCollection.updateOne(
+                                { userId: user._id, cardId: card.id },
+                                { $inc: { quantity: 1 } },
+                                { upsert: true }
+                            );
+                        }
+                    }
+                } else {
+                    // Pleite!
+                    await usersCollection.updateOne({ _id: user._id }, { $set: { activeSubscriptions: [] } });
+                    await mailsCollection.insertOne({
+                        userId: user._id,
+                        sender: "Limazon+ Billing",
+                        subject: "Deine Abos wurden gekündigt!",
+                        content: `Hallo ${user.username},\ndein Kontostand war zu niedrig, um deine täglichen Limazon+ Abos ($${dailyCost}) zu decken. Wir haben alle Abos sicherheitshalber storniert.\n\nLade dein Konto auf und abonniere sie bei Bedarf neu!`,
+                        isRead: false,
+                        isClaimed: false,
+                        createdAt: new Date()
+                    });
+                    console.log(`💎 User ${user.username} konnte Abos nicht zahlen. Gekündigt.`);
+                }
+            }
+        } catch (e) {
+            console.error("Abo-Abrechnung Fehler:", e);
+        }
+    }, 24 * 60 * 60 * 1000);
 }
 
 // =========================================================
@@ -13348,11 +13398,8 @@ app.post('/api/delivery/send', isAuthenticated, async (req, res) => {
     const senderName = req.session.username;
     const qty = parseInt(quantity);
 
-    // --- DER FIX: Typen-Konvertierung ---
-    // HTML Dropdowns senden immer Strings. Wir wandeln Shop-IDs zurück in Zahlen!
     const parsedId = Number(productId);
     const finalProductId = isNaN(parsedId) ? productId : parsedId;
-    // ------------------------------------
 
     if (!targetUsername || !finalProductId || !providerId || qty <= 0) return res.status(400).json({ error: "Fehlende Angaben." });
     if (targetUsername.toLowerCase() === senderName.toLowerCase()) return res.status(400).json({ error: "Du kannst dir selbst keine Pakete schicken." });
@@ -13361,7 +13408,6 @@ app.post('/api/delivery/send', isAuthenticated, async (req, res) => {
     const provider = req.session.deliveryQuotes.find(p => p.id === providerId);
     if (!provider) return res.status(400).json({ error: "Diesen Lieferdienst gibt es nicht." });
 
-    // Finde den echten Namen für die E-Mail heraus (mit finalProductId!)
     let itemName = "Unbekanntes Item";
     let itemIcon = "📦";
     
@@ -13381,18 +13427,24 @@ app.post('/api/delivery/send', isAuthenticated, async (req, res) => {
     try {
         await session.withTransaction(async () => {
             const sender = await usersCollection.findOne({ _id: senderId }, { session });
-            if (sender.balance < provider.cost) throw new Error(`Du hast nicht genug Geld für ${provider.name}. Es kostet $${provider.cost}.`);
+            
+            let finalCost = provider.cost;
+            if (sender.activeSubscriptions && sender.activeSubscriptions.includes('prime')) {
+                finalCost = 0; // Limo Prime = kostenloser Versand!
+            }
+
+            if (sender.balance < finalCost) throw new Error(`Du hast nicht genug Geld für ${provider.name}. Es kostet $${finalCost}.`);
 
             const target = await usersCollection.findOne({ username: { $regex: new RegExp(`^${targetUsername}$`, 'i') } }, { session });
             if (!target) throw new Error("Empfänger existiert nicht.");
 
-            // Wir suchen im Inventar jetzt mit der korrekten finalProductId
             const inventoryItem = await inventoriesCollection.findOne({ userId: senderId, productId: finalProductId }, { session });
             if (!inventoryItem || inventoryItem.quantityOwned < qty) {
                 throw new Error("Du hast nicht genug von diesem Item im Inventar.");
             }
 
-            await usersCollection.updateOne({ _id: senderId }, { $inc: { balance: -provider.cost } }, { session });
+            // Geld und Item sicher abziehen
+            await usersCollection.updateOne({ _id: senderId }, { $inc: { balance: -finalCost } }, { session });
             await inventoriesCollection.updateOne({ _id: inventoryItem._id }, { $inc: { quantityOwned: -qty } }, { session });
 
             const arrivalDate = new Date(Date.now() + provider.timeMins * 60 * 1000);
@@ -13402,12 +13454,12 @@ app.post('/api/delivery/send', isAuthenticated, async (req, res) => {
                 senderName: senderName,
                 targetId: target._id,
                 targetName: target.username,
-                productId: finalProductId, // WICHTIG: Die echte ID mitsenden
+                productId: finalProductId,
                 productName: itemName,
                 productIcon: itemIcon,
                 quantity: qty,
                 providerName: provider.name,
-                cost: provider.cost,
+                cost: finalCost,
                 status: 'pending',
                 arrivalDate: arrivalDate,
                 createdAt: new Date()
@@ -13817,6 +13869,69 @@ app.get('/api/admin/requests', isAuthenticated, isAdmin, async (req, res) => {
     } catch (err) {
         console.error(`${LOG_PREFIX_SERVER} Fehler beim Laden der Anträge:`, err);
         res.status(500).json({ error: "Fehler beim Laden der Anträge." });
+    }
+});
+
+// =========================================================
+// === 💎 LIMAZON+ (DAILY SUBSCRIPTIONS) ===
+// =========================================================
+
+const LIMO_PLUS_SUBS = {
+    'prime': { 
+        id: 'prime', name: 'Limazon Prime', costPerDay: 3500, icon: '🚀', 
+        desc: 'Kostenloser Express-Versand bei Limo Post & 25% Rabatt auf deine Steuern.' 
+    },
+    'hustler': { 
+        id: 'hustler', name: 'Hustler Pass', costPerDay: 1500, icon: '💼', 
+        desc: 'Arbeits- und Überfall-Cooldowns sind dauerhaft um 30% verkürzt.' 
+    },
+    'teachermon_pro': { 
+        id: 'teachermon_pro', name: 'Teachermon Pro', costPerDay: 1000, icon: '🃏', 
+        desc: 'Du erhältst jede Nacht automatisch ein Gratis-Pack in dein Inventar.' 
+    }
+};
+
+app.get('/api/subscriptions', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const user = await usersCollection.findOne({ _id: userId }, { projection: { activeSubscriptions: 1 } });
+        res.json({
+            catalog: Object.values(LIMO_PLUS_SUBS),
+            active: user.activeSubscriptions || []
+        });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der Abos." });
+    }
+});
+
+app.post('/api/subscriptions/toggle', isAuthenticated, async (req, res) => {
+    const { subId } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (!LIMO_PLUS_SUBS[subId]) return res.status(400).json({ error: "Dieses Abo existiert nicht." });
+    
+    const sub = LIMO_PLUS_SUBS[subId];
+
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        const activeSubs = user.activeSubscriptions || [];
+        const isSubscribed = activeSubs.includes(subId);
+
+        if (isSubscribed) {
+            await usersCollection.updateOne({ _id: userId }, { $pull: { activeSubscriptions: subId } });
+            res.json({ message: `${sub.name} wurde erfolgreich gekündigt.` });
+        } else {
+            if (user.balance < sub.costPerDay) {
+                return res.status(400).json({ error: `Zu wenig Geld! Der erste Tag kostet sofort $${sub.costPerDay}.` });
+            }
+            await usersCollection.updateOne(
+                { _id: userId }, 
+                { $inc: { balance: -sub.costPerDay }, $addToSet: { activeSubscriptions: subId } }
+            );
+            res.json({ message: `${sub.name} erfolgreich abonniert! Dir wurden $${sub.costPerDay} abgebucht.` });
+        }
+    } catch (e) {
+        res.status(500).json({ error: "Abo-Fehler." });
     }
 });
 
