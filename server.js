@@ -175,8 +175,6 @@ let proposalsCollection;
 let deliveriesCollection;
 let reviewsCollection;
 let requestsCollection;
-let payAppsCollection;
-let paySessionsCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -1134,8 +1132,6 @@ MongoClient.connect(mongoUri)
 		deliveriesCollection = db.collection('deliveries');
 		reviewsCollection = db.collection('reviews');
 		requestsCollection = db.collection('userRequests');
-		payAppsCollection = db.collection('payApps');
-		paySessionsCollection = db.collection('paySessions');
 
         authCodesCollection = db.collection(authCodesCollectionName);
 
@@ -1435,107 +1431,6 @@ MongoClient.connect(mongoUri)
         console.error(`${LOG_PREFIX_SERVER} ❌ Kritischer Fehler: MongoDB-Verbindung fehlgeschlagen:`, err);
         process.exit(1);
     });
-
-// =========================================================
-// === 💳 LIMO PAY API (api.limazon.v6.rocks/api/pay) ===
-// =========================================================
-const payRouter = express.Router();
-payRouter.use(express.json()); // Eigener JSON-Parser
-payRouter.use(cors({ 
-    origin: true, // Setzt die erlaubte Domain dynamisch auf den Anfragenden statt auf '*'
-    credentials: true 
-}));
-
-// 1. Externer Shop erstellt eine Zahlungsanforderung
-payRouter.post('/v1/payments/create', async (req, res) => {
-    const { apiKey, amount, description, successUrl, cancelUrl } = req.body;
-
-    if (!apiKey || !amount || amount <= 0 || !successUrl) {
-        return res.status(400).json({ error: "Fehlende oder ungültige Parameter." });
-    }
-
-    try {
-        const app = await payAppsCollection.findOne({ apiKey: apiKey });
-        if (!app) return res.status(401).json({ error: "Ungültiger API-Key." });
-
-        const newPayment = {
-            appId: app._id,
-            appName: app.name,
-            amount: parseFloat(amount),
-            description: description || "Limazon Zahlung",
-            status: 'pending',
-            successUrl: successUrl,
-            cancelUrl: cancelUrl || successUrl,
-            createdAt: new Date()
-        };
-
-        const result = await paySessionsCollection.insertOne(newPayment);
-        const paymentId = result.insertedId.toString();
-
-        res.json({
-            success: true,
-            paymentId: paymentId,
-            // HIER DEINE FRONTEND DOMAIN EINTRAGEN (falls sie anders ist):
-            checkoutUrl: `https://app.limazon.v6.rocks/themes/checkout.html?id=${paymentId}`
-        });
-
-    } catch (e) {
-        console.error(`${LOG_PREFIX_SERVER} LimoPay Create Error:`, e);
-        res.status(500).json({ error: "Interner Zahlungsfehler." });
-    }
-});
-
-// 2. User bestätigt die Zahlung im LimoPay Frontend
-payRouter.post('/v1/payments/:id/execute', isAuthenticated, async (req, res) => {
-    const paymentId = req.params.id;
-    const userId = new ObjectId(req.session.userId);
-
-    const session = client.startSession();
-    try {
-        let returnUrl = "";
-        
-        await session.withTransaction(async () => {
-            const payment = await paySessionsCollection.findOne({ _id: new ObjectId(paymentId) }, { session });
-            if (!payment) throw new Error("Zahlung nicht gefunden.");
-            if (payment.status !== 'pending') throw new Error("Zahlung wurde bereits abgeschlossen oder storniert.");
-
-            const user = await usersCollection.findOne({ _id: userId }, { session });
-            if (user.balance < payment.amount) throw new Error("Nicht genug Guthaben für diese Zahlung.");
-
-            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -payment.amount } }, { session });
-            await payAppsCollection.updateOne({ _id: payment.appId }, { $inc: { balance: payment.amount } }, { session });
-
-            await paySessionsCollection.updateOne(
-                { _id: payment._id },
-                { $set: { status: 'paid', paidByUserId: userId, paidByUsername: user.username, paidAt: new Date() } },
-                { session }
-            );
-
-            returnUrl = payment.successUrl;
-        });
-
-        res.json({ success: true, message: "Zahlung erfolgreich!", redirectUrl: returnUrl });
-    } catch (e) {
-        res.status(400).json({ error: e.message });
-    } finally {
-        await session.endSession();
-    }
-});
-
-// 3. Externer Shop prüft den Status
-payRouter.get('/v1/payments/:id/status', async (req, res) => {
-    try {
-        const payment = await paySessionsCollection.findOne({ _id: new ObjectId(req.params.id) });
-        if (!payment) return res.status(404).json({ error: "Zahlung nicht gefunden." });
-
-        res.json({ paymentId: payment._id, status: payment.status, amount: payment.amount, paidAt: payment.paidAt || null });
-    } catch (e) {
-        res.status(500).json({ error: "Status konnte nicht abgerufen werden." });
-    }
-});
-
-// DEN ROUTER GANZ NORMAL EINKLINKEN:
-app.use('/api/pay', payRouter);
 
 // POST: Manuelle Steuereintreibung (Admin Only)
 app.post('/api/admin/system/force-tax', isAuthenticated, isAdmin, async (req, res) => {
@@ -7217,8 +7112,7 @@ const ENGINE_ALLOWED_COLLECTIONS = [
     'humans', 'ratings', 'criteria', 'categories', 'tindaSwipes', 'restaurantOrders', 'limterestPins', 
     'teachermonCards', 'teachermonInventories', 'teachermonTrades', 'teachermonBattles', 'teachermonUniverses', 
     'properties', 'ownedProperties', 'propertyInvites', 'pets', 'petCemetery', 'limeaLayouts', 
-    'gangs', 'publicGangChat', 'zones', 'bounties', 'lotteryTickets', 'banned_ips',
-    'payApps', 'paySessions'
+    'gangs', 'publicGangChat', 'zones', 'bounties', 'lotteryTickets', 'banned_ips'
 ];
 
 app.post('/api/admin/engine', isAuthenticated, isAdmin, async (req, res) => {
