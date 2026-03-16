@@ -175,6 +175,8 @@ let proposalsCollection;
 let deliveriesCollection;
 let reviewsCollection;
 let requestsCollection;
+let payAppsCollection;
+let paySessionsCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -1132,8 +1134,8 @@ MongoClient.connect(mongoUri)
 		deliveriesCollection = db.collection('deliveries');
 		reviewsCollection = db.collection('reviews');
 		requestsCollection = db.collection('userRequests');
-		let payAppsCollection = db.collection('payApps');       // Speichert externe Shops (API-Keys, Guthaben)
-		let paySessionsCollection = db.collection('paySessions'); // Speichert laufende Zahlungen
+		payAppsCollection = db.collection('payApps');
+		paySessionsCollection = db.collection('paySessions');
 
         authCodesCollection = db.collection(authCodesCollectionName);
 
