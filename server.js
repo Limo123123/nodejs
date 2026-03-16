@@ -1435,13 +1435,13 @@ MongoClient.connect(mongoUri)
     });
 
 // =========================================================
-// === 💳 LIMO PAY API (pay.limazon.v6.rocks) ===
+// === 💳 LIMO PAY API (api.limazon.v6.rocks/api/pay) ===
 // =========================================================
 const payRouter = express.Router();
-payRouter.use(express.json()); // Eigener JSON-Parser für Pay-Routen
+payRouter.use(express.json()); // Eigener JSON-Parser
 payRouter.use(cors()); // CORS für externe Shops erlauben
 
-// 1. Externer Shop erstellt eine Zahlungsanforderung (Server-to-Server)
+// 1. Externer Shop erstellt eine Zahlungsanforderung
 payRouter.post('/v1/payments/create', async (req, res) => {
     const { apiKey, amount, description, successUrl, cancelUrl } = req.body;
 
@@ -1450,17 +1450,15 @@ payRouter.post('/v1/payments/create', async (req, res) => {
     }
 
     try {
-        // App anhand des API-Keys identifizieren
         const app = await payAppsCollection.findOne({ apiKey: apiKey });
         if (!app) return res.status(401).json({ error: "Ungültiger API-Key." });
 
-        // Payment-Session erstellen
         const newPayment = {
             appId: app._id,
             appName: app.name,
             amount: parseFloat(amount),
             description: description || "Limazon Zahlung",
-            status: 'pending', // pending, paid, cancelled
+            status: 'pending',
             successUrl: successUrl,
             cancelUrl: cancelUrl || successUrl,
             createdAt: new Date()
@@ -1469,11 +1467,11 @@ payRouter.post('/v1/payments/create', async (req, res) => {
         const result = await paySessionsCollection.insertOne(newPayment);
         const paymentId = result.insertedId.toString();
 
-        // Gibt die Checkout-URL zurück, an die der Shop den User weiterleiten muss
         res.json({
             success: true,
             paymentId: paymentId,
-            checkoutUrl: `https://app.limazon.v6.rocks/themes/checkout.html?id=${paymentId}`
+            // HIER DEINE FRONTEND DOMAIN EINTRAGEN (falls sie anders ist):
+            checkoutUrl: `https://deine-frontend-domain.de/themes/checkout.html?id=${paymentId}`
         });
 
     } catch (e) {
@@ -1499,13 +1497,9 @@ payRouter.post('/v1/payments/:id/execute', isAuthenticated, async (req, res) => 
             const user = await usersCollection.findOne({ _id: userId }, { session });
             if (user.balance < payment.amount) throw new Error("Nicht genug Guthaben für diese Zahlung.");
 
-            // 1. User Geld abziehen
             await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -payment.amount } }, { session });
-            
-            // 2. Externer App das Geld gutschreiben (Damit der Shop-Betreiber es sich später auszahlen lassen kann)
             await payAppsCollection.updateOne({ _id: payment.appId }, { $inc: { balance: payment.amount } }, { session });
 
-            // 3. Payment als bezahlt markieren
             await paySessionsCollection.updateOne(
                 { _id: payment._id },
                 { $set: { status: 'paid', paidByUserId: userId, paidByUsername: user.username, paidAt: new Date() } },
@@ -1516,7 +1510,6 @@ payRouter.post('/v1/payments/:id/execute', isAuthenticated, async (req, res) => 
         });
 
         res.json({ success: true, message: "Zahlung erfolgreich!", redirectUrl: returnUrl });
-
     } catch (e) {
         res.status(400).json({ error: e.message });
     } finally {
@@ -1524,31 +1517,20 @@ payRouter.post('/v1/payments/:id/execute', isAuthenticated, async (req, res) => 
     }
 });
 
-// 3. Externer Shop prüft den Status der Zahlung (z.B. per Webhook oder Polling)
+// 3. Externer Shop prüft den Status
 payRouter.get('/v1/payments/:id/status', async (req, res) => {
     try {
         const payment = await paySessionsCollection.findOne({ _id: new ObjectId(req.params.id) });
         if (!payment) return res.status(404).json({ error: "Zahlung nicht gefunden." });
 
-        // Wir senden keine sensiblen Daten zurück, nur den Status
-        res.json({
-            paymentId: payment._id,
-            status: payment.status,
-            amount: payment.amount,
-            paidAt: payment.paidAt || null
-        });
+        res.json({ paymentId: payment._id, status: payment.status, amount: payment.amount, paidAt: payment.paidAt || null });
     } catch (e) {
         res.status(500).json({ error: "Status konnte nicht abgerufen werden." });
     }
 });
 
-// Die Weiche (Routing nach Domain)
-app.use((req, res, next) => {
-    if (req.hostname === 'pay.limazon.v6.rocks') {
-        return payRouter(req, res, next);
-    }
-    next();
-});
+// DEN ROUTER GANZ NORMAL EINKLINKEN:
+app.use('/api/pay', payRouter);
 
 // POST: Manuelle Steuereintreibung (Admin Only)
 app.post('/api/admin/system/force-tax', isAuthenticated, isAdmin, async (req, res) => {
