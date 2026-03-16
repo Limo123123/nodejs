@@ -1473,7 +1473,7 @@ payRouter.post('/v1/payments/create', async (req, res) => {
             success: true,
             paymentId: paymentId,
             // HIER DEINE FRONTEND DOMAIN EINTRAGEN (falls sie anders ist):
-            checkoutUrl: `https://deine-frontend-domain.de/themes/checkout.html?id=${paymentId}`
+            checkoutUrl: `https://app.limazon.v6.rocks/themes/checkout.html?id=${paymentId}`
         });
 
     } catch (e) {
