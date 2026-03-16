@@ -1473,7 +1473,7 @@ payRouter.post('/v1/payments/create', async (req, res) => {
         res.json({
             success: true,
             paymentId: paymentId,
-            checkoutUrl: `https://pay.limazon.v6.rocks/checkout.html?id=${paymentId}`
+            checkoutUrl: `https://app.limazon.v6.rocks/themes/checkout.html?id=${paymentId}`
         });
 
     } catch (e) {
