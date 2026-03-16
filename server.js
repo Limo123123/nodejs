@@ -1441,7 +1441,10 @@ MongoClient.connect(mongoUri)
 // =========================================================
 const payRouter = express.Router();
 payRouter.use(express.json()); // Eigener JSON-Parser
-payRouter.use(cors()); // CORS für externe Shops erlauben
+payRouter.use(cors({ 
+    origin: true, // Setzt die erlaubte Domain dynamisch auf den Anfragenden statt auf '*'
+    credentials: true 
+}));
 
 // 1. Externer Shop erstellt eine Zahlungsanforderung
 payRouter.post('/v1/payments/create', async (req, res) => {
