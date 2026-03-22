@@ -7771,9 +7771,14 @@ app.post('/api/tinda/swipe', isAuthenticated, async (req, res) => {
             return res.json({ match: false, message: "Nope." });
         }
 
-        // Bei Rechts-Swipe: Match berechnen (z.B. 70% Chance oder basierend auf Human Grade)
-        // Hier simpel: 80% Chance auf Match
-        const isMatch = Math.random() < 0.8;
+        // Sugar Daddy Check
+        const user = await usersCollection.findOne({ _id: userId });
+        let matchChance = 0.8; // Normal 80%
+        if (user.activeSubscriptions && user.activeSubscriptions.includes('sugar_daddy')) {
+            matchChance = 0.95; // 95% Chance
+        }
+
+        const isMatch = Math.random() < matchChance;
 
         if (isMatch) {
             const human = await humansCollection.findOne({ _id: hIdObj });
@@ -11272,7 +11277,14 @@ app.post('/api/realestate/buy', isAuthenticated, async (req, res) => {
             ]);
 
             if (!config) throw new Error("Dieses Objekt existiert nicht.");
-            if (user.balance < config.price) throw new Error(`Du brauchst $${config.price.toLocaleString()}.`);
+            
+            // NEU: Landlord Rabatt
+            let finalPrice = config.price;
+            if (user.activeSubscriptions && user.activeSubscriptions.includes('landlord')) {
+                finalPrice = Math.floor(finalPrice * 0.8); // 20% Rabatt
+            }
+
+            if (user.balance < finalPrice) throw new Error(`Du brauchst $${finalPrice.toLocaleString()}.`);
 
             // 1. Check: Besitzt der User bereits ein Haus?
             const alreadyOwner = await ownedPropertiesCollection.findOne({ ownerId: userId }, { session });
@@ -11288,7 +11300,7 @@ app.post('/api/realestate/buy', isAuthenticated, async (req, res) => {
             // --------------------------------------
 
             // 2. Geld abziehen
-            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -config.price } }, { session });
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -finalPrice } }, { session });
 
             // 3. Neues Haus in DB anlegen
             await ownedPropertiesCollection.insertOne({
@@ -11301,7 +11313,7 @@ app.post('/api/realestate/buy', isAuthenticated, async (req, res) => {
                 rent: config.rent,
                 protection: config.protection,
                 energyBonus: config.energyBonus || 1.0,
-                price: config.price, // Wichtig für die 75% Rückerstattung beim Verkauf
+                price: config.finalPrice, // Wichtig für die 75% Rückerstattung beim Verkauf
                 img: config.img,
                 desc: config.desc,
                 createdAt: new Date()
