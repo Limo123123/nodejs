@@ -803,7 +803,10 @@ async function seedProperties() {
         { id: 'suburb', name: 'Einfamilienhaus', price: 650000, maxRoommates: 4, rent: 2500, protection: 0.45, energyBonus: 1.3, img: '🏡', desc: 'Ruhige Lage, viel Platz.' },
         { id: 'mansion', name: 'Limo-Villa', price: 4500000, maxRoommates: 5, rent: 10000, protection: 0.70, energyBonus: 1.5, img: '🏰', desc: 'Luxus pur.' },
         { id: 'bunker', name: 'Atomschutz-Bunker', price: 12000000, maxRoommates: 6, rent: 15000, protection: 0.98, energyBonus: 1.2, img: '🛡️', desc: 'Sicherer geht es nicht. Platz für 6 Prepper.' },
-        { id: 'penthouse', name: 'Sky-Penthouse', price: 25000000, maxRoommates: 6, rent: 45000, protection: 0.90, energyBonus: 2.0, img: '💎', desc: 'Luxus für 6 Personen über den Wolken.' }
+        { id: 'penthouse', name: 'Sky-Penthouse', price: 25000000, maxRoommates: 6, rent: 45000, protection: 0.90, energyBonus: 2.0, img: '💎', desc: 'Luxus für 6 Personen über den Wolken.' },
+		{ id: 'yacht', name: 'Luxus-Yacht', price: 75000000, maxRoommates: 8, rent: 150000, protection: 0.85, energyBonus: 2.5, img: '🛥️', desc: 'Party auf dem Ozean. Steuerfrei.' },
+        { id: 'island', name: 'Privatinsel', price: 250000000, maxRoommates: 15, rent: 500000, protection: 1.0, energyBonus: 3.5, img: '🏝️', desc: 'Dein eigener kleiner Staat.' },
+        { id: 'moonbase', name: 'Mondbasis', price: 999000000, maxRoommates: 5, rent: 1000000, protection: 0.99, energyBonus: 5.0, img: '🌕', desc: 'Der ultimative Flex. Keine Schwerkraft.' }
     ];
     
     // Upsert stellt sicher, dass neue Häuser (Baumhaus) eingefügt werden, ohne alte zu killen!
@@ -6691,7 +6694,10 @@ const JOB_LIST = [
     { id: 'delivery', title: 'Pizza-Bote', salary: 120, cooldownSeconds: 300, reqLevel: 2, cost: 500 }, // 5 Min
     { id: 'coder', title: 'Junior Dev', salary: 400, cooldownSeconds: 900, reqLevel: 5, cost: 2000 }, // 15 Min
     { id: 'ceo', title: 'CEO', salary: 5000, cooldownSeconds: 14400, reqLevel: 20, cost: 100000 }, // 4 Std
-    { id: 'idol', title: 'K-Pop Idol', salary: 12000, cooldownSeconds: 28800, reqLevel: 25, cost: 500000 } // 8 Std Cooldown, extrem hohes Gehalt
+    { id: 'idol', title: 'K-Pop Idol', salary: 12000, cooldownSeconds: 28800, reqLevel: 25, cost: 500000 }, // 8 Std Cooldown, extrem hohes Gehalt
+	{ id: 'hacker', title: 'White-Hat Hacker', salary: 1500, cooldownSeconds: 3600, reqLevel: 10, cost: 15000 }, // 1 Std
+    { id: 'streamer', title: 'Twitch Star', salary: 3000, cooldownSeconds: 7200, reqLevel: 15, cost: 40000 }, // 2 Std
+    { id: 'astronaut', title: 'Astronaut', salary: 25000, cooldownSeconds: 86400, reqLevel: 30, cost: 2000000 } // 24 Std
 ];
 
 // GET: Verfügbare Jobs & Mein Status
@@ -10813,6 +10819,100 @@ app.post('/api/teachermon/pack/buy-multi', isAuthenticated, async (req, res) => 
     }
 });
 
+// 😈 SATANSKREIS: Karten opfern für ein Upgrade
+app.post('/api/teachermon/satanic-circle', isAuthenticated, async (req, res) => {
+    const { rarityToSacrifice } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    // Konfiguration: Wie viele Karten man opfern muss, um die nächste Stufe zu erreichen
+    const UPGRADE_RECIPES = {
+        'common': { required: 50, nextRarity: 'rare' },
+        'rare': { required: 20, nextRarity: 'premium' },
+        'premium': { required: 10, nextRarity: 'episch' },
+        'episch': { required: 5, nextRarity: 'legendaer' }
+    };
+
+    const recipe = UPGRADE_RECIPES[rarityToSacrifice];
+    if (!recipe) {
+        return res.status(400).json({ error: "Diese Seltenheitsstufe kann nicht geopfert werden oder ist bereits maximal." });
+    }
+
+    const session = client.startSession();
+    try {
+        let summonedCard = null;
+
+        await session.withTransaction(async () => {
+            // 1. Alle Karten-IDs der zu opfernden Seltenheit holen
+            const cardsOfRarity = await teachermonCardsCollection.find({ rarity: rarityToSacrifice }, { session }).toArray();
+            const cardIds = cardsOfRarity.map(c => c.id);
+
+            // 2. Inventar des Users für diese Karten holen
+            const userInv = await teachermonInvCollection.find({ 
+                userId, 
+                cardId: { $in: cardIds }, 
+                quantity: { $gt: 0 } 
+            }, { session }).toArray();
+
+            // 3. Zählen, ob er genug hat
+            let totalAvailable = 0;
+            for (const item of userInv) {
+                totalAvailable += item.quantity;
+            }
+
+            if (totalAvailable < recipe.required) {
+                throw new Error(`Die Geister schweigen. Du hast nur ${totalAvailable}/${recipe.required} ${rarityToSacrifice}-Karten!`);
+            }
+
+            // 4. Karten abziehen (nimmt einfach von oben nach unten weg)
+            let remainingToBurn = recipe.required;
+            const bulkOps = [];
+
+            for (const item of userInv) {
+                if (remainingToBurn <= 0) break;
+
+                const burnAmount = Math.min(item.quantity, remainingToBurn);
+                remainingToBurn -= burnAmount;
+
+                bulkOps.push({
+                    updateOne: {
+                        filter: { _id: item._id },
+                        update: { $inc: { quantity: -burnAmount } }
+                    }
+                });
+            }
+
+            if (bulkOps.length > 0) {
+                await teachermonInvCollection.bulkWrite(bulkOps, { session });
+                // Leere Einträge direkt wegräumen
+                await teachermonInvCollection.deleteMany({ userId, quantity: { $lte: 0 } }, { session });
+            }
+
+            // 5. Höhere Karte beschwören
+            const nextTierCards = await teachermonCardsCollection.find({ rarity: recipe.nextRarity }, { session }).toArray();
+            if (nextTierCards.length === 0) throw new Error("Keine Karten in der Ziel-Stufe verfügbar!");
+
+            summonedCard = nextTierCards[Math.floor(Math.random() * nextTierCards.length)];
+
+            // Karte ins Inventar legen
+            await teachermonInvCollection.updateOne(
+                { userId, cardId: summonedCard.id },
+                { $inc: { quantity: 1 } },
+                { upsert: true, session }
+            );
+        });
+
+        res.json({
+            message: `🔥 Satanskreis erfolgreich! ${recipe.required}x ${rarityToSacrifice} geopfert.`,
+            summonedCard: summonedCard
+        });
+
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
 // J. Admin: Karte löschen & Spieler entschädigen
 app.delete('/api/teachermon/admin/cards/:id', isAuthenticated, isAdmin, async (req, res) => {
     const cardIdStr = req.params.id;
@@ -12004,7 +12104,17 @@ const LIMEA_CATALOG = [
     { id: 'f_garden_bench', name: 'Gartenbank', price: 120, w: 100, h: 40, icon: '🪑', bg: '#8B4513', layer: 'base' },
     { id: 'f_garden_table', name: 'Gartentisch', price: 150, w: 100, h: 100, icon: '⛱️', bg: '#556B2F', layer: 'base' },
     { id: 'f_deck_chair', name: 'Liegestuhl', price: 90, w: 60, h: 120, icon: '😎', bg: '#FFD700', layer: 'base' },
-    { id: 'f_hanging_chair', name: 'Hängesessel', price: 220, w: 60, h: 60, icon: '🪢', bg: '#F5DEB3', layer: 'base' }
+    { id: 'f_hanging_chair', name: 'Hängesessel', price: 220, w: 60, h: 60, icon: '🪢', bg: '#F5DEB3', layer: 'base' },
+	
+	// --- GAMING & HOBBY ---
+    { id: 'f_gaming_setup', name: 'High-End Gaming Setup', price: 2500, w: 120, h: 80, icon: '🎮', bg: '#0b0c10', layer: 'base' },
+    { id: 'f_pool_table', name: 'Billardtisch', price: 1800, w: 160, h: 100, icon: '🎱', bg: '#228B22', layer: 'base' },
+    { id: 'f_grand_piano', name: 'Konzertflügel', price: 8500, w: 140, h: 140, icon: '🎹', bg: '#000000', layer: 'base' },
+
+    // --- LUXUS & MEGA-FLEX ---
+    { id: 'f_whirlpool', name: 'Indoor Whirlpool', price: 4500, w: 160, h: 160, icon: '🫧', bg: '#00CED1', layer: 'base' },
+    { id: 'f_gold_statue', name: 'Limo Goldstatue', price: 50000, w: 60, h: 60, icon: '🗽', bg: '#FFD700', layer: 'decor' },
+    { id: 'f_money_pile', name: 'Geldstapel', price: 100000, w: 80, h: 80, icon: '💸', bg: '#85bb65', layer: 'decor' }
 ];
 
 // Editor-Daten abrufen (Lädt Haus, Möbel, Katalog und Geld auf einmal)
@@ -13888,6 +13998,14 @@ const LIMO_PLUS_SUBS = {
     'teachermon_pro': { 
         id: 'teachermon_pro', name: 'Teachermon Pro', costPerDay: 1000, icon: '🃏', 
         desc: 'Du erhältst jede Nacht automatisch ein Gratis-Pack in dein Inventar.' 
+    },
+	'landlord': { 
+        id: 'landlord', name: 'Immobilien-Hai', costPerDay: 8000, icon: '🏢', 
+        desc: 'Verringert die Kosten der Immobilien' 
+    },
+    'sugar_daddy': { 
+        id: 'sugar_daddy', name: 'Sugar-Pass', costPerDay: 25000, icon: '💋', 
+        desc: 'Erhöht die Chance auf Tinda-Matches massiv' 
     }
 };
 
