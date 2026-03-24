@@ -2208,7 +2208,7 @@ app.post('/api/purchase', isAuthenticated, async (req, res) => {
             }
         });
 		
-		await logActivity(req, "SHOP_PURCHASE", { total: totalOrderValue, items: cart.length });
+		await logActivity(req, "SHOP_PURCHASE", { total: transactionResult.totalOrderValue, items: cart.length });
 
     } catch (err) {
         console.error(`${LOG_PREFIX_SERVER} ❌ Kauf fehlgeschlagen (${req.session.username}):`, err.message);
