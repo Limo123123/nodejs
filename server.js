@@ -14068,10 +14068,6 @@ app.post('/api/subscriptions/toggle', isAuthenticated, async (req, res) => {
     }
 });
 
-// #########################################
-//               Kleinanzeigen
-// #########################################
-
 // Einfacher Wortfilter (Erweitere diese Liste nach Bedarf)
 const FORBIDDEN_WORDS = ['scheiße', 'hurensohn', 'penis', 'vagina']; 
 
@@ -14081,11 +14077,62 @@ function containsForbiddenWords(text) {
     return FORBIDDEN_WORDS.some(word => lowerText.includes(word));
 }
 
+// =========================================================
+// === 🛒 LIMO KLEINANZEIGEN API ===
+// =========================================================
+
+// 1. Alle aktiven Anzeigen abrufen (Marktplatz)
+app.get('/api/classifieds', async (req, res) => {
+    try {
+        const ads = await classifiedAdsCollection.find({ status: 'active' })
+            .sort({ createdAt: -1 })
+            .limit(100)
+            .toArray();
+        res.json({ ads });
+    } catch (err) {
+        res.status(500).json({ error: 'Fehler beim Laden der Anzeigen.' });
+    }
+});
+
+// 2. Eigene Anzeigen abrufen (Dashboard)
+app.get('/api/classifieds/me', isAuthenticated, async (req, res) => {
+    try {
+        const ads = await classifiedAdsCollection.find({ sellerId: new ObjectId(req.session.userId), status: { $ne: 'deleted' } })
+            .sort({ createdAt: -1 }).toArray();
+        res.json({ ads });
+    } catch (err) {
+        res.status(500).json({ error: 'Fehler beim Laden deiner Anzeigen.' });
+    }
+});
+
+// 3. Eigene Chats abrufen
+app.get('/api/classifieds/chats', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const chats = await limChatsCollection.find({ type: 'classified', participants: userId })
+            .sort({ updatedAt: -1 }).toArray();
+
+        const enrichedChats = [];
+        for (const chat of chats) {
+            const partnerId = chat.participants.find(p => !p.equals(userId));
+            const partner = await usersCollection.findOne({ _id: partnerId }, { projection: { username: 1 } });
+            
+            enrichedChats.push({
+                ...chat,
+                partnerName: partner ? partner.username : 'Unbekannt'
+            });
+        }
+        res.json({ chats: enrichedChats });
+    } catch (err) {
+        res.status(500).json({ error: 'Fehler beim Laden der Chats.' });
+    }
+});
+
+// 4. Anzeige aufgeben
 app.post('/api/classifieds', isAuthenticated, async (req, res) => {
     const { title, description, price, type, productId, quantity, imageUrl } = req.body;
     const sellerId = new ObjectId(req.session.userId);
 
-    // 1. Validierung & Wortfilter
     if (!title || !description || !price || price <= 0 || !['limazon', 'real'].includes(type)) {
         return res.status(400).json({ error: 'Ungültige Daten für Kleinanzeige.' });
     }
@@ -14096,7 +14143,6 @@ app.post('/api/classifieds', isAuthenticated, async (req, res) => {
     const session = client.startSession();
     try {
         await session.withTransaction(async () => {
-            // 2. Bei In-Game Items: Aus dem Inventar in den "Escrow" verschieben
             if (type === 'limazon') {
                 if (!productId || !quantity || quantity < 1) throw new Error('Produkt-ID und Menge fehlen.');
                 
@@ -14112,24 +14158,22 @@ app.post('/api/classifieds', isAuthenticated, async (req, res) => {
                 );
             }
 
-            // 3. Anzeige speichern
             const newAd = {
                 sellerId,
                 sellerUsername: req.session.username,
                 title: title.trim(),
                 description: description.trim(),
                 price: parseFloat(price),
-                type, // 'limazon' oder 'real'
+                type,
                 productId: type === 'limazon' ? productId : null,
                 quantity: type === 'limazon' ? parseInt(quantity) : 1,
-                imageUrl: imageUrl || null, // CDN-Bild-URL
-                status: 'active', // active, sold, deleted
+                imageUrl: imageUrl || null,
+                status: 'active',
                 createdAt: new Date()
             };
 
             await classifiedAdsCollection.insertOne(newAd, { session });
         });
-
         res.status(201).json({ message: 'Kleinanzeige erfolgreich online gestellt!' });
     } catch (err) {
         res.status(400).json({ error: err.message });
@@ -14138,30 +14182,58 @@ app.post('/api/classifieds', isAuthenticated, async (req, res) => {
     }
 });
 
-app.get('/api/classifieds', async (req, res) => {
+// 5. Chat löschen
+app.delete('/api/classifieds/chats/:id', isAuthenticated, async (req, res) => {
     try {
-        const ads = await classifiedAdsCollection.find({ status: 'active' })
-            .sort({ createdAt: -1 })
-            .limit(100)
-            .toArray();
-        res.json({ ads });
-    } catch (err) {
-        res.status(500).json({ error: 'Fehler beim Laden der Anzeigen.' });
+        const chatId = new ObjectId(req.params.id);
+        const userId = new ObjectId(req.session.userId);
+        
+        await limChatsCollection.deleteOne({ _id: chatId, participants: userId });
+        await limMessagesCollection.deleteMany({ chatId: chatId });
+        
+        res.json({ message: 'Chat erfolgreich gelöscht.' });
+    } catch (e) {
+        res.status(500).json({ error: 'Fehler beim Löschen des Chats.' });
     }
 });
 
-// --- KLEINANZEIGEN: Eigene Anzeigen laden ---
-app.get('/api/classifieds/me', isAuthenticated, async (req, res) => {
+// 6. Anzeige löschen (Muss unter Chat löschen stehen!)
+app.delete('/api/classifieds/:id', isAuthenticated, async (req, res) => {
+    const adId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+    
+    const session = client.startSession();
     try {
-        const ads = await classifiedAdsCollection.find({ sellerId: new ObjectId(req.session.userId), status: { $ne: 'deleted' } })
-            .sort({ createdAt: -1 }).toArray();
-        res.json({ ads });
+        await session.withTransaction(async () => {
+            const ad = await classifiedAdsCollection.findOne({ _id: adId }, { session });
+            if (!ad) throw new Error('Anzeige nicht gefunden.');
+
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (!ad.sellerId.equals(userId) && !user.isAdmin) {
+                throw new Error('Du darfst das nicht löschen.');
+            }
+
+            // Escrow zurückgeben
+            if (ad.status === 'active' && ad.type === 'limazon') {
+                await inventoriesCollection.updateOne(
+                    { userId: ad.sellerId, productId: ad.productId },
+                    { $inc: { quantityOwned: ad.quantity } },
+                    { upsert: true, session }
+                );
+            }
+
+            await classifiedAdsCollection.updateOne({ _id: adId }, { $set: { status: 'deleted' } }, { session });
+        });
+        
+        res.json({ message: 'Anzeige erfolgreich gelöscht.' });
     } catch (err) {
-        res.status(500).json({ error: 'Fehler beim Laden deiner Anzeigen.' });
+        res.status(400).json({ error: err.message });
+    } finally {
+        await session.endSession();
     }
 });
 
-// --- KLEINANZEIGEN: Reales Item als verkauft markieren ---
+// 7. Anzeige als verkauft markieren (für echte Items)
 app.patch('/api/classifieds/:id/sold', isAuthenticated, async (req, res) => {
     const adId = new ObjectId(req.params.id);
     const userId = new ObjectId(req.session.userId);
@@ -14182,73 +14254,7 @@ app.patch('/api/classifieds/:id/sold', isAuthenticated, async (req, res) => {
     }
 });
 
-// --- KLEINANZEIGEN: Chat starten (Update: Typ 'classified' nutzen) ---
-app.post('/api/classifieds/:id/chat', isAuthenticated, async (req, res) => {
-    const adId = new ObjectId(req.params.id);
-    const currentUserId = new ObjectId(req.session.userId);
-
-    try {
-        const ad = await classifiedAdsCollection.findOne({ _id: adId });
-        if (!ad) return res.status(404).json({ error: 'Anzeige nicht gefunden.' });
-        if (ad.sellerId.equals(currentUserId)) return res.status(400).json({ error: 'Das ist deine eigene Anzeige.' });
-
-        const participants = [currentUserId, ad.sellerId].sort();
-
-        // Prüfen, ob für genau diese Anzeige schon ein Chat existiert
-        let chat = await limChatsCollection.findOne({
-            type: 'classified',
-            classifiedAdId: ad._id,
-            participants: { $all: participants, $size: 2 }
-        });
-
-        if (!chat) {
-            const now = new Date();
-            const newChat = {
-                type: 'classified',
-                classifiedAdId: ad._id,
-                adTitle: ad.title,
-                participants: participants,
-                createdAt: now,
-                updatedAt: now,
-                lastMessagePreview: `Neuer Chat zu: ${ad.title}`,
-                lastMessageSenderId: null,
-                lastMessageTimestamp: now
-            };
-            const result = await limChatsCollection.insertOne(newChat);
-            chat = { _id: result.insertedId, ...newChat };
-        }
-
-        res.json({ message: 'Chat bereit', chat });
-    } catch (err) {
-        res.status(500).json({ error: 'Fehler beim Starten des Chats.' });
-    }
-});
-
-// --- KLEINANZEIGEN: Eigene Chats abrufen ---
-app.get('/api/classifieds/chats', isAuthenticated, async (req, res) => {
-    const userId = new ObjectId(req.session.userId);
-    try {
-        // Lade alle Chats vom Typ 'classified', an denen ich teilnehme
-        const chats = await limChatsCollection.find({ type: 'classified', participants: userId })
-            .sort({ updatedAt: -1 }).toArray();
-
-        // Partner-Namen auflösen
-        const enrichedChats = [];
-        for (const chat of chats) {
-            const partnerId = chat.participants.find(p => !p.equals(userId));
-            const partner = await usersCollection.findOne({ _id: partnerId }, { projection: { username: 1 } });
-            
-            enrichedChats.push({
-                ...chat,
-                partnerName: partner ? partner.username : 'Unbekannt'
-            });
-        }
-        res.json({ chats: enrichedChats });
-    } catch (err) {
-        res.status(500).json({ error: 'Fehler beim Laden der Chats.' });
-    }
-});
-
+// 8. Digitales Item direkt kaufen (Treuhand)
 app.post('/api/classifieds/:id/buy', isAuthenticated, async (req, res) => {
     const buyerId = new ObjectId(req.session.userId);
     const adId = new ObjectId(req.params.id);
@@ -14263,11 +14269,11 @@ app.post('/api/classifieds/:id/buy', isAuthenticated, async (req, res) => {
             const buyer = await usersCollection.findOne({ _id: buyerId }, { session });
             if (buyer.balance < ad.price) throw new Error('Zu wenig Limazon-Dollars auf dem Konto.');
 
-            // 1. Geld transferieren
+            // Geld transferieren
             await usersCollection.updateOne({ _id: buyerId }, { $inc: { balance: -ad.price } }, { session });
             await usersCollection.updateOne({ _id: ad.sellerId }, { $inc: { balance: ad.price } }, { session });
 
-            // 2. Bei Limazon-Items: Dem Käufer ins Inventar legen
+            // Item transferieren
             if (ad.type === 'limazon') {
                 await inventoriesCollection.updateOne(
                     { userId: buyerId, productId: ad.productId },
@@ -14276,7 +14282,6 @@ app.post('/api/classifieds/:id/buy', isAuthenticated, async (req, res) => {
                 );
             }
 
-            // 3. Anzeige als verkauft markieren
             await classifiedAdsCollection.updateOne(
                 { _id: adId },
                 { $set: { status: 'sold', buyerId: buyerId, soldAt: new Date() } },
@@ -14292,7 +14297,7 @@ app.post('/api/classifieds/:id/buy', isAuthenticated, async (req, res) => {
     }
 });
 
-// --- KLEINANZEIGEN: Chat starten ---
+// 9. Chat starten (MIT FIX: sellerId wird jetzt sicher gespeichert!)
 app.post('/api/classifieds/:id/chat', isAuthenticated, async (req, res) => {
     const adId = new ObjectId(req.params.id);
     const currentUserId = new ObjectId(req.session.userId);
@@ -14304,7 +14309,6 @@ app.post('/api/classifieds/:id/chat', isAuthenticated, async (req, res) => {
 
         const participants = [currentUserId, ad.sellerId].sort();
 
-        // Prüfen, ob Chat schon existiert
         let chat = await limChatsCollection.findOne({
             type: 'classified',
             classifiedAdId: ad._id,
@@ -14313,171 +14317,7 @@ app.post('/api/classifieds/:id/chat', isAuthenticated, async (req, res) => {
 
         if (!chat) {
             const now = new Date();
-            const newChat = {
-                type: 'classified',
-                classifiedAdId: ad._id,
-                adTitle: ad.title,
-                sellerId: ad.sellerId,
-                participants: participants,
-                createdAt: now,
-                updatedAt: now,
-                lastMessagePreview: `Neuer Chat zu: ${ad.title}`,
-                lastMessageSenderId: null,
-                lastMessageTimestamp: now
-            };
-            const result = await limChatsCollection.insertOne(newChat);
-            chat = { _id: result.insertedId, ...newChat };
-        }
-
-        res.json({ message: 'Chat bereit', chat });
-    } catch (err) {
-        res.status(500).json({ error: 'Fehler beim Starten des Chats.' });
-    }
-});
-
-// --- KLEINANZEIGEN: Ein Angebot in den Chat senden (Nur Verkäufer) ---
-app.post('/api/classifieds/chats/:chatId/offer', isAuthenticated, async (req, res) => {
-    const { amount } = req.body;
-    const chatId = new ObjectId(req.params.chatId);
-    const userId = new ObjectId(req.session.userId);
-    const offerAmount = parseFloat(amount);
-
-    if (!offerAmount || offerAmount <= 0) return res.status(400).json({ error: 'Ungültiger Betrag.' });
-
-    try {
-        const chat = await limChatsCollection.findOne({ _id: chatId, type: 'classified' });
-        if (!chat) return res.status(404).json({ error: 'Chat nicht gefunden.' });
-        if (!chat.sellerId.equals(userId)) return res.status(403).json({ error: 'Nur der Verkäufer kann ein Angebot machen.' });
-
-        // Angebots-Nachricht erstellen
-        const offerMsg = {
-            chatId: chatId,
-            senderId: userId,
-            senderUsername: req.session.username,
-            content: `Ich biete dir den Artikel für $${offerAmount.toFixed(2)} an.`,
-            timestamp: new Date(),
-            isOffer: true,
-            offerAmount: offerAmount,
-            offerStatus: 'pending' // pending, accepted, declined
-        };
-
-        await limMessagesCollection.insertOne(offerMsg);
-        await limChatsCollection.updateOne(
-            { _id: chatId },
-            { $set: { lastMessagePreview: `Angebot gesendet: $${offerAmount}`, updatedAt: new Date() } }
-        );
-
-        res.json({ message: 'Angebot gesendet!', messageData: offerMsg });
-    } catch (err) {
-        res.status(500).json({ error: 'Fehler beim Senden des Angebots.' });
-    }
-});
-
-// --- KLEINANZEIGEN: Angebot annehmen oder ablehnen (Nur Käufer) ---
-app.post('/api/classifieds/offers/:messageId/respond', isAuthenticated, async (req, res) => {
-    const { action } = req.body; // 'accept' oder 'decline'
-    const messageId = new ObjectId(req.params.messageId);
-    const buyerId = new ObjectId(req.session.userId);
-
-    const session = client.startSession();
-    try {
-        await session.withTransaction(async () => {
-            const offerMsg = await limMessagesCollection.findOne({ _id: messageId, isOffer: true }, { session });
-            if (!offerMsg || offerMsg.offerStatus !== 'pending') throw new Error('Angebot nicht mehr gültig.');
-            if (offerMsg.senderId.equals(buyerId)) throw new Error('Du kannst dein eigenes Angebot nicht annehmen.');
-
-            const chat = await limChatsCollection.findOne({ _id: offerMsg.chatId }, { session });
-            const ad = await classifiedAdsCollection.findOne({ _id: chat.classifiedAdId }, { session });
-
-            if (action === 'decline') {
-                await limMessagesCollection.updateOne({ _id: messageId }, { $set: { offerStatus: 'declined', content: `Angebot über $${offerMsg.offerAmount} abgelehnt.` } }, { session });
-                return; // Beendet die Transaktion hier erfolgreich
-            }
-
-            if (action === 'accept') {
-                if (ad.status !== 'active') throw new Error('Der Artikel ist bereits verkauft oder gelöscht.');
-
-                const buyer = await usersCollection.findOne({ _id: buyerId }, { session });
-                if (buyer.balance < offerMsg.offerAmount) throw new Error('Du hast nicht genug Geld auf dem Konto!');
-
-                // Geld transferieren
-                await usersCollection.updateOne({ _id: buyerId }, { $inc: { balance: -offerMsg.offerAmount } }, { session });
-                await usersCollection.updateOne({ _id: offerMsg.senderId }, { $inc: { balance: offerMsg.offerAmount } }, { session });
-
-                // Anzeige auf verkauft setzen
-                await classifiedAdsCollection.updateOne(
-                    { _id: ad._id },
-                    { $set: { status: 'sold', buyerId: buyerId, soldPrice: offerMsg.offerAmount, soldAt: new Date() } },
-                    { session }
-                );
-
-                // Angebots-Nachricht updaten
-                await limMessagesCollection.updateOne(
-                    { _id: messageId },
-                    { $set: { offerStatus: 'accepted', content: `Angebot über $${offerMsg.offerAmount} AKZEPTIERT! Artikel bezahlt.` } },
-                    { session }
-                );
-            }
-        });
-
-        res.json({ message: action === 'accept' ? 'Gekauft und bezahlt!' : 'Angebot abgelehnt.' });
-    } catch (err) {
-        res.status(400).json({ error: err.message });
-    } finally {
-        await session.endSession();
-    }
-});
-
-app.delete('/api/classifieds/chats/:id', isAuthenticated, async (req, res) => {
-    try {
-        const chatId = new ObjectId(req.params.id);
-        const userId = new ObjectId(req.session.userId);
-        
-        // Chat und Nachrichten löschen
-        await limChatsCollection.deleteOne({ _id: chatId, participants: userId });
-        await limMessagesCollection.deleteMany({ chatId: chatId });
-        
-        res.json({ message: 'Chat erfolgreich gelöscht.' });
-    } catch (e) {
-        res.status(500).json({ error: 'Fehler beim Löschen des Chats.' });
-    }
-});
-
-// --- KLEINANZEIGEN: Anzeige löschen (für Verkäufer & Admins) ---
-app.delete('/api/classifieds/:id', isAuthenticated, async (req, res) => {
-    const adId = new ObjectId(req.params.id);
-    const userId = new ObjectId(req.session.userId);
-    
-    const session = client.startSession();
-    try {
-        await session.withTransaction(async () => {
-            const ad = await classifiedAdsCollection.findOne({ _id: adId }, { session });
-            if (!ad) throw new Error('Anzeige nicht gefunden.');
-
-            const user = await usersCollection.findOne({ _id: userId }, { session });
-            if (!ad.sellerId.equals(userId) && !user.isAdmin) {
-                throw new Error('Du darfst das nicht löschen.');
-            }
-
-            // Falls es ein Limazon-Item war, Inventar zurückgeben
-            if (ad.status === 'active' && ad.type === 'limazon') {
-                await inventoriesCollection.updateOne(
-                    { userId: ad.sellerId, productId: ad.productId },
-                    { $inc: { quantityOwned: ad.quantity } },
-                    { upsert: true, session }
-                );
-            }
-
-            await classifiedAdsCollection.updateOne({ _id: adId }, { $set: { status: 'deleted' } }, { session });
-        });
-        
-        res.json({ message: 'Anzeige erfolgreich gelöscht.' });
-    } catch (err) {
-        res.status(400).json({ error: err.message });
-    } finally {
-        await session.endSession();
-    }
-});
+            const new
 
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
