@@ -14312,14 +14312,17 @@ app.post('/api/classifieds/:id/chat', isAuthenticated, async (req, res) => {
         if (!chat) {
             const now = new Date();
             const newChat = {
-                type: 'personal',
-                participants: participants,
-                createdAt: now,
-                updatedAt: now,
-                lastMessagePreview: `Interesse an: ${ad.title}`,
-                lastMessageSenderId: null,
-                lastMessageTimestamp: now
-            };
+    			type: 'classified',
+    			classifiedAdId: ad._id,
+    			adTitle: ad.title,
+    			sellerId: ad.sellerId, // <--- DAS IST WICHTIG FÜR DIE ANGEBOTE
+    			participants: participants,
+    			createdAt: now,
+    			updatedAt: now,
+    			lastMessagePreview: `Neuer Chat zu: ${ad.title}`,
+    			lastMessageSenderId: null,
+    			lastMessageTimestamp: now
+			};
             const result = await limChatsCollection.insertOne(newChat);
             chat = { _id: result.insertedId, ...newChat };
         }
@@ -14352,6 +14355,99 @@ app.delete('/api/admin/classifieds/:id', isAuthenticated, isAdmin, async (req, r
         });
         
         res.json({ message: 'Anzeige gelöscht und ggf. Items erstattet.' });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// --- KLEINANZEIGEN: Ein Angebot in den Chat senden (Nur Verkäufer) ---
+app.post('/api/classifieds/chats/:chatId/offer', isAuthenticated, async (req, res) => {
+    const { amount } = req.body;
+    const chatId = new ObjectId(req.params.chatId);
+    const userId = new ObjectId(req.session.userId);
+    const offerAmount = parseFloat(amount);
+
+    if (!offerAmount || offerAmount <= 0) return res.status(400).json({ error: 'Ungültiger Betrag.' });
+
+    try {
+        const chat = await limChatsCollection.findOne({ _id: chatId, type: 'classified' });
+        if (!chat) return res.status(404).json({ error: 'Chat nicht gefunden.' });
+        if (!chat.sellerId.equals(userId)) return res.status(403).json({ error: 'Nur der Verkäufer kann ein Angebot machen.' });
+
+        // Angebots-Nachricht erstellen
+        const offerMsg = {
+            chatId: chatId,
+            senderId: userId,
+            senderUsername: req.session.username,
+            content: `Ich biete dir den Artikel für $${offerAmount.toFixed(2)} an.`,
+            timestamp: new Date(),
+            isOffer: true,
+            offerAmount: offerAmount,
+            offerStatus: 'pending' // pending, accepted, declined
+        };
+
+        await limMessagesCollection.insertOne(offerMsg);
+        await limChatsCollection.updateOne(
+            { _id: chatId },
+            { $set: { lastMessagePreview: `Angebot gesendet: $${offerAmount}`, updatedAt: new Date() } }
+        );
+
+        res.json({ message: 'Angebot gesendet!', messageData: offerMsg });
+    } catch (err) {
+        res.status(500).json({ error: 'Fehler beim Senden des Angebots.' });
+    }
+});
+
+// --- KLEINANZEIGEN: Angebot annehmen oder ablehnen (Nur Käufer) ---
+app.post('/api/classifieds/offers/:messageId/respond', isAuthenticated, async (req, res) => {
+    const { action } = req.body; // 'accept' oder 'decline'
+    const messageId = new ObjectId(req.params.messageId);
+    const buyerId = new ObjectId(req.session.userId);
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const offerMsg = await limMessagesCollection.findOne({ _id: messageId, isOffer: true }, { session });
+            if (!offerMsg || offerMsg.offerStatus !== 'pending') throw new Error('Angebot nicht mehr gültig.');
+            if (offerMsg.senderId.equals(buyerId)) throw new Error('Du kannst dein eigenes Angebot nicht annehmen.');
+
+            const chat = await limChatsCollection.findOne({ _id: offerMsg.chatId }, { session });
+            const ad = await classifiedAdsCollection.findOne({ _id: chat.classifiedAdId }, { session });
+
+            if (action === 'decline') {
+                await limMessagesCollection.updateOne({ _id: messageId }, { $set: { offerStatus: 'declined', content: `Angebot über $${offerMsg.offerAmount} abgelehnt.` } }, { session });
+                return; // Beendet die Transaktion hier erfolgreich
+            }
+
+            if (action === 'accept') {
+                if (ad.status !== 'active') throw new Error('Der Artikel ist bereits verkauft oder gelöscht.');
+
+                const buyer = await usersCollection.findOne({ _id: buyerId }, { session });
+                if (buyer.balance < offerMsg.offerAmount) throw new Error('Du hast nicht genug Geld auf dem Konto!');
+
+                // Geld transferieren
+                await usersCollection.updateOne({ _id: buyerId }, { $inc: { balance: -offerMsg.offerAmount } }, { session });
+                await usersCollection.updateOne({ _id: offerMsg.senderId }, { $inc: { balance: offerMsg.offerAmount } }, { session });
+
+                // Anzeige auf verkauft setzen
+                await classifiedAdsCollection.updateOne(
+                    { _id: ad._id },
+                    { $set: { status: 'sold', buyerId: buyerId, soldPrice: offerMsg.offerAmount, soldAt: new Date() } },
+                    { session }
+                );
+
+                // Angebots-Nachricht updaten
+                await limMessagesCollection.updateOne(
+                    { _id: messageId },
+                    { $set: { offerStatus: 'accepted', content: `Angebot über $${offerMsg.offerAmount} AKZEPTIERT! Artikel bezahlt.` } },
+                    { session }
+                );
+            }
+        });
+
+        res.json({ message: action === 'accept' ? 'Gekauft und bezahlt!' : 'Angebot abgelehnt.' });
     } catch (err) {
         res.status(400).json({ error: err.message });
     } finally {
