@@ -14153,7 +14153,7 @@ app.get('/api/classifieds', async (req, res) => {
 // --- KLEINANZEIGEN: Eigene Anzeigen laden ---
 app.get('/api/classifieds/me', isAuthenticated, async (req, res) => {
     try {
-        const ads = await classifiedAdsCollection.find({ sellerId: new ObjectId(req.session.userId) })
+        const ads = await classifiedAdsCollection.find({ sellerId: new ObjectId(req.session.userId), status: { $ne: 'deleted' } })
             .sort({ createdAt: -1 }).toArray();
         res.json({ ads });
     } catch (err) {
@@ -14452,6 +14452,21 @@ app.post('/api/classifieds/offers/:messageId/respond', isAuthenticated, async (r
         res.status(400).json({ error: err.message });
     } finally {
         await session.endSession();
+    }
+});
+
+app.delete('/api/classifieds/chats/:id', isAuthenticated, async (req, res) => {
+    try {
+        const chatId = new ObjectId(req.params.id);
+        const userId = new ObjectId(req.session.userId);
+        
+        // Chat und Nachrichten löschen
+        await limChatsCollection.deleteOne({ _id: chatId, participants: userId });
+        await limMessagesCollection.deleteMany({ chatId: chatId });
+        
+        res.json({ message: 'Chat erfolgreich gelöscht.' });
+    } catch (e) {
+        res.status(500).json({ error: 'Fehler beim Löschen des Chats.' });
     }
 });
 
