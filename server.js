@@ -175,6 +175,7 @@ let proposalsCollection;
 let deliveriesCollection;
 let reviewsCollection;
 let requestsCollection;
+let classifiedAdsCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -1135,7 +1136,7 @@ MongoClient.connect(mongoUri)
 		deliveriesCollection = db.collection('deliveries');
 		reviewsCollection = db.collection('reviews');
 		requestsCollection = db.collection('userRequests');
-
+	 	classifiedAdsCollection = db.collection('classifiedAds');
         authCodesCollection = db.collection(authCodesCollectionName);
 
         bankTransactionsCollection = db.collection('bankTransactions');
@@ -1244,6 +1245,8 @@ MongoClient.connect(mongoUri)
             console.log(`${LOG_PREFIX_SERVER} ♻️ Auto-Delete (TTL) Indizes geprüft.`);
 
             await seedTeachermonCards();
+			await classifiedAdsCollection.createIndex({ status: 1, createdAt: -1 });
+			await classifiedAdsCollection.createIndex({ sellerId: 1 });
 
             console.log(`${LOG_PREFIX_SERVER} ✅ Alle Indizes erfolgreich geprüft/erstellt.`);
         } catch (indexErr) {
@@ -14064,6 +14067,200 @@ app.post('/api/subscriptions/toggle', isAuthenticated, async (req, res) => {
         res.status(500).json({ error: "Abo-Fehler." });
     }
 });
+
+// #########################################
+//               Kleinanzeigen
+// #########################################
+
+// Einfacher Wortfilter (Erweitere diese Liste nach Bedarf)
+const FORBIDDEN_WORDS = ['scheiße', 'hurensohn', 'penis', 'vagina']; 
+
+function containsForbiddenWords(text) {
+    if (!text) return false;
+    const lowerText = text.toLowerCase();
+    return FORBIDDEN_WORDS.some(word => lowerText.includes(word));
+}
+
+app.post('/api/classifieds', isAuthenticated, async (req, res) => {
+    const { title, description, price, type, productId, quantity, imageUrl } = req.body;
+    const sellerId = new ObjectId(req.session.userId);
+
+    // 1. Validierung & Wortfilter
+    if (!title || !description || !price || price <= 0 || !['limazon', 'real'].includes(type)) {
+        return res.status(400).json({ error: 'Ungültige Daten für Kleinanzeige.' });
+    }
+    if (containsForbiddenWords(title) || containsForbiddenWords(description)) {
+        return res.status(400).json({ error: 'Bitte achte auf deine Wortwahl (Wortfilter aktiv).' });
+    }
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            // 2. Bei In-Game Items: Aus dem Inventar in den "Escrow" verschieben
+            if (type === 'limazon') {
+                if (!productId || !quantity || quantity < 1) throw new Error('Produkt-ID und Menge fehlen.');
+                
+                const inventoryItem = await inventoriesCollection.findOne({ userId: sellerId, productId: productId }, { session });
+                if (!inventoryItem || inventoryItem.quantityOwned < quantity) {
+                    throw new Error('Du besitzt nicht genug von diesem Item.');
+                }
+
+                await inventoriesCollection.updateOne(
+                    { userId: sellerId, productId: productId },
+                    { $inc: { quantityOwned: -quantity } },
+                    { session }
+                );
+            }
+
+            // 3. Anzeige speichern
+            const newAd = {
+                sellerId,
+                sellerUsername: req.session.username,
+                title: title.trim(),
+                description: description.trim(),
+                price: parseFloat(price),
+                type, // 'limazon' oder 'real'
+                productId: type === 'limazon' ? productId : null,
+                quantity: type === 'limazon' ? parseInt(quantity) : 1,
+                imageUrl: imageUrl || null, // CDN-Bild-URL
+                status: 'active', // active, sold, deleted
+                createdAt: new Date()
+            };
+
+            await classifiedAdsCollection.insertOne(newAd, { session });
+        });
+
+        res.status(201).json({ message: 'Kleinanzeige erfolgreich online gestellt!' });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+app.get('/api/classifieds', async (req, res) => {
+    try {
+        const ads = await classifiedAdsCollection.find({ status: 'active' })
+            .sort({ createdAt: -1 })
+            .limit(100)
+            .toArray();
+        res.json({ ads });
+    } catch (err) {
+        res.status(500).json({ error: 'Fehler beim Laden der Anzeigen.' });
+    }
+});
+
+app.post('/api/classifieds/:id/buy', isAuthenticated, async (req, res) => {
+    const buyerId = new ObjectId(req.session.userId);
+    const adId = new ObjectId(req.params.id);
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const ad = await classifiedAdsCollection.findOne({ _id: adId, status: 'active' }, { session });
+            if (!ad) throw new Error('Anzeige nicht gefunden oder bereits verkauft.');
+            if (ad.sellerId.equals(buyerId)) throw new Error('Du kannst nicht bei dir selbst kaufen.');
+
+            const buyer = await usersCollection.findOne({ _id: buyerId }, { session });
+            if (buyer.balance < ad.price) throw new Error('Zu wenig Limazon-Dollars auf dem Konto.');
+
+            // 1. Geld transferieren
+            await usersCollection.updateOne({ _id: buyerId }, { $inc: { balance: -ad.price } }, { session });
+            await usersCollection.updateOne({ _id: ad.sellerId }, { $inc: { balance: ad.price } }, { session });
+
+            // 2. Bei Limazon-Items: Dem Käufer ins Inventar legen
+            if (ad.type === 'limazon') {
+                await inventoriesCollection.updateOne(
+                    { userId: buyerId, productId: ad.productId },
+                    { $inc: { quantityOwned: ad.quantity } },
+                    { upsert: true, session }
+                );
+            }
+
+            // 3. Anzeige als verkauft markieren
+            await classifiedAdsCollection.updateOne(
+                { _id: adId },
+                { $set: { status: 'sold', buyerId: buyerId, soldAt: new Date() } },
+                { session }
+            );
+        });
+
+        res.json({ message: 'Erfolgreich gekauft!' });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+app.post('/api/classifieds/:id/chat', isAuthenticated, async (req, res) => {
+    const adId = new ObjectId(req.params.id);
+    const currentUserId = new ObjectId(req.session.userId);
+
+    try {
+        const ad = await classifiedAdsCollection.findOne({ _id: adId });
+        if (!ad) return res.status(404).json({ error: 'Anzeige nicht gefunden.' });
+        if (ad.sellerId.equals(currentUserId)) return res.status(400).json({ error: 'Du kannst nicht mit dir selbst chatten.' });
+
+        const participants = [currentUserId, ad.sellerId].sort();
+
+        // Prüfen, ob Chat schon existiert
+        let chat = await limChatsCollection.findOne({
+            type: 'personal',
+            participants: { $all: participants, $size: 2 }
+        });
+
+        if (!chat) {
+            const now = new Date();
+            const newChat = {
+                type: 'personal',
+                participants: participants,
+                createdAt: now,
+                updatedAt: now,
+                lastMessagePreview: `Interesse an: ${ad.title}`,
+                lastMessageSenderId: null,
+                lastMessageTimestamp: now
+            };
+            const result = await limChatsCollection.insertOne(newChat);
+            chat = { _id: result.insertedId, ...newChat };
+        }
+
+        res.json({ message: 'Chat bereit', chat });
+    } catch (err) {
+        res.status(500).json({ error: 'Fehler beim Starten des Chats.' });
+    }
+});
+
+app.delete('/api/admin/classifieds/:id', isAuthenticated, isAdmin, async (req, res) => {
+    const adId = new ObjectId(req.params.id);
+    
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const ad = await classifiedAdsCollection.findOne({ _id: adId }, { session });
+            if (!ad) throw new Error('Anzeige nicht gefunden.');
+
+            // Item an Verkäufer zurückgeben, falls es noch aktiv war und ein Limazon-Item ist
+            if (ad.status === 'active' && ad.type === 'limazon') {
+                await inventoriesCollection.updateOne(
+                    { userId: ad.sellerId, productId: ad.productId },
+                    { $inc: { quantityOwned: ad.quantity } },
+                    { upsert: true, session }
+                );
+            }
+
+            await classifiedAdsCollection.updateOne({ _id: adId }, { $set: { status: 'deleted' } }, { session });
+        });
+        
+        res.json({ message: 'Anzeige gelöscht und ggf. Items erstattet.' });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+
 
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
