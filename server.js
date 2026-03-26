@@ -14335,35 +14335,6 @@ app.post('/api/classifieds/:id/chat', isAuthenticated, async (req, res) => {
     }
 });
 
-app.delete('/api/admin/classifieds/:id', isAuthenticated, isAdmin, async (req, res) => {
-    const adId = new ObjectId(req.params.id);
-    
-    const session = client.startSession();
-    try {
-        await session.withTransaction(async () => {
-            const ad = await classifiedAdsCollection.findOne({ _id: adId }, { session });
-            if (!ad) throw new Error('Anzeige nicht gefunden.');
-
-            // Item an Verkäufer zurückgeben, falls es noch aktiv war und ein Limazon-Item ist
-            if (ad.status === 'active' && ad.type === 'limazon') {
-                await inventoriesCollection.updateOne(
-                    { userId: ad.sellerId, productId: ad.productId },
-                    { $inc: { quantityOwned: ad.quantity } },
-                    { upsert: true, session }
-                );
-            }
-
-            await classifiedAdsCollection.updateOne({ _id: adId }, { $set: { status: 'deleted' } }, { session });
-        });
-        
-        res.json({ message: 'Anzeige gelöscht und ggf. Items erstattet.' });
-    } catch (err) {
-        res.status(400).json({ error: err.message });
-    } finally {
-        await session.endSession();
-    }
-});
-
 // --- KLEINANZEIGEN: Ein Angebot in den Chat senden (Nur Verkäufer) ---
 app.post('/api/classifieds/chats/:chatId/offer', isAuthenticated, async (req, res) => {
     const { amount } = req.body;
@@ -14469,6 +14440,42 @@ app.delete('/api/classifieds/chats/:id', isAuthenticated, async (req, res) => {
         res.json({ message: 'Chat erfolgreich gelöscht.' });
     } catch (e) {
         res.status(500).json({ error: 'Fehler beim Löschen des Chats.' });
+    }
+});
+
+// --- KLEINANZEIGEN: Anzeige löschen (für Verkäufer & Admins) ---
+app.delete('/api/classifieds/:id', isAuthenticated, async (req, res) => {
+    const adId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+    
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const ad = await classifiedAdsCollection.findOne({ _id: adId }, { session });
+            if (!ad) throw new Error('Anzeige nicht gefunden.');
+
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (!ad.sellerId.equals(userId) && !user.isAdmin) {
+                throw new Error('Du darfst das nicht löschen.');
+            }
+
+            // Falls es ein Limazon-Item war, Inventar zurückgeben
+            if (ad.status === 'active' && ad.type === 'limazon') {
+                await inventoriesCollection.updateOne(
+                    { userId: ad.sellerId, productId: ad.productId },
+                    { $inc: { quantityOwned: ad.quantity } },
+                    { upsert: true, session }
+                );
+            }
+
+            await classifiedAdsCollection.updateOne({ _id: adId }, { $set: { status: 'deleted' } }, { session });
+        });
+        
+        res.json({ message: 'Anzeige erfolgreich gelöscht.' });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    } finally {
+        await session.endSession();
     }
 });
 
