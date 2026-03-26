@@ -14150,6 +14150,105 @@ app.get('/api/classifieds', async (req, res) => {
     }
 });
 
+// --- KLEINANZEIGEN: Eigene Anzeigen laden ---
+app.get('/api/classifieds/me', isAuthenticated, async (req, res) => {
+    try {
+        const ads = await classifiedAdsCollection.find({ sellerId: new ObjectId(req.session.userId) })
+            .sort({ createdAt: -1 }).toArray();
+        res.json({ ads });
+    } catch (err) {
+        res.status(500).json({ error: 'Fehler beim Laden deiner Anzeigen.' });
+    }
+});
+
+// --- KLEINANZEIGEN: Reales Item als verkauft markieren ---
+app.patch('/api/classifieds/:id/sold', isAuthenticated, async (req, res) => {
+    const adId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const ad = await classifiedAdsCollection.findOne({ _id: adId });
+        if (!ad) return res.status(404).json({ error: 'Anzeige nicht gefunden.' });
+        if (!ad.sellerId.equals(userId)) return res.status(403).json({ error: 'Nur der Verkäufer kann das tun.' });
+        if (ad.type === 'limazon') return res.status(400).json({ error: 'Digitale Items werden automatisch verkauft.' });
+
+        await classifiedAdsCollection.updateOne(
+            { _id: adId },
+            { $set: { status: 'sold', soldAt: new Date() } }
+        );
+        res.json({ message: 'Anzeige als verkauft markiert!' });
+    } catch (err) {
+        res.status(500).json({ error: 'Serverfehler.' });
+    }
+});
+
+// --- KLEINANZEIGEN: Chat starten (Update: Typ 'classified' nutzen) ---
+app.post('/api/classifieds/:id/chat', isAuthenticated, async (req, res) => {
+    const adId = new ObjectId(req.params.id);
+    const currentUserId = new ObjectId(req.session.userId);
+
+    try {
+        const ad = await classifiedAdsCollection.findOne({ _id: adId });
+        if (!ad) return res.status(404).json({ error: 'Anzeige nicht gefunden.' });
+        if (ad.sellerId.equals(currentUserId)) return res.status(400).json({ error: 'Das ist deine eigene Anzeige.' });
+
+        const participants = [currentUserId, ad.sellerId].sort();
+
+        // Prüfen, ob für genau diese Anzeige schon ein Chat existiert
+        let chat = await limChatsCollection.findOne({
+            type: 'classified',
+            classifiedAdId: ad._id,
+            participants: { $all: participants, $size: 2 }
+        });
+
+        if (!chat) {
+            const now = new Date();
+            const newChat = {
+                type: 'classified',
+                classifiedAdId: ad._id,
+                adTitle: ad.title,
+                participants: participants,
+                createdAt: now,
+                updatedAt: now,
+                lastMessagePreview: `Neuer Chat zu: ${ad.title}`,
+                lastMessageSenderId: null,
+                lastMessageTimestamp: now
+            };
+            const result = await limChatsCollection.insertOne(newChat);
+            chat = { _id: result.insertedId, ...newChat };
+        }
+
+        res.json({ message: 'Chat bereit', chat });
+    } catch (err) {
+        res.status(500).json({ error: 'Fehler beim Starten des Chats.' });
+    }
+});
+
+// --- KLEINANZEIGEN: Eigene Chats abrufen ---
+app.get('/api/classifieds/chats', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        // Lade alle Chats vom Typ 'classified', an denen ich teilnehme
+        const chats = await limChatsCollection.find({ type: 'classified', participants: userId })
+            .sort({ updatedAt: -1 }).toArray();
+
+        // Partner-Namen auflösen
+        const enrichedChats = [];
+        for (const chat of chats) {
+            const partnerId = chat.participants.find(p => !p.equals(userId));
+            const partner = await usersCollection.findOne({ _id: partnerId }, { projection: { username: 1 } });
+            
+            enrichedChats.push({
+                ...chat,
+                partnerName: partner ? partner.username : 'Unbekannt'
+            });
+        }
+        res.json({ chats: enrichedChats });
+    } catch (err) {
+        res.status(500).json({ error: 'Fehler beim Laden der Chats.' });
+    }
+});
+
 app.post('/api/classifieds/:id/buy', isAuthenticated, async (req, res) => {
     const buyerId = new ObjectId(req.session.userId);
     const adId = new ObjectId(req.params.id);
@@ -14259,8 +14358,6 @@ app.delete('/api/admin/classifieds/:id', isAuthenticated, isAdmin, async (req, r
         await session.endSession();
     }
 });
-
-
 
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
