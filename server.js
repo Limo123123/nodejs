@@ -14292,6 +14292,7 @@ app.post('/api/classifieds/:id/buy', isAuthenticated, async (req, res) => {
     }
 });
 
+// --- KLEINANZEIGEN: Chat starten ---
 app.post('/api/classifieds/:id/chat', isAuthenticated, async (req, res) => {
     const adId = new ObjectId(req.params.id);
     const currentUserId = new ObjectId(req.session.userId);
@@ -14299,30 +14300,31 @@ app.post('/api/classifieds/:id/chat', isAuthenticated, async (req, res) => {
     try {
         const ad = await classifiedAdsCollection.findOne({ _id: adId });
         if (!ad) return res.status(404).json({ error: 'Anzeige nicht gefunden.' });
-        if (ad.sellerId.equals(currentUserId)) return res.status(400).json({ error: 'Du kannst nicht mit dir selbst chatten.' });
+        if (ad.sellerId.equals(currentUserId)) return res.status(400).json({ error: 'Das ist deine eigene Anzeige.' });
 
         const participants = [currentUserId, ad.sellerId].sort();
 
         // Prüfen, ob Chat schon existiert
         let chat = await limChatsCollection.findOne({
-            type: 'personal',
+            type: 'classified',
+            classifiedAdId: ad._id,
             participants: { $all: participants, $size: 2 }
         });
 
         if (!chat) {
             const now = new Date();
             const newChat = {
-    			type: 'classified',
-    			classifiedAdId: ad._id,
-    			adTitle: ad.title,
-    			sellerId: ad.sellerId, // <--- DAS IST WICHTIG FÜR DIE ANGEBOTE
-    			participants: participants,
-    			createdAt: now,
-    			updatedAt: now,
-    			lastMessagePreview: `Neuer Chat zu: ${ad.title}`,
-    			lastMessageSenderId: null,
-    			lastMessageTimestamp: now
-			};
+                type: 'classified',
+                classifiedAdId: ad._id,
+                adTitle: ad.title,
+                sellerId: ad.sellerId,
+                participants: participants,
+                createdAt: now,
+                updatedAt: now,
+                lastMessagePreview: `Neuer Chat zu: ${ad.title}`,
+                lastMessageSenderId: null,
+                lastMessageTimestamp: now
+            };
             const result = await limChatsCollection.insertOne(newChat);
             chat = { _id: result.insertedId, ...newChat };
         }
