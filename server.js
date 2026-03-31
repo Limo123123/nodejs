@@ -76,6 +76,8 @@ const CACHE_DIR = path.resolve(__dirname, 'cache');
 const PRODUCTS_CACHE_FILE = path.resolve(CACHE_DIR, 'products_cache.json');
 let globalProductCache = [];
 const limterestCollectionName = 'limterestPins';
+// --- APRIL FOOLS TOGGLE ---
+const IS_APRIL_FOOLS = true; // Nach dem 1. April auf false setzen!
 
 // --- Glücksrad & Token Konstanten ---
 const DEFAULT_STARTING_TOKENS = 10;
@@ -1727,18 +1729,18 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
                 const effectiveInfinityMoney = user.isAdmin ? true : (user.infinityMoney || false);
 
                 res.json({
-                    message: 'Login erfolgreich!',
-                    user: {
-                        userId: user._id.toString(),
-                        username: user.username,
-                        balance: user.balance,
-                        tokens: user.tokens || 0,
-                        isAdmin: user.isAdmin || false,
-                        infinityMoney: effectiveInfinityMoney,
-                        unlockedInfinityMoney: user.unlockedInfinityMoney || false,
-                        productSellCooldowns: user.productSellCooldowns || {}
-                    }
-                });
+    				message: 'Login erfolgreich!',
+    				user: {
+        				userId: user._id.toString(),
+        				username: user.username,
+       					balance: IS_APRIL_FOOLS ? 0 : user.balance, // FAKE GUTHABEN
+        				tokens: IS_APRIL_FOOLS ? 0 : (user.tokens || 0), // FAKE TOKENS
+        				isAdmin: user.isAdmin || false,
+        				infinityMoney: effectiveInfinityMoney,
+        				unlockedInfinityMoney: user.unlockedInfinityMoney || false,
+        				productSellCooldowns: user.productSellCooldowns || {}
+    				}
+				});
             });
 
         } else {
@@ -1780,20 +1782,17 @@ app.get('/api/auth/me', isAuthenticated, async (req, res) => {
         // FAKE ADMIN FÜR FRONTEND: Wenn er eine Rolle ungleich 'user' hat, sagen wir dem UI "Er ist Admin"
         const showAdminUI = user.isAdmin === true || (user.role && user.role !== 'user') || (user.permissions && user.permissions.length > 0);
 
-        res.json({ 
-            userId: user._id.toString(), 
-            username: user.username, 
-            balance: parseFloat(user.balance || 0), 
-            tokens: user.tokens || 0, 
-            
-            // HIER IST DER TRICK: Das Frontend denkt jetzt, er sei Admin!
-            isAdmin: showAdminUI,
-			isRealAdmin: user.isAdmin === true || user.role === 'admin',
-            
-            infinityMoney: effectiveInfinityMoney, 
-            unlockedInfinityMoney: user.unlockedInfinityMoney || false, 
-            productSellCooldowns: user.productSellCooldowns || {} 
-        });
+				res.json({ 
+    				userId: user._id.toString(), 
+    				username: user.username, 
+    				balance: IS_APRIL_FOOLS ? 0 : parseFloat(user.balance || 0), // FAKE GUTHABEN
+    				tokens: IS_APRIL_FOOLS ? 0 : (user.tokens || 0), // FAKE TOKENS
+    				isAdmin: showAdminUI,
+    				isRealAdmin: user.isAdmin === true || user.role === 'admin',
+    				infinityMoney: effectiveInfinityMoney, 
+    				unlockedInfinityMoney: user.unlockedInfinityMoney || false, 
+    				productSellCooldowns: user.productSellCooldowns || {} 
+				});
     } catch (err) { 
         console.error(`${LOG_PREFIX_SERVER} Fehler /api/auth/me ${req.session.username}:`, err); 
         res.status(500).json({ error: "Fehler Abruf Benutzerdaten." }); 
