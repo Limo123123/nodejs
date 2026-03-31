@@ -3703,6 +3703,39 @@ app.get('/health', (req, res) => {
 });
 
 // =========================================================
+// === PUBLIC STATUS PAGE ENDPOINT ===
+// =========================================================
+app.get('/api/status', async (req, res) => {
+    let dbStatus = "offline";
+    try {
+        // Schneller Ping an MongoDB
+        if (client) {
+            await db.command({ ping: 1 });
+            dbStatus = "online";
+        }
+    } catch (e) {
+        dbStatus = "error";
+    }
+
+    // Uptime lesbar machen
+    const uptimeSeconds = process.uptime();
+    const d = Math.floor(uptimeSeconds / (3600 * 24));
+    const h = Math.floor(uptimeSeconds % (3600 * 24) / 3600);
+    const m = Math.floor(uptimeSeconds % 3600 / 60);
+
+    // Antwort senden (Status Code 200 OK, oder 503 falls DB offline)
+    const httpStatus = dbStatus === "online" ? 200 : 503;
+
+    res.status(httpStatus).json({
+        service: "Limo Backend",
+        system: dbStatus === "online" ? "operational" : "degraded",
+        database: dbStatus,
+        uptime: `${d}d ${h}h ${m}m`,
+        timestamp: new Date().toISOString()
+    });
+});
+
+// =========================================================
 // === HALL OF FAME ENDPUNKT ===
 // =========================================================
 app.get('/api/hall-of-fame', async (req, res) => {
