@@ -77,7 +77,7 @@ const PRODUCTS_CACHE_FILE = path.resolve(CACHE_DIR, 'products_cache.json');
 let globalProductCache = [];
 const limterestCollectionName = 'limterestPins';
 // --- APRIL FOOLS TOGGLE ---
-const IS_APRIL_FOOLS = true; // Nach dem 1. April auf false setzen!
+const IS_APRIL_FOOLS = false; // Nach dem 1. April auf false setzen!
 
 // --- Glücksrad & Token Konstanten ---
 const DEFAULT_STARTING_TOKENS = 10;
