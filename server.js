@@ -5,7 +5,7 @@ const dotenv = require('dotenv');
 const os = require('os');
 const helmet = require('helmet');
 const multer = require('multer');
-const sharp = require('sharp');
+const sharp = require('sharp');F
 sharp.concurrency(1);
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const { createClient } = require('redis');
@@ -1617,7 +1617,7 @@ app.post('/api/auth/register', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
         const newUser = {
             username: username.toLowerCase(), password: hashedPassword, balance: 5000.00, tokens: DEFAULT_STARTING_TOKENS,
-            isAdmin: false, infinityMoney: false, unlockedInfinityMoney: false, createdAt: new Date(), productSellCooldowns: {}
+            isAdmin: false, infinityMoney: false, unlockedInfinityMoney: false, createdAt: new Date(), productSellCooldowns: {}, schufaScore: 500, activeLoan: null
         };
         await usersCollection.insertOne(newUser);
         console.log(`${LOG_PREFIX_SERVER} User ${username.toLowerCase()} erfolgreich registriert mit ${DEFAULT_STARTING_TOKENS} Tokens.`);
@@ -1782,16 +1782,19 @@ app.get('/api/auth/me', isAuthenticated, async (req, res) => {
         // FAKE ADMIN FÜR FRONTEND: Wenn er eine Rolle ungleich 'user' hat, sagen wir dem UI "Er ist Admin"
         const showAdminUI = user.isAdmin === true || (user.role && user.role !== 'user') || (user.permissions && user.permissions.length > 0);
 
+				// In app.get('/api/auth/me', ...)
 				res.json({ 
     				userId: user._id.toString(), 
     				username: user.username, 
-    				balance: IS_APRIL_FOOLS ? 0 : parseFloat(user.balance || 0), // FAKE GUTHABEN
-    				tokens: IS_APRIL_FOOLS ? 0 : (user.tokens || 0), // FAKE TOKENS
+    				balance: IS_APRIL_FOOLS ? 0 : parseFloat(user.balance || 0),
+    				tokens: IS_APRIL_FOOLS ? 0 : (user.tokens || 0),
     				isAdmin: showAdminUI,
     				isRealAdmin: user.isAdmin === true || user.role === 'admin',
     				infinityMoney: effectiveInfinityMoney, 
     				unlockedInfinityMoney: user.unlockedInfinityMoney || false, 
-    				productSellCooldowns: user.productSellCooldowns || {} 
+    				productSellCooldowns: user.productSellCooldowns || {},
+    				schufaScore: user.schufaScore || 500, // <--- NEU
+    				hasActiveLoan: !!user.activeLoan      // <--- NEU (hilft dem Frontend für Warn-Badges)
 				});
     } catch (err) { 
         console.error(`${LOG_PREFIX_SERVER} Fehler /api/auth/me ${req.session.username}:`, err); 
@@ -5201,6 +5204,244 @@ app.post('/api/daily', isAuthenticated, async (req, res) => {
 });
 
 // =========================================================
+// === LIMO BANKING: SCHUFA & KREDITE ===
+// =========================================================
+
+// Hilfsfunktion: Berechnet das Kredit-Limit und die Zinsen basierend auf der Schufa
+function getSchufaKonditionen(score) {
+    if (score < 400) return { maxAmount: 0, interestRate: 0.0, rating: 'Miserabel' };
+    if (score < 600) return { maxAmount: 2500, interestRate: 0.20, rating: 'Schlecht' }; // 20% Zinsen
+    if (score < 750) return { maxAmount: 15000, interestRate: 0.12, rating: 'Akzeptabel' }; // 12% Zinsen
+    if (score < 900) return { maxAmount: 75000, interestRate: 0.08, rating: 'Gut' }; // 8% Zinsen
+    return { maxAmount: 250000, interestRate: 0.04, rating: 'Exzellent' }; // 4% Zinsen
+}
+
+// Initialer Schufa-Score für neue Nutzer
+const DEFAULT_SCHUFA_SCORE = 500;
+
+// 1. Schufa-Status & Kredit-Infos abrufen
+app.get('/api/bank/loan', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        
+        // Schufa initialisieren, falls nicht vorhanden
+        const currentScore = user.schufaScore || DEFAULT_SCHUFA_SCORE;
+        const konditionen = getSchufaKonditionen(currentScore);
+        
+        // Account-Alter berechnen
+        const accountAgeDays = (Date.now() - new Date(user._id.getTimestamp()).getTime()) / (1000 * 60 * 60 * 24);
+        const canApplyAge = accountAgeDays >= 7;
+
+        res.json({
+            schufaScore: currentScore,
+            rating: konditionen.rating,
+            maxLoan: canApplyAge ? konditionen.maxAmount : 0,
+            interestRate: konditionen.interestRate * 100, // Als Prozentwert für's UI
+            accountAgeDays: Math.floor(accountAgeDays),
+            activeLoan: user.activeLoan || null,
+            canApply: canApplyAge && user.balance >= 0 && !user.activeLoan && konditionen.maxAmount > 0
+        });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Fehler beim Abrufen der Schufa-Auskunft." });
+    }
+});
+
+// 2. Kredit beantragen
+app.post('/api/bank/loan/apply', isAuthenticated, async (req, res) => {
+    const { amount } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const loanAmount = roundMoney(parseFloat(amount));
+
+    if (!loanAmount || loanAmount <= 0) return res.status(400).json({ error: "Ungültiger Betrag." });
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            
+            // Checks
+            if (user.activeLoan) throw new Error("Du hast bereits einen laufenden Kredit. Zahle diesen zuerst ab!");
+            if (user.balance < 0) throw new Error("Kein Kredit für Accounts im Minus. Zahle erst deine Schulden!");
+            
+            const accountAgeDays = (Date.now() - new Date(user._id.getTimestamp()).getTime()) / (1000 * 60 * 60 * 24);
+            if (accountAgeDays < 7 && !user.isAdmin) throw new Error("Dein Account muss mindestens 7 Tage alt sein.");
+
+            const score = user.schufaScore || DEFAULT_SCHUFA_SCORE;
+            const konditionen = getSchufaKonditionen(score);
+
+            if (loanAmount > konditionen.maxAmount) {
+                throw new Error(`Deine Schufa lässt nur maximal $${konditionen.maxAmount.toLocaleString()} zu.`);
+            }
+
+            // Kredit-Daten berechnen (Laufzeit z.B. 14 Tage)
+            const totalDue = roundMoney(loanAmount + (loanAmount * konditionen.interestRate));
+            const dueDate = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000); // 14 Tage Zeit
+
+            const newLoan = {
+                principal: loanAmount,
+                interest: konditionen.interestRate,
+                totalDue: totalDue,
+                remainingDue: totalDue,
+                dueDate: dueDate,
+                takenAt: new Date()
+            };
+
+            // Geld geben und Kredit eintragen
+            await usersCollection.updateOne(
+                { _id: userId },
+                { 
+                    $inc: { balance: loanAmount },
+                    $set: { activeLoan: newLoan },
+                    $min: { schufaScore: score - 10 } // Kleiner Schufa-Dämpfer bei Kreditaufnahme
+                },
+                { session }
+            );
+
+            // Log für das System
+            await bankTransactionsCollection.insertOne({
+                fromId: "BANK",
+                fromName: "Limo Zentralbank",
+                toId: userId,
+                toName: user.username,
+                amount: loanAmount,
+                type: 'loan_payout',
+                reason: `Kreditaufnahme (Zins: ${konditionen.interestRate * 100}%)`,
+                timestamp: new Date()
+            }, { session });
+        });
+
+        res.json({ message: `Kredit über $${loanAmount.toLocaleString()} genehmigt und ausgezahlt!` });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// 3. Kredit abbezahlen (Teilweise oder komplett)
+app.post('/api/bank/loan/pay', isAuthenticated, async (req, res) => {
+    const { amount } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const payAmount = roundMoney(parseFloat(amount));
+
+    if (!payAmount || payAmount <= 0) return res.status(400).json({ error: "Ungültiger Betrag." });
+
+    const session = client.startSession();
+    try {
+        let message = "";
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (!user.activeLoan) throw new Error("Du hast keinen aktiven Kredit.");
+            if (user.balance < payAmount) throw new Error("Nicht genug Geld auf dem Konto.");
+
+            // Man kann nicht mehr zahlen, als man schuldet
+            const actualPayment = Math.min(payAmount, user.activeLoan.remainingDue);
+            const newRemaining = roundMoney(user.activeLoan.remainingDue - actualPayment);
+            
+            const updateOps = { $inc: { balance: -actualPayment } };
+
+            if (newRemaining <= 0) {
+                // Kredit komplett abbezahlt! Schufa Score erhöhen.
+                const currentScore = user.schufaScore || DEFAULT_SCHUFA_SCORE;
+                let newScore = currentScore + 25; // 25 Punkte Plus für gutes Verhalten
+                if (newScore > 1000) newScore = 1000; // Cap bei 1000
+
+                updateOps.$unset = { activeLoan: "" };
+                updateOps.$set = { schufaScore: newScore };
+                message = `Kredit vollständig abbezahlt! Dein Schufa-Score ist auf ${newScore} gestiegen.`;
+            } else {
+                // Teilzahlung
+                updateOps.$set = { "activeLoan.remainingDue": newRemaining };
+                message = `$${actualPayment.toLocaleString()} abbezahlt. Es fehlen noch $${newRemaining.toLocaleString()}.`;
+            }
+
+            await usersCollection.updateOne({ _id: userId }, updateOps, { session });
+            
+            // Geld vernichten (Es geht zurück an die Bank)
+            await bankTransactionsCollection.insertOne({
+                fromId: userId,
+                fromName: user.username,
+                toId: "BANK",
+                toName: "Limo Zentralbank",
+                amount: actualPayment,
+                type: 'loan_payment',
+                reason: "Kredit-Rückzahlung",
+                timestamp: new Date()
+            }, { session });
+        });
+
+        res.json({ message, success: true });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+async function collectOverdueLoans() {
+    console.log(`${LOG_PREFIX_SERVER} 🏦 Das Inkassobüro prüft überfällige Kredite...`);
+    try {
+        const now = new Date();
+        
+        // Finde alle User mit einem Kredit, dessen Frist abgelaufen ist
+        const overdueUsers = await usersCollection.find({
+            "activeLoan.dueDate": { $lt: now }
+        }).toArray();
+
+        if (overdueUsers.length === 0) {
+            console.log(`${LOG_PREFIX_SERVER} 🏦 Keine überfälligen Kredite gefunden.`);
+            return;
+        }
+
+        for (const user of overdueUsers) {
+            const loan = user.activeLoan;
+            const currentScore = user.schufaScore || DEFAULT_SCHUFA_SCORE;
+            
+            // Strafe: 50 Schufa-Punkte weg, Minimum 100
+            let newScore = currentScore - 50;
+            if (newScore < 100) newScore = 100;
+
+            // Pfändung: Verbleibender Betrag + 5% Mahngebühr
+            const penaltyFee = roundMoney(loan.remainingDue * 0.05);
+            const totalToCollect = roundMoney(loan.remainingDue + penaltyFee);
+
+            // Konto belasten (geht auch ins Minus!) und Kredit schließen
+            await usersCollection.updateOne(
+                { _id: user._id },
+                { 
+                    $inc: { balance: -totalToCollect },
+                    $set: { schufaScore: newScore },
+                    $unset: { activeLoan: "" }
+                }
+            );
+
+            // Systemnachricht senden
+            await mailsCollection.insertOne({
+                userId: user._id,
+                sender: "Limo Inkasso GmbH",
+                subject: "ZWANGSVOLLSTRECKUNG 🚨",
+                content: `Hallo ${user.username},\n\nda du deinen Kredit nicht fristgerecht zum ${new Date(loan.dueDate).toLocaleDateString()} abbezahlt hast, wurde dein Konto soeben pfändungsmäßig belastet.\n\nEingezogen: $${loan.remainingDue} + $${penaltyFee} Mahngebühren.\n\nDein Schufa-Score ist stark gefallen. Wir raten dir, deine Finanzen in den Griff zu bekommen!`,
+                isRead: false,
+                isClaimed: false,
+                createdAt: new Date()
+            });
+
+            console.log(`${LOG_PREFIX_SERVER} 🏦 Inkasso bei ${user.username}: $${totalToCollect} gepfändet. Schufa nun bei ${newScore}.`);
+        }
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} ❌ Fehler beim Inkasso-Job:`, err);
+    }
+}
+
+// Starte das Inkassobüro einmal am Tag
+if (cluster.isPrimary) {
+    // Check alle 24 Stunden
+    setInterval(collectOverdueLoans, 24 * 60 * 60 * 1000);
+}
+
+// =========================================================
 // === LIMO NEWS NETWORK (LNN) - SMART V2 ===
 // =========================================================
 
@@ -5465,6 +5706,13 @@ app.put('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
             updateData.isAdmin = (role === 'admin'); 
         }
         if (permissions !== undefined) updateData.permissions = permissions;
+		
+		if (schufaScore !== undefined) {
+    		updateData.schufaScore = parseInt(schufaScore);
+    		// Optional: Cap einbauen
+    		if (updateData.schufaScore > 1000) updateData.schufaScore = 1000;
+    		if (updateData.schufaScore < 0) updateData.schufaScore = 0;
+		}
 
         await usersCollection.updateOne({ _id: new ObjectId(req.params.id) }, { $set: updateData });
         res.json({ message: "User erfolgreich aktualisiert." });
