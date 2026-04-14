@@ -11713,18 +11713,20 @@ if (cluster.isPrimary) {
             for (const house of allOwned) {
                 if (!house.roommates || house.roommates.length === 0) continue;
 
-                for (const roommateId of house.roommates) {
-                    const rentAmount = house.rent || 500;
+                // FIX: Miete durch alle Bewohner teilen (Mitbewohner + 1 Besitzer)
+                const totalResidents = house.roommates.length + 1;
+                const splitRent = Math.floor((house.rent || 500) / totalResidents);
                     
-                    // Versuche Miete abzubuchen
+                for (const roommateId of house.roommates) {
+                    // Versuche die GETEILTE Miete abzubuchen
                     const res = await usersCollection.updateOne(
-                        { _id: roommateId, balance: { $gte: rentAmount } },
-                        { $inc: { balance: -rentAmount } }
+                        { _id: roommateId, balance: { $gte: splitRent } },
+                        { $inc: { balance: -splitRent } }
                     );
 
                     if (res.modifiedCount > 0) {
                         // Wenn bezahlt, dem Besitzer geben
-                        await usersCollection.updateOne({ _id: house.ownerId }, { $inc: { balance: rentAmount } });
+                        await usersCollection.updateOne({ _id: house.ownerId }, { $inc: { balance: splitRent } });
                     } else {
                         // Wenn pleite: Automatischer Rauswurf aus der WG
                         await ownedPropertiesCollection.updateOne({ _id: house._id }, { $pull: { roommates: roommateId } });
