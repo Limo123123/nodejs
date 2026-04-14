@@ -15276,6 +15276,20 @@ app.delete('/api/strikes/:id', isAuthenticated, async (req, res) => {
     }
 });
 
+// ÖFFENTLICHER Endpunkt für die Status-Anzeige auf der Index-Seite
+app.get('/api/strikes/public', async (req, res) => {
+    try {
+        // Wir holen nur die aktiven Streiks und nur die nötigsten Infos
+        const activeStrikes = await db.collection('strikes').find(
+            { status: 'active', expiresAt: { $gt: new Date() } },
+            { projection: { module: 1, _id: 0 } }
+        ).toArray();
+        res.json({ strikes: activeStrikes });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden des Streik-Status." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
