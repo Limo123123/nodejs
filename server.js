@@ -138,6 +138,21 @@ app.use(helmet({
 }));
 app.use('/api/', globalApiRateLimit); // Schützt alle API-Routen
 
+// =========================================================
+// === STREIK-SYSTEM: BLOCKIERTE ROUTEN ===
+// =========================================================
+// Wenn ein Streik aktiv ist, blockiert der Türsteher ab hier alle Anfragen an diese Pfade
+app.use('/api/teachermon', isNotOnStrike('teachermon'));
+app.use('/api/news', isNotOnStrike('limonews'));
+app.use('/api/casino', isNotOnStrike('casino'));
+app.use('/api/restaurant', isNotOnStrike('restaurant'));
+app.use('/api/jobs', isNotOnStrike('jobs'));
+app.use('/api/crime', isNotOnStrike('crime'));
+app.use('/api/gangs', isNotOnStrike('gangs'));
+app.use('/api/limterest', isNotOnStrike('limterest'));
+app.use('/api/realestate', isNotOnStrike('realestate'));
+app.use('/api/auctions', isNotOnStrike('auctions'));
+
 // --- Datenbank Variablen ---
 let db;
 let productsCollection, usersCollection, ordersCollection, inventoriesCollection;
@@ -433,6 +448,39 @@ async function runAutomatedSecurityChecks() {
     }
 }
 
+// =========================================================
+// === STREIK-SYSTEM: MIDDLEWARE ===
+// =========================================================
+function isNotOnStrike(moduleName) {
+    return async (req, res, next) => {
+        try {
+            // Prüfen, ob ein AKTIVER Streik für dieses Modul existiert
+            const activeStrike = await db.collection('strikes').findOne({
+                module: moduleName,
+                status: 'active',
+                expiresAt: { $gt: new Date() }
+            });
+
+            if (activeStrike) {
+                // HTTP 423 = "Locked" (Ressource ist gesperrt)
+                return res.status(423).json({
+                    error: "STRIKE_ACTIVE",
+                    strikeData: {
+                        module: activeStrike.module,
+                        reason: activeStrike.reason,
+                        strikers: activeStrike.strikerNames,
+                        endsAt: activeStrike.expiresAt
+                    }
+                });
+            }
+            
+            next(); // Kein Streik? Weiter geht's!
+        } catch (e) {
+            console.error("Fehler bei Streik-Prüfung:", e);
+            res.status(500).json({ error: "Systemfehler bei der Streik-Prüfung." });
+        }
+    };
+}
 
 // --- Hilfsfunktionen ---
 async function generateUniqueUserShareCode() {
@@ -15067,6 +15115,125 @@ app.delete('/api/admin/petitions/:id', isAuthenticated, isAdmin, async (req, res
     } catch (e) {
         console.error(`${LOG_PREFIX_PETITION} Fehler beim Löschen der Petition:`, e);
         res.status(500).json({ error: "Fehler beim Löschen der Petition." });
+    }
+});
+
+// =========================================================
+// === STREIK-SYSTEM: API ENDPUNKTE ===
+// =========================================================
+
+const STRIKE_DURATION_HOURS = 12; // Wie lange ein Streik dauert
+const MIN_STRIKERS_NEEDED = 2;    // Wie viele Leute man braucht
+
+// 1. Einen Streik ausrufen (landet im Status 'pending')
+app.post('/api/strikes/propose', isAuthenticated, async (req, res) => {
+    const { moduleName, reason } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const username = req.session.username;
+
+    // Erlaubte Module
+    const ALLOWED_MODULES = ['teachermon', 'limonews', 'casino', 'restaurant', 'jobs', 'crime', 'gangs', 'limterest', 'realestate', 'auctions'];
+
+    if (!ALLOWED_MODULES.includes(moduleName)) {
+        return res.status(400).json({ error: "Dieses System ist essenziell und darf nicht bestreikt werden!" });
+    }
+    if (!reason || reason.trim().length < 5 || reason.trim().length > 100) {
+        return res.status(400).json({ error: "Bitte gib einen vernünftigen Streikgrund an (5-100 Zeichen)." });
+    }
+
+    try {
+        // Gibt es schon einen laufenden/geplanten Streik?
+        const existingStrike = await db.collection('strikes').findOne({
+            module: moduleName,
+            status: { $in: ['pending', 'active'] }
+        });
+
+        if (existingStrike) {
+            return res.status(400).json({ error: "Es läuft bereits eine Streik-Organisation oder ein aktiver Streik für dieses Modul!" });
+        }
+
+        const newStrike = {
+            module: moduleName,
+            reason: reason.trim(),
+            status: 'pending', // Wartet auf Mitstreiter
+            strikers: [userId],
+            strikerNames: [username],
+            createdAt: new Date()
+        };
+
+        await db.collection('strikes').insertOne(newStrike);
+        res.status(201).json({ message: "Streik ausgerufen! Du brauchst noch mindestens einen Mitstreiter, damit er aktiv wird." });
+
+    } catch (e) {
+        console.error("Fehler bei /api/strikes/propose:", e);
+        res.status(500).json({ error: "Fehler beim Ausrufen des Streiks." });
+    }
+});
+
+// 2. Einem Streik beitreten
+app.post('/api/strikes/join/:id', isAuthenticated, async (req, res) => {
+    const strikeId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+    const username = req.session.username;
+
+    try {
+        const strike = await db.collection('strikes').findOne({ _id: strikeId, status: 'pending' });
+        
+        if (!strike) return res.status(404).json({ error: "Streik nicht gefunden oder bereits aktiv." });
+        if (strike.strikers.some(id => id.equals(userId))) return res.status(400).json({ error: "Du streikst hier bereits mit!" });
+
+        const newStrikerCount = strike.strikers.length + 1;
+        const updateOps = {
+            $push: { strikers: userId, strikerNames: username }
+        };
+
+        // Wird der Streik jetzt aktiv?
+        if (newStrikerCount >= MIN_STRIKERS_NEEDED) {
+            const endsAt = new Date(Date.now() + STRIKE_DURATION_HOURS * 60 * 60 * 1000);
+            updateOps.$set = { 
+                status: 'active', 
+                activatedAt: new Date(),
+                expiresAt: endsAt 
+            };
+            
+            // LNN News-Meldung generieren
+            await newsCollection.insertOne({
+                headline: `STREIK BEI ${strike.module.toUpperCase()}! 🛑`,
+                content: `${strike.strikerNames.join(', ')} und ${username} haben den Bereich blockiert! Grund: "${strike.reason}". Die Blockade hält ${STRIKE_DURATION_HOURS} Stunden an.`,
+                author: "LNN Gewerkschaft",
+                category: "Community",
+                createdAt: new Date(),
+                likes: 0
+            });
+            // Polling fürs Frontend (falls du die Funktion hast)
+            if (typeof updateDataVersion === 'function') updateDataVersion('news');
+        }
+
+        await db.collection('strikes').updateOne({ _id: strikeId }, updateOps);
+
+        res.json({ 
+            message: newStrikerCount >= MIN_STRIKERS_NEEDED 
+                ? "Du bist beigetreten! Der Streik ist nun AKTIV!" 
+                : "Du bist beigetreten. Wir brauchen noch mehr Leute!" 
+        });
+
+    } catch (e) {
+        console.error("Fehler bei /api/strikes/join:", e);
+        res.status(500).json({ error: "Fehler beim Beitreten." });
+    }
+});
+
+// 3. Offene Streiks abrufen (für das Frontend Dashboard)
+app.get('/api/strikes', isAuthenticated, async (req, res) => {
+    try {
+        const activeAndPending = await db.collection('strikes')
+            .find({ status: { $in: ['pending', 'active'] } })
+            .sort({ createdAt: -1 })
+            .toArray();
+        res.json({ strikes: activeAndPending });
+    } catch (e) {
+        console.error("Fehler bei /api/strikes:", e);
+        res.status(500).json({ error: "Fehler beim Laden der Streiks." });
     }
 });
 
