@@ -14716,6 +14716,191 @@ app.post('/api/classifieds/offers/:messageId/respond', isAuthenticated, async (r
     }
 });
 
+// =========================================================
+// === 📜 LIMO PETITIONEN (DAS VOLK SPRICHT) ===
+// =========================================================
+const LOG_PREFIX_PETITION = "[Petition API]";
+
+// 1. Admin: Benötigte Unterschriften einstellen
+app.post('/api/admin/petitions/config', isAuthenticated, isAdmin, async (req, res) => {
+    const { requiredSignatures } = req.body;
+    
+    if (!requiredSignatures || requiredSignatures < 2) {
+        return res.status(400).json({ error: "Mindestens 2 Unterschriften sind nötig." });
+    }
+
+    try {
+        await systemSettingsCollection.updateOne(
+            { id: 'petition_config' },
+            { $set: { requiredSignatures: parseInt(requiredSignatures), updatedAt: new Date() } },
+            { upsert: true }
+        );
+        console.log(`${LOG_PREFIX_PETITION} Admin ${req.session.username} hat das Petitions-Limit auf ${requiredSignatures} gesetzt.`);
+        res.json({ message: `Erfolgreich! Neue Petitionen brauchen nun ${requiredSignatures} Unterschriften.` });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Speichern der Konfiguration." });
+    }
+});
+
+// 2. User: Alle aktiven Petitionen laden
+app.get('/api/petitions', isAuthenticated, async (req, res) => {
+    try {
+        // Lade aktive und kürzlich erfolgreiche Petitionen
+        const petitions = await db.collection('petitions')
+            .find({ status: { $in: ['active', 'successful'] } })
+            .sort({ status: 1, createdAt: -1 }) // Aktive zuerst
+            .limit(50)
+            .toArray();
+            
+        res.json({ petitions });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der Petitionen." });
+    }
+});
+
+// 3. User: Eine neue Petition starten
+app.post('/api/petitions/create', isAuthenticated, async (req, res) => {
+    const { title, description } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const CREATE_COST = 2500; // Gebühr gegen Spam
+
+    if (!title || title.trim().length < 10 || title.trim().length > 100) {
+        return res.status(400).json({ error: "Titel muss zwischen 10 und 100 Zeichen lang sein." });
+    }
+    if (!description || description.trim().length < 20 || description.trim().length > 1000) {
+        return res.status(400).json({ error: "Beschreibung muss zwischen 20 und 1000 Zeichen lang sein." });
+    }
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (user.balance < CREATE_COST) throw new Error(`Eine Petition einzureichen kostet $${CREATE_COST.toLocaleString()}.`);
+
+            // Geld abziehen
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -CREATE_COST } }, { session });
+
+            // Aktuelles Limit aus Settings holen (Fallback 10)
+            const config = await systemSettingsCollection.findOne({ id: 'petition_config' }, { session });
+            const requiredSigs = config ? config.requiredSignatures : 10;
+
+            const newPetition = {
+                creatorId: userId,
+                creatorUsername: req.session.username,
+                title: title.trim(),
+                description: description.trim(),
+                signatures: [userId], // Ersteller unterschreibt automatisch
+                requiredSignatures: requiredSigs,
+                status: 'active', // active, successful
+                createdAt: new Date()
+            };
+
+            await db.collection('petitions').insertOne(newPetition, { session });
+        });
+
+        res.status(201).json({ message: "Petition erfolgreich eingereicht! Sammle nun Unterschriften." });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// 4. User: Petition unterschreiben
+app.post('/api/petitions/:id/sign', isAuthenticated, async (req, res) => {
+    const petitionId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+
+    const session = client.startSession();
+    try {
+        let isNowSuccessful = false;
+        let petitionTitle = "";
+
+        await session.withTransaction(async () => {
+            const petition = await db.collection('petitions').findOne({ _id: petitionId, status: 'active' }, { session });
+            if (!petition) throw new Error("Petition nicht gefunden oder bereits beendet.");
+
+            // Check ob schon unterschrieben
+            if (petition.signatures.some(id => id.equals(userId))) {
+                throw new Error("Du hast diese Petition bereits unterschrieben!");
+            }
+
+            petitionTitle = petition.title;
+            const newSignatureCount = petition.signatures.length + 1;
+
+            // Unterschrift hinzufügen
+            const updateOps = { $push: { signatures: userId } };
+
+            // WIRD DIE PETITION JETZT ERFOLGREICH?
+            if (newSignatureCount >= petition.requiredSignatures) {
+                isNowSuccessful = true;
+                updateOps.$set = { status: 'successful', completedAt: new Date() };
+                
+                // 1. In die Ideenbox pushen
+                await ideasCollection.insertOne({
+                    title: `[PETITION] ${petition.title}`,
+                    description: `DIESE IDEE WURDE DURCH EINE PETITION ERZWUNGEN (${newSignatureCount} Unterschriften)!\n\nOriginal-Beschreibung:\n${petition.description}`,
+                    submitterId: null, // System
+                    submitterUsername: "Das Volk (Petition)",
+                    status: 'new',
+                    createdAt: new Date(),
+                    updatedAt: new Date()
+                }, { session });
+
+                // 2. LNN News feuern
+                await newsCollection.insertOne({
+                    headline: "DAS VOLK HAT GESPROCHEN! 📜",
+                    content: `Die Petition "${petition.title}" hat die benötigten Unterschriften erreicht und wurde dem Entwickler-Team auf den Tisch geknallt! Ob sie es umsetzen? Wir werden sehen!`,
+                    author: "LNN Demokratie",
+                    category: "Community",
+                    createdAt: new Date(),
+                    likes: 0
+                }, { session });
+            }
+
+            await db.collection('petitions').updateOne({ _id: petitionId }, updateOps, { session });
+        });
+
+        if (isNowSuccessful) {
+            updateDataVersion('news'); // Smart Polling triggern
+            res.json({ message: "Unterschrieben! BÄM! Die Petition hat ihr Ziel erreicht und wurde in die Ideenbox gepusht!" });
+        } else {
+            res.json({ message: "Erfolgreich unterschrieben!" });
+        }
+
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// 5. Admin: Petition manuell löschen (Spam oder alte, gescheiterte)
+app.delete('/api/admin/petitions/:id', isAuthenticated, isAdmin, async (req, res) => {
+    const petitionIdStr = req.params.id;
+    const adminUsername = req.session.username;
+
+    if (!ObjectId.isValid(petitionIdStr)) {
+        return res.status(400).json({ error: "Ungültige Petitions-ID." });
+    }
+    
+    const petitionId = new ObjectId(petitionIdStr);
+
+    try {
+        const result = await db.collection('petitions').deleteOne({ _id: petitionId });
+        
+        if (result.deletedCount === 0) {
+            return res.status(404).json({ error: "Petition nicht gefunden." });
+        }
+
+        console.log(`${LOG_PREFIX_PETITION} Admin ${adminUsername} hat die Petition ${petitionId} gelöscht.`);
+        res.json({ message: "Die Petition wurde in den Aktenvernichter geworfen." });
+    } catch (e) {
+        console.error(`${LOG_PREFIX_PETITION} Fehler beim Löschen der Petition:`, e);
+        res.status(500).json({ error: "Fehler beim Löschen der Petition." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
