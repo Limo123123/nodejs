@@ -729,6 +729,54 @@ async function logActivity(req, action, details = {}) {
     }
 }
 
+// --- ZENTRALE LÖSCH-FUNKTION (Räumt alles restlos auf) ---
+async function deleteUserAndCleanup(userIdString) {
+    const uId = new ObjectId(userIdString);
+
+    // 1. User selbst löschen
+    const userResult = await usersCollection.deleteOne({ _id: uId });
+    if (userResult.deletedCount === 0) return false;
+
+    console.log(`${LOG_PREFIX_SERVER} 🧹 Starte extremen Cleanup für User ${uId}...`);
+
+    // 2. Einfache Collections bereinigen (Alles was dem User gehört)
+    await Promise.all([
+        inventoriesCollection.deleteMany({ userId: uId }),
+        portfoliosCollection.deleteMany({ userId: uId }),
+        wheelsCollection.deleteMany({ creatorId: uId }),
+        auctionsCollection.deleteMany({ sellerId: uId }),
+        ideasCollection.deleteMany({ submitterId: uId }),
+        ratingsCollection.deleteMany({ userId: uId }),
+        dontBlameMeCollection.deleteMany({ userId: uId }), // War vorher fehlerhaft als authorId in alten Versionen
+        limUserChatSettingsCollection.deleteMany({ userId: uId }),
+        limterestCollection.deleteMany({ userId: uId }), // NEU: Limterest
+        petsCollection.deleteMany({ userId: uId }), // NEU: Haustiere
+        bankTransactionsCollection.deleteMany({ $or: [{fromId: uId}, {toId: uId}] }), // NEU: Bank Logs
+        highscoresCollection.deleteMany({ userId: uId }), // NEU: Highscores
+        classifiedAdsCollection.deleteMany({ sellerId: uId }), // NEU: Kleinanzeigen
+        bugReportsCollection.deleteMany({ userId: uId }), // NEU: Bug Reports
+        limeaLayoutsCollection.deleteMany({ creatorId: uId }), // NEU: Limea
+        mailsCollection.deleteMany({ userId: uId }), // NEU: Postfach
+        restaurantOrdersCollection.deleteMany({ userId: uId }), // NEU: Restaurant
+        tindaSwipesCollection.deleteMany({ userId: uId }), // NEU: Tinda Swipes
+        teachermonInvCollection.deleteMany({ userId: uId }), // NEU: Teachermon Karten
+        deliveriesCollection.deleteMany({ $or: [{senderId: uId}, {targetId: uId}] }) // NEU: Lieferungen
+    ]);
+
+    // 3. Komplexe Verknüpfungen lösen (WGs, Häuser, Gangs)
+    // A. Aus WGs entfernen
+    await ownedPropertiesCollection.updateMany({ roommates: uId }, { $pull: { roommates: uId } });
+    // B. Eigene Häuser löschen (Mitbewohner fliegen raus)
+    await ownedPropertiesCollection.deleteMany({ ownerId: uId });
+    // C. Aus Gangs entfernen
+    await db.collection('gangs').updateMany({ members: uId }, { $pull: { members: uId } });
+    // D. Gangs löschen, falls der User der Leader war
+    await db.collection('gangs').deleteMany({ leaderId: uId });
+
+    console.log(`${LOG_PREFIX_SERVER} ✅ User ${uId} und alle Spuren wurden restlos vernichtet.`);
+    return true;
+}
+
 // =========================================================
 // === GLOBAL API RATE LIMITER (RAM BASED) ===
 // =========================================================
@@ -1249,6 +1297,22 @@ MongoClient.connect(mongoUri)
             await seedTeachermonCards();
 			await classifiedAdsCollection.createIndex({ status: 1, createdAt: -1 });
 			await classifiedAdsCollection.createIndex({ sellerId: 1 });
+			
+			// --- AUTO-DELETE FÜR LIMTEREST & FRIEDHOF (14 TAGE) ---
+
+			// Limterest Posts nach 14 Tagen (1.209.600 Sekunden) automatisch löschen
+			await limterestCollection.createIndex(
+    			{ "createdAt": 1 },
+    			{ expireAfterSeconds: 14 * 24 * 60 * 60 }
+			);
+
+			// Pet Cemetery (Friedhof) nach 14 Tagen auflösen (Gerechnet ab dem Todesdatum)
+			await petCemeteryCollection.createIndex(
+			    { "deathDate": 1 },
+			    { expireAfterSeconds: 14 * 24 * 60 * 60 }
+			);
+
+			console.log(`${LOG_PREFIX_SERVER} ♻️ TTL-Indizes für Limterest und Tierfriedhof (14 Tage) aktiviert.`);
 
             console.log(`${LOG_PREFIX_SERVER} ✅ Alle Indizes erfolgreich geprüft/erstellt.`);
         } catch (indexErr) {
@@ -5737,36 +5801,11 @@ app.post('/api/admin/users/:id/reset-pw', isAuthenticated, isAdmin, async (req, 
 });
 
 // User löschen
-// --- USER MANAGEMENT: LÖSCHEN MIT CLEANUP ---
 app.delete('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
     try {
-        const uId = new ObjectId(req.params.id);
-
-        // 1. User selbst löschen
-        const userResult = await usersCollection.deleteOne({ _id: uId });
-
-        if (userResult.deletedCount === 0) return res.status(404).json({ error: "User nicht gefunden" });
-
-        // 2. Alles aufräumen, was dem User gehörte
-        console.log(`${LOG_PREFIX_SERVER} 🧹 Starte Cleanup für User ${uId}...`);
-
-        await Promise.all([
-            inventoriesCollection.deleteMany({ userId: uId }),
-            portfoliosCollection.deleteMany({ userId: uId }),
-            wheelsCollection.deleteMany({ creatorId: uId }),
-            auctionsCollection.deleteMany({ sellerId: uId }),
-            ideasCollection.deleteMany({ submitterId: uId }),
-            ratingsCollection.deleteMany({ userId: uId }),
-
-            // FIX: "userId" anstelle von "authorId"
-            dontBlameMeCollection.deleteMany({ userId: uId }),
-
-            limUserChatSettingsCollection.deleteMany({ userId: uId })
-        ]);
-
-        console.log(`${LOG_PREFIX_SERVER} ✅ User ${uId} und alle verknüpften Daten gelöscht.`);
+        const success = await deleteUserAndCleanup(req.params.id);
+        if (!success) return res.status(404).json({ error: "User nicht gefunden" });
         res.json({ message: "User und alle verknüpften Daten wurden restlos gelöscht." });
-
     } catch (e) {
         console.error(e);
         res.status(500).json({ error: "Fehler beim Löschen." });
@@ -5793,6 +5832,24 @@ app.post('/api/admin/users/:id/fine', isAuthenticated, isAdmin, async (req, res)
 
         res.json({ message: "Strafe verhängt. User ist jetzt ärmer." });
     } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// Route für den Nutzer selbst (Kann unter "ACCOUNT" platziert werden)
+app.delete('/api/account/me', isAuthenticated, async (req, res) => {
+    console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} löscht seinen eigenen Account.`);
+    try {
+        const success = await deleteUserAndCleanup(req.session.userId);
+        if (!success) return res.status(404).json({ error: "Benutzer nicht gefunden." });
+        
+        // Session zerstören, da Account weg ist
+        req.session.destroy(err => {
+            res.clearCookie('connect.sid', { path: '/' });
+            res.json({ message: "Dein Account und alle deine Daten wurden erfolgreich gelöscht. Auf Wiedersehen!" });
+        });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: "Kritischer Fehler beim Löschen des Accounts." });
+    }
 });
 
 // --- PRODUCT MANAGEMENT ---
@@ -5918,6 +5975,118 @@ app.post('/api/admin/banUser', async (req, res) => {
         res.status(500).json({ error: "Serverfehler." });
     }
 });
+
+async function cleanupOrphanedData() {
+    console.log(`${LOG_PREFIX_SERVER} 👻 Starte Suche nach Geister-Daten (Orphaned Data)...`);
+    try {
+        // 1. Lade NUR die IDs aller aktuell existierenden User (schont den RAM)
+        const allUsers = await usersCollection.find({}, { projection: { _id: 1 } }).toArray();
+        const activeUserIds = allUsers.map(u => u._id);
+
+        if (activeUserIds.length === 0) return; // Sicherheits-Check
+
+        // 2. Lösche alles, was einer userId gehört, die NICHT in der aktiven Liste ist ($nin = Not In)
+        const resLim = await limterestCollection.deleteMany({ userId: { $nin: activeUserIds } });
+        const resPets = await petsCollection.deleteMany({ userId: { $nin: activeUserIds } });
+        const resAds = await classifiedAdsCollection.deleteMany({ sellerId: { $nin: activeUserIds } });
+        const resDbm = await dontBlameMeCollection.deleteMany({ userId: { $nin: activeUserIds } });
+
+        const totalDeleted = resLim.deletedCount + resPets.deletedCount + resAds.deletedCount + resDbm.deletedCount;
+        
+        if (totalDeleted > 0) {
+            console.log(`${LOG_PREFIX_SERVER} 🧹 Geister ausgetrieben! ${resLim.deletedCount} Limterest-Posts, ${resPets.deletedCount} Tiere und weitere Altlasten entfernt.`);
+        }
+    } catch (e) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Geister-Jäger:`, e);
+    }
+}
+
+// Lass den Geister-Jäger einmal am Tag laufen (Nur auf dem Master-Prozess)
+if (cluster.isPrimary) {
+    setInterval(cleanupOrphanedData, 24 * 60 * 60 * 1000); // Alle 24 Stunden
+    // Starte ihn einmalig 10 Sekunden nach Serverstart, um jetzt direkt aufzuräumen!
+    setTimeout(cleanupOrphanedData, 10000); 
+}
+
+// =========================================================
+// === SMARTER CONTENT CLEANER (AUTO-UPDATED BAD WORDS) ===
+// =========================================================
+
+let DYNAMIC_BAD_WORDS_REGEX = null;
+
+async function initializeBadWordsFilter() {
+    // Unser Backup, falls das Internet brennt. Erweitere das gerne um die Wörter deiner Freunde.
+    const fallbackWords = [
+        'scheiße', 'hurensohn', 'penis', 'vagina', 'arschloch', 'fotze', 
+        'wichser', 'schlampe', 'bastard', 'missgeburt', 'nazi', 'hitler', 'porno'
+    ];
+
+    try {
+        // Wir laden direkt die deutsche UND englische Liste von der offiziellen Shutterstock-Datenbank
+        const [resDe, resEn] = await Promise.all([
+            axios.get('https://raw.githubusercontent.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words/master/de'),
+            axios.get('https://raw.githubusercontent.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words/master/en')
+        ]);
+        
+        // Listen aufbereiten (leere Zeilen entfernen)
+        const wordsDe = resDe.data.split('\n').map(w => w.trim()).filter(w => w.length > 2);
+        const wordsEn = resEn.data.split('\n').map(w => w.trim()).filter(w => w.length > 2);
+        
+        // Spezielle Insider-Beleidigungen deiner Freunde hier rein:
+        const customWords = ['insiderwitz1', 'nervigeswort2']; 
+        
+        // Kombinieren und Duplikate entfernen
+        const allWords = [...new Set([...wordsDe, ...wordsEn, ...fallbackWords, ...customWords])];
+        
+        // \b sorgt dafür, dass nur ganze Wörter matchen
+        DYNAMIC_BAD_WORDS_REGEX = new RegExp(`\\b(${allWords.join('|')})\\b`, 'i');
+        
+        console.log(`${LOG_PREFIX_SERVER} 🤬 Wortfilter mit ${allWords.length} verbotenen Wörtern (DE & EN) scharfgeschaltet.`);
+    } catch (error) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Laden der GitHub-Liste. Nutze lokales Backup!`, error.message);
+        
+        // Wenn GitHub blockt, nehmen wir einfach unser hartcodiertes Array
+        DYNAMIC_BAD_WORDS_REGEX = new RegExp(`\\b(${fallbackWords.join('|')})\\b`, 'i');
+        console.log(`${LOG_PREFIX_SERVER} 🤬 Fallback-Filter mit ${fallbackWords.length} Wörtern aktiv.`);
+    }
+}
+
+// Führe das Init beim Serverstart aus (am besten ganz unten vor dem app.listen)
+initializeBadWordsFilter();
+
+// Der Cleaner-Job, der die Datenbank schrubbt
+async function runGlobalContentCleaner() {
+    if (!DYNAMIC_BAD_WORDS_REGEX) return; // Warte, bis die Liste geladen ist
+
+    console.log(`${LOG_PREFIX_SERVER} 🧼 Cleaner-Kolonne putzt die Datenbank...`);
+    try {
+        // Durchsucht Tiere (Namen der Tiere der Freunde)
+        const petRes = await petsCollection.deleteMany({ name: { $regex: DYNAMIC_BAD_WORDS_REGEX } });
+        
+        // Limterest
+        const limRes = await limterestCollection.deleteMany({ 
+            $or: [{ title: { $regex: DYNAMIC_BAD_WORDS_REGEX } }, { tags: { $in: [DYNAMIC_BAD_WORDS_REGEX] } }] 
+        });
+
+        // Dont Blame Me
+        const dbmRes = await dontBlameMeCollection.deleteMany({ reason: { $regex: DYNAMIC_BAD_WORDS_REGEX } });
+
+        // Gang Chat
+        const chatRes = await db.collection('publicGangChat').deleteMany({ msg: { $regex: DYNAMIC_BAD_WORDS_REGEX } });
+
+        const totalDeleted = petRes.deletedCount + limRes.deletedCount + dbmRes.deletedCount + chatRes.deletedCount;
+        if (totalDeleted > 0) {
+            console.log(`${LOG_PREFIX_SERVER} 🚨 Zensur! ${totalDeleted} anstößige Einträge wurden terminiert.`);
+        }
+    } catch (e) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler in der Cleaner-Kolonne:`, e);
+    }
+}
+
+// Lass die Putzkolonne alle 30 Minuten durchlaufen
+if (cluster.isPrimary) {
+    setInterval(runGlobalContentCleaner, 30 * 60 * 1000);
+}
 
 // =========================================================
 // === PROFIL & ACHIEVEMENTS SYSTEM (SMART V2) ===
