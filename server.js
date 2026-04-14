@@ -14637,19 +14637,25 @@ app.post('/api/classifieds', isAuthenticated, async (req, res) => {
         return res.status(400).json({ error: 'Bitte achte auf deine Wortwahl (Wortfilter aktiv).' });
     }
 
+    let finalProductId = null;
+    if (type === 'limazon') {
+        const parsedId = Number(productId);
+        finalProductId = isNaN(parsedId) ? productId : parsedId;
+    }
+
     const session = client.startSession();
     try {
         await session.withTransaction(async () => {
             if (type === 'limazon') {
-                if (!productId || !quantity || quantity < 1) throw new Error('Produkt-ID und Menge fehlen.');
+                if (!finalProductId || !quantity || quantity < 1) throw new Error('Produkt-ID und Menge fehlen.');
                 
-                const inventoryItem = await inventoriesCollection.findOne({ userId: sellerId, productId: productId }, { session });
+                const inventoryItem = await inventoriesCollection.findOne({ userId: sellerId, productId: finalProductId }, { session });
                 if (!inventoryItem || inventoryItem.quantityOwned < quantity) {
                     throw new Error('Du besitzt nicht genug von diesem Item.');
                 }
 
                 await inventoriesCollection.updateOne(
-                    { userId: sellerId, productId: productId },
+                    { userId: sellerId, productId: finalProductId },
                     { $inc: { quantityOwned: -quantity } },
                     { session }
                 );
@@ -14662,7 +14668,7 @@ app.post('/api/classifieds', isAuthenticated, async (req, res) => {
                 description: description.trim(),
                 price: parseFloat(price),
                 type,
-                productId: type === 'limazon' ? productId : null,
+                productId: finalProductId, // Hier die gefixte ID nutzen!
                 quantity: type === 'limazon' ? parseInt(quantity) : 1,
                 imageUrl: imageUrl || null,
                 status: 'active',
