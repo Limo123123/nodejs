@@ -15237,6 +15237,45 @@ app.get('/api/strikes', isAuthenticated, async (req, res) => {
     }
 });
 
+// 4. Streik beenden (Nur für Ersteller oder Admins)
+app.delete('/api/strikes/:id', isAuthenticated, async (req, res) => {
+    const strikeId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const strike = await db.collection('strikes').findOne({ _id: strikeId });
+        if (!strike) return res.status(404).json({ error: "Streik nicht gefunden." });
+
+        const user = await usersCollection.findOne({ _id: userId });
+        
+        // Der Ersteller ist immer der erste Eintrag im Array (Index 0)
+        const isCreator = strike.strikers[0].equals(userId);
+
+        if (!isCreator && !user.isAdmin) {
+            return res.status(403).json({ error: "Nur der Streikführer oder ein Admin kann diesen Streik beenden." });
+        }
+
+        // Streik löschen
+        await db.collection('strikes').deleteOne({ _id: strikeId });
+
+        // News-Meldung abfeuern
+        await newsCollection.insertOne({
+            headline: `STREIK BEI ${strike.module.toUpperCase()} BEENDET! ✅`,
+            content: `Der Streik wurde von ${user.username} offiziell für beendet erklärt. Das Modul ist wieder frei zugänglich!`,
+            author: "LNN Gewerkschaft",
+            category: "Community",
+            createdAt: new Date(),
+            likes: 0
+        });
+        if (typeof updateDataVersion === 'function') updateDataVersion('news');
+
+        res.json({ message: "Streik erfolgreich aufgelöst! Das System läuft wieder." });
+    } catch (e) {
+        console.error("Fehler beim Beenden des Streiks:", e);
+        res.status(500).json({ error: "Fehler beim Auflösen des Streiks." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
