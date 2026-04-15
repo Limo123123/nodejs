@@ -7712,7 +7712,7 @@ app.post('/api/admin/engine', isAuthenticated, isAdmin, async (req, res) => {
 // === GAME CENTER API (AUTOMATISCH & DIREKT) ===
 // =========================================================
 
-const ALLOWED_GAMES = ['flappy', 'snake', 'slots', 'memory', 'limway'];
+const ALLOWED_GAMES = ['flappy', 'snake', 'slots', 'memory', 'limway', 'amongus'];
 
 // 1. Status abrufen
 app.get('/api/games/status', isAuthenticated, async (req, res) => {
