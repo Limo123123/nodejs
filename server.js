@@ -15318,10 +15318,10 @@ app.get('/api/strikes/public', async (req, res) => {
 });
 
 // =========================================================
-// === AMONG US P2P SIGNALING (NO WEBSOCKETS) ===
+// === AMONG US P2P SIGNALING (REDIS CLUSTER FIX) ===
 // =========================================================
-const amongUsRooms = new Map(); // In-Memory Speicher für aktive Lobbys
 
+// Hilfsfunktion: Generiert einen 4-stelligen Raumcode
 function generateRoomCode() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
     let code = '';
@@ -15330,69 +15330,99 @@ function generateRoomCode() {
 }
 
 // 1. Raum hosten
-app.post('/api/amongus/host', isAuthenticated, (req, res) => {
+app.post('/api/amongus/host', isAuthenticated, async (req, res) => {
     const hostId = req.session.userId;
     let roomCode = generateRoomCode();
-    while (amongUsRooms.has(roomCode)) roomCode = generateRoomCode();
+    
+    // Redis Check, ob Code schon existiert
+    while (await global.redisPub.exists(`au_room:${roomCode}`)) {
+        roomCode = generateRoomCode();
+    }
 
-    amongUsRooms.set(roomCode, {
+    const roomData = {
         hostId: hostId,
         guestId: null,
         signalsForHost: [],
         signalsForGuest: [],
         createdAt: Date.now()
-    });
+    };
+
+    // In Redis speichern (Ablaufzeit 15 Minuten = 900 Sekunden)
+    // setEx löscht den Raum nach 15 Minuten automatisch (Garbage Collection!)
+    await global.redisPub.setEx(`au_room:${roomCode}`, 900, JSON.stringify(roomData));
 
     console.log(`${LOG_PREFIX_SERVER} [AmongUs] Raum ${roomCode} von ${req.session.username} erstellt.`);
     res.json({ roomCode, playerId: hostId, isHost: true });
 });
 
 // 2. Raum beitreten
-app.post('/api/amongus/join', isAuthenticated, (req, res) => {
+app.post('/api/amongus/join', isAuthenticated, async (req, res) => {
     const { roomCode } = req.body;
     const guestId = req.session.userId;
-    const room = amongUsRooms.get(roomCode.toUpperCase());
+    const redisKey = `au_room:${roomCode.toUpperCase()}`;
 
-    if (!room) return res.status(404).json({ error: "Raum nicht gefunden." });
+    // Raum aus Redis holen, egal welcher CPU-Worker wir sind!
+    const roomRaw = await global.redisPub.get(redisKey);
+    if (!roomRaw) return res.status(404).json({ error: "Raum nicht gefunden." });
+    
+    const room = JSON.parse(roomRaw);
     if (room.guestId && room.guestId !== guestId) return res.status(400).json({ error: "Raum ist bereits voll." });
 
     room.guestId = guestId;
+    await global.redisPub.setEx(redisKey, 900, JSON.stringify(room));
+
     console.log(`${LOG_PREFIX_SERVER} [AmongUs] ${req.session.username} ist Raum ${roomCode} beigetreten.`);
     res.json({ roomCode: roomCode.toUpperCase(), playerId: guestId, isHost: false });
 });
 
 // 3. Signale senden (SDP, ICE)
-app.post('/api/amongus/signal', isAuthenticated, (req, res) => {
+app.post('/api/amongus/signal', isAuthenticated, async (req, res) => {
     const { roomCode, signal } = req.body;
     const senderId = req.session.userId;
-    const room = amongUsRooms.get(roomCode);
+    const redisKey = `au_room:${roomCode.toUpperCase()}`;
 
-    if (!room) return res.status(404).json({ error: "Raum nicht gefunden." });
+    const roomRaw = await global.redisPub.get(redisKey);
+    if (!roomRaw) return res.status(404).json({ error: "Raum nicht gefunden." });
+    
+    const room = JSON.parse(roomRaw);
 
     if (senderId === room.hostId) {
         room.signalsForGuest.push(signal);
     } else if (senderId === room.guestId) {
         room.signalsForHost.push(signal);
     }
+    
+    await global.redisPub.setEx(redisKey, 900, JSON.stringify(room));
     res.json({ success: true });
 });
 
 // 4. Signale abrufen (Polling)
-app.get('/api/amongus/signal/:roomCode', isAuthenticated, (req, res) => {
-    const { roomCode } = params = req.params;
+app.get('/api/amongus/signal/:roomCode', isAuthenticated, async (req, res) => {
+    const { roomCode } = req.params;
     const receiverId = req.session.userId;
-    const room = amongUsRooms.get(roomCode.toUpperCase());
+    const redisKey = `au_room:${roomCode.toUpperCase()}`;
 
-    if (!room) return res.json({ signals: [] });
+    const roomRaw = await global.redisPub.get(redisKey);
+    if (!roomRaw) return res.json({ signals: [] });
 
+    const room = JSON.parse(roomRaw);
     let signals = [];
-    if (receiverId === room.hostId) {
+    let hasChanges = false;
+
+    if (receiverId === room.hostId && room.signalsForHost.length > 0) {
         signals = [...room.signalsForHost];
         room.signalsForHost = []; 
-    } else if (receiverId === room.guestId) {
+        hasChanges = true;
+    } else if (receiverId === room.guestId && room.signalsForGuest.length > 0) {
         signals = [...room.signalsForGuest];
         room.signalsForGuest = []; 
+        hasChanges = true;
     }
+    
+    if (hasChanges) {
+        await global.redisPub.setEx(redisKey, 900, JSON.stringify(room));
+    }
+    
     res.json({ signals });
 });
 
