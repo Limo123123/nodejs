@@ -15317,6 +15317,99 @@ app.get('/api/strikes/public', async (req, res) => {
     }
 });
 
+// =========================================================
+// === AMONG US P2P SIGNALING (NO WEBSOCKETS) ===
+// =========================================================
+const amongUsRooms = new Map(); // In-Memory Speicher für aktive Lobbys
+
+// Hilfsfunktion: Generiert einen 4-stelligen Raumcode
+function generateRoomCode() {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    let code = '';
+    for (let i = 0; i < 4; i++) code += chars.charAt(Math.floor(Math.random() * chars.length));
+    return code;
+}
+
+// 1. Raum hosten
+app.post('/api/amongus/host', isAuthenticated, (req, res) => {
+    const hostId = req.session.userId;
+    let roomCode = generateRoomCode();
+    while (amongUsRooms.has(roomCode)) roomCode = generateRoomCode();
+
+    amongUsRooms.set(roomCode, {
+        hostId: hostId,
+        guestId: null,
+        signalsForHost: [],
+        signalsForGuest: [],
+        createdAt: Date.now()
+    });
+
+    console.log(`[AmongUs] Raum ${roomCode} von ${req.session.username} erstellt.`);
+    res.json({ roomCode, playerId: hostId, isHost: true });
+});
+
+// 2. Raum beitreten
+app.post('/api/amongus/join', isAuthenticated, (req, res) => {
+    const { roomCode } = req.body;
+    const guestId = req.session.userId;
+    const room = amongUsRooms.get(roomCode.toUpperCase());
+
+    if (!room) return res.status(404).json({ error: "Raum nicht gefunden." });
+    if (room.guestId && room.guestId !== guestId) return res.status(400).json({ error: "Raum ist bereits voll." });
+
+    room.guestId = guestId;
+    console.log(`[AmongUs] ${req.session.username} ist Raum ${roomCode} beigetreten.`);
+    res.json({ roomCode: roomCode.toUpperCase(), playerId: guestId, isHost: false });
+});
+
+// 3. Signale senden (Offer, Answer, ICE)
+app.post('/api/amongus/signal', isAuthenticated, (req, res) => {
+    const { roomCode, signal } = req.body;
+    const senderId = req.session.userId;
+    const room = amongUsRooms.get(roomCode);
+
+    if (!room) return res.status(404).json({ error: "Raum nicht gefunden." });
+
+    // Wenn der Host sendet, ist es für den Gast bestimmt und umgekehrt
+    if (senderId === room.hostId) {
+        room.signalsForGuest.push(signal);
+    } else if (senderId === room.guestId) {
+        room.signalsForHost.push(signal);
+    }
+
+    res.json({ success: true });
+});
+
+// 4. Signale abrufen (Polling)
+app.get('/api/amongus/signal/:roomCode', isAuthenticated, (req, res) => {
+    const { roomCode } = req.params;
+    const receiverId = req.session.userId;
+    const room = amongUsRooms.get(roomCode.toUpperCase());
+
+    if (!room) return res.json({ signals: [] }); // Leeres Array, falls Raum tot
+
+    let signals = [];
+    if (receiverId === room.hostId) {
+        signals = [...room.signalsForHost];
+        room.signalsForHost = []; // Nach dem Abrufen leeren
+    } else if (receiverId === room.guestId) {
+        signals = [...room.signalsForGuest];
+        room.signalsForGuest = []; // Nach dem Abrufen leeren
+    }
+
+    res.json({ signals });
+});
+
+// Garbage Collection: Leere Räume nach 10 Minuten löschen
+setInterval(() => {
+    const now = Date.now();
+    for (const [code, room] of amongUsRooms.entries()) {
+        if (now - room.createdAt > 10 * 60 * 1000) {
+            amongUsRooms.delete(code);
+        }
+    }
+}, 5 * 60 * 1000);
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
