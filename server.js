@@ -7797,16 +7797,16 @@ app.post('/api/games/start', isAuthenticated, async (req, res) => {
 
 // 3. Score speichern
 app.post('/api/games/submit-score', isAuthenticated, async (req, res) => {
-    const { gameId, score } = req.body;
+    const { gameId, score, seed } = req.body;
     const userId = new ObjectId(req.session.userId);
     const username = req.session.username;
 
-    // FIX: Auch hier erlauben wir snake
     if (!ALLOWED_GAMES.includes(gameId)) return res.status(400).json({ error: "Spiel ungültig." });
     if (typeof score !== 'number') return res.status(400).json({ error: "Score fehlt." });
-
-    // Anti-Cheat (Snake Scores können höher sein als Flappy, daher Limit erhöht)
     if (score > 1000000) return res.status(400).json({ error: "Score ungültig." });
+
+    // Wenn kein Seed mitgegeben wurde, ist es der "random" (Standard) Seed
+    const gameSeed = seed ? String(seed).trim() : 'random';
 
     try {
         await highscoresCollection.insertOne({
@@ -7814,6 +7814,7 @@ app.post('/api/games/submit-score', isAuthenticated, async (req, res) => {
             userId: userId,
             username: username,
             score: score,
+            seed: gameSeed, // <-- NEU
             timestamp: new Date()
         });
         res.json({ success: true });
@@ -7822,21 +7823,21 @@ app.post('/api/games/submit-score', isAuthenticated, async (req, res) => {
     }
 });
 
-// 4. Leaderboard V2 (Bester Score + Suche + Seiten)
+// 4. Leaderboard
 app.get('/api/games/leaderboard/:gameId', async (req, res) => {
     const { gameId } = req.params;
 
-    // FIX: Auch hier erlauben wir snake
     if (!ALLOWED_GAMES.includes(gameId)) return res.status(400).json({ error: "Spiel ungültig." });
 
     const search = req.query.search || "";
+    const seed = req.query.seed || "random";
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
 
     try {
         const pipeline = [
-            { $match: { game: gameId } },
+            { $match: { game: gameId, seed: seed } },
             { $sort: { score: -1 } },
             {
                 $group: {
@@ -7875,6 +7876,25 @@ app.get('/api/games/leaderboard/:gameId', async (req, res) => {
         res.status(500).json({ error: "Fehler beim Laden der Bestenliste." });
     }
 });
+
+// --- HIGHSCORE MÜLLABFUHR ---
+if (cluster.isPrimary) {
+    setInterval(async () => {
+        try {
+            // Lösche alles, was älter als 14 Tage ist UND nicht der 'random' (Standard) Seed ist
+            const fourteenDaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
+            const result = await highscoresCollection.deleteMany({
+                seed: { $ne: 'random' },
+                timestamp: { $lt: fourteenDaysAgo }
+            });
+            if (result.deletedCount > 0) {
+                console.log(`${LOG_PREFIX_SERVER} 🧹 ${result.deletedCount} alte Custom-Seed Highscores gelöscht.`);
+            }
+        } catch(e) {
+            console.error("Fehler beim Löschen alter Highscores:", e);
+        }
+    }, 12 * 60 * 60 * 1000); // Alle 12 Stunden prüfen
+}
 
 // =========================================================
 // === TINDA (TINDER CLONE) BACKEND ===
