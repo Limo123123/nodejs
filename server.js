@@ -5882,21 +5882,42 @@ app.post('/api/admin/users/:id/fine', isAuthenticated, isAdmin, async (req, res)
     } catch (e) { res.status(500).json({ error: "Fehler." }); }
 });
 
-// Route für den Nutzer selbst (Kann unter "ACCOUNT" platziert werden)
+// Route für den Nutzer selbst
 app.delete('/api/account/me', isAuthenticated, async (req, res) => {
-    console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} löscht seinen eigenen Account.`);
+    const { password } = req.body;
+    const userIdStr = req.session.userId;
+    const username = req.session.username;
+
+    console.log(`${LOG_PREFIX_SERVER} User ${username} will seinen Account löschen.`);
+
+    if (!password) {
+        return res.status(400).json({ error: "Passwort zur Bestätigung erforderlich." });
+    }
+
     try {
-        const success = await deleteUserAndCleanup(req.session.userId);
-        if (!success) return res.status(404).json({ error: "Benutzer nicht gefunden." });
+        // 1. User aus der Datenbank holen, um das Passwort zu vergleichen
+        const user = await usersCollection.findOne({ _id: new ObjectId(userIdStr) });
+        if (!user) return res.status(404).json({ error: "Benutzer nicht gefunden." });
+
+        // 2. Passwort prüfen (WICHTIG!)
+        const match = await bcrypt.compare(password, user.password);
+        if (!match) {
+            return res.status(401).json({ error: "Falsches Passwort! Löschung abgebrochen." });
+        }
+
+        // 3. Wenn Passwort stimmt: Account und alle Spuren vernichten
+        const success = await deleteUserAndCleanup(userIdStr);
+        if (!success) return res.status(500).json({ error: "Kritischer Fehler beim Löschen." });
         
-        // Session zerstören, da Account weg ist
+        // 4. Session zerstören und ausloggen
         req.session.destroy(err => {
             res.clearCookie('connect.sid', { path: '/' });
             res.json({ message: "Dein Account und alle deine Daten wurden erfolgreich gelöscht. Auf Wiedersehen!" });
         });
+
     } catch (e) {
-        console.error(e);
-        res.status(500).json({ error: "Kritischer Fehler beim Löschen des Accounts." });
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Löschen des Accounts von ${username}:`, e);
+        res.status(500).json({ error: "Serverfehler beim Löschen des Accounts." });
     }
 });
 
