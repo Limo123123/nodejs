@@ -15322,7 +15322,6 @@ app.get('/api/strikes/public', async (req, res) => {
 // =========================================================
 const amongUsRooms = new Map(); // In-Memory Speicher für aktive Lobbys
 
-// Hilfsfunktion: Generiert einen 4-stelligen Raumcode
 function generateRoomCode() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
     let code = '';
@@ -15344,7 +15343,7 @@ app.post('/api/amongus/host', isAuthenticated, (req, res) => {
         createdAt: Date.now()
     });
 
-    console.log(`[AmongUs] Raum ${roomCode} von ${req.session.username} erstellt.`);
+    console.log(`${LOG_PREFIX_SERVER} [AmongUs] Raum ${roomCode} von ${req.session.username} erstellt.`);
     res.json({ roomCode, playerId: hostId, isHost: true });
 });
 
@@ -15358,11 +15357,11 @@ app.post('/api/amongus/join', isAuthenticated, (req, res) => {
     if (room.guestId && room.guestId !== guestId) return res.status(400).json({ error: "Raum ist bereits voll." });
 
     room.guestId = guestId;
-    console.log(`[AmongUs] ${req.session.username} ist Raum ${roomCode} beigetreten.`);
+    console.log(`${LOG_PREFIX_SERVER} [AmongUs] ${req.session.username} ist Raum ${roomCode} beigetreten.`);
     res.json({ roomCode: roomCode.toUpperCase(), playerId: guestId, isHost: false });
 });
 
-// 3. Signale senden (Offer, Answer, ICE)
+// 3. Signale senden (SDP, ICE)
 app.post('/api/amongus/signal', isAuthenticated, (req, res) => {
     const { roomCode, signal } = req.body;
     const senderId = req.session.userId;
@@ -15370,41 +15369,38 @@ app.post('/api/amongus/signal', isAuthenticated, (req, res) => {
 
     if (!room) return res.status(404).json({ error: "Raum nicht gefunden." });
 
-    // Wenn der Host sendet, ist es für den Gast bestimmt und umgekehrt
     if (senderId === room.hostId) {
         room.signalsForGuest.push(signal);
     } else if (senderId === room.guestId) {
         room.signalsForHost.push(signal);
     }
-
     res.json({ success: true });
 });
 
 // 4. Signale abrufen (Polling)
 app.get('/api/amongus/signal/:roomCode', isAuthenticated, (req, res) => {
-    const { roomCode } = req.params;
+    const { roomCode } = params = req.params;
     const receiverId = req.session.userId;
     const room = amongUsRooms.get(roomCode.toUpperCase());
 
-    if (!room) return res.json({ signals: [] }); // Leeres Array, falls Raum tot
+    if (!room) return res.json({ signals: [] });
 
     let signals = [];
     if (receiverId === room.hostId) {
         signals = [...room.signalsForHost];
-        room.signalsForHost = []; // Nach dem Abrufen leeren
+        room.signalsForHost = []; 
     } else if (receiverId === room.guestId) {
         signals = [...room.signalsForGuest];
-        room.signalsForGuest = []; // Nach dem Abrufen leeren
+        room.signalsForGuest = []; 
     }
-
     res.json({ signals });
 });
 
-// Garbage Collection: Leere Räume nach 10 Minuten löschen
+// Garbage Collection: Leere Räume nach 15 Minuten killen
 setInterval(() => {
     const now = Date.now();
     for (const [code, room] of amongUsRooms.entries()) {
-        if (now - room.createdAt > 10 * 60 * 1000) {
+        if (now - room.createdAt > 15 * 60 * 1000) {
             amongUsRooms.delete(code);
         }
     }
