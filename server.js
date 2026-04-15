@@ -15426,16 +15426,6 @@ app.get('/api/amongus/signal/:roomCode', isAuthenticated, async (req, res) => {
     res.json({ signals });
 });
 
-// Garbage Collection: Leere Räume nach 15 Minuten killen
-setInterval(() => {
-    const now = Date.now();
-    for (const [code, room] of amongUsRooms.entries()) {
-        if (now - room.createdAt > 15 * 60 * 1000) {
-            amongUsRooms.delete(code);
-        }
-    }
-}, 5 * 60 * 1000);
-
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
