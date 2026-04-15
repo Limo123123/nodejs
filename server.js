@@ -7712,8 +7712,7 @@ app.post('/api/admin/engine', isAuthenticated, isAdmin, async (req, res) => {
 // === GAME CENTER API (AUTOMATISCH & DIREKT) ===
 // =========================================================
 
-// HIER IST DER FIX: Wir erlauben jetzt 'snake'
-const ALLOWED_GAMES = ['flappy', 'snake', 'slots', 'memory'];
+const ALLOWED_GAMES = ['flappy', 'snake', 'slots', 'memory', 'limway'];
 
 // 1. Status abrufen
 app.get('/api/games/status', isAuthenticated, async (req, res) => {
