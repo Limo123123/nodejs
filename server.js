@@ -12381,7 +12381,7 @@ app.post('/api/lottery/buy', isAuthenticated, async (req, res) => {
     }
 });
 
-// C. Die Ziehung (Der Master-Job)
+// C. Die Ziehung
 async function runWeeklyLottery() {
     console.log(`${LOG_PREFIX_SERVER} 🎰 DIE ZIEHUNG STARTET...`);
     try {
@@ -12389,36 +12389,47 @@ async function runWeeklyLottery() {
         const pot = lotto ? lotto.pot : 0;
         if (pot <= 0) return;
 
-        // Alle Lose holen
-        const allTickets = await db.collection('lotteryTickets').find({}).toArray();
-        if (allTickets.length < 3) {
-            console.log("Nicht genug Teilnehmer für eine Ziehung.");
+        // 1. Zählen, wie viele Lose insgesamt im Topf sind (Das kostet fast keine Leistung)
+        const totalTickets = await db.collection('lotteryTickets').countDocuments();
+        if (totalTickets === 0) {
+            console.log(`${LOG_PREFIX_SERVER} Niemand hat Lose gekauft. Jackpot bleibt bestehen.`);
             return;
         }
 
-        // Gewinner ziehen (Zufällig mischen und 3 nehmen)
-        const shuffled = allTickets.sort(() => 0.5 - Math.random());
+        // 2. DATENBANK-MAGIE: Wir lassen MongoDB direkt 100 zufällige Lose ziehen!
+        // Das verbraucht fast keinen RAM, egal ob es 100 oder 50 Millionen Lose in der DB gibt.
+        const randomTickets = await db.collection('lotteryTickets').aggregate([
+            { $sample: { size: 100 } }
+        ]).toArray();
+
+        // 3. Gewinner herausfiltern (Jeder User darf nur 1x pro Ziehung gewinnen)
         const winners = [];
         const seenUsers = new Set();
 
-        for (let t of shuffled) {
+        for (let t of randomTickets) {
             if (!seenUsers.has(t.userId.toString())) {
                 winners.push(t);
                 seenUsers.add(t.userId.toString());
             }
-            if (winners.length === 3) break;
+            if (winners.length === 3) break; // Wir haben unsere Top 3!
         }
+
+        if (winners.length === 0) return;
 
         // Verteilung: 1. (60%), 2. (25%), 3. (15%)
         const shares = [0.60, 0.25, 0.15];
         let resultsText = "";
+        let totalPaidOut = 0;
 
         for (let i = 0; i < winners.length; i++) {
             const prize = Math.floor(pot * shares[i]);
+            totalPaidOut += prize;
+
+            // Geld gutschreiben
             await usersCollection.updateOne({ _id: winners[i].userId }, { $inc: { balance: prize } });
             resultsText += `${i + 1}. Platz: ${winners[i].username} ($${prize.toLocaleString()}) `;
             
-            // Log in news
+            // Log in LNN News
             await newsCollection.insertOne({
                 headline: `LOTTO-GEWINNER: ${winners[i].username}! 🏆`,
                 content: `${winners[i].username} belegt den ${i + 1}. Platz in der Wochenziehung und räumt $${prize.toLocaleString()} ab!`,
@@ -12429,13 +12440,22 @@ async function runWeeklyLottery() {
             });
         }
 
-        // Reset: Pot auf 0, Lose löschen
-        await systemSettingsCollection.updateOne({ id: 'lottery_state' }, { $set: { pot: 0, lastWinners: resultsText } });
+        // Reset: Pot auf den Restwert setzen (falls weniger als 3 Leute gespielt haben, bleibt der Rest für nächste Woche)
+        const remainingPot = pot - totalPaidOut;
+        await systemSettingsCollection.updateOne(
+            { id: 'lottery_state' }, 
+            { $set: { pot: remainingPot, lastWinners: resultsText } }
+        );
+
+        // Alle Lose löschen (Bei 5 Millionen Losen dauert das ein paar Sekunden, aber blockiert nicht den RAM)
         await db.collection('lotteryTickets').deleteMany({});
 
         console.log(`${LOG_PREFIX_SERVER} Ziehung beendet: ${resultsText}`);
-        updateDataVersion('news');
-    } catch (e) { console.error("Lotto-Ziehungsfehler:", e); }
+        if (typeof updateDataVersion === 'function') updateDataVersion('news');
+        
+    } catch (e) { 
+        console.error("Lotto-Ziehungsfehler:", e); 
+    }
 }
 
 // Intervall: Einmal pro Woche (z.B. Sonntag 20 Uhr) 
