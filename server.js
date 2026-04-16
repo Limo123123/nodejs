@@ -12054,6 +12054,27 @@ app.post('/api/realestate/sell', isAuthenticated, async (req, res) => {
     }
 });
 
+// Map Creator Layout speichern
+app.post('/api/realestate/my-home/amongus-map', isAuthenticated, async (req, res) => {
+    const { mapLayout } = req.body; 
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        // Suche das Haus des Users (egal ob Owner oder Mitbewohner, wir erlauben es mal dem Owner)
+        const home = await ownedPropertiesCollection.findOne({ ownerId: userId });
+        if (!home) return res.status(403).json({ error: "Nur der Hausbesitzer darf die Among Us Map umbauen." });
+
+        await ownedPropertiesCollection.updateOne(
+            { _id: home._id },
+            { $set: { amongUsMap: mapLayout } }
+        );
+
+        res.json({ message: "Deine Among Us Custom Map wurde erfolgreich in deinem Haus gespeichert!" });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Speichern der Map." });
+    }
+});
+
 // --- BOUNTY SYSTEM ENDPOINTS ---
 
 // 1. Liste der letzten Angreifer holen (für das Profil)
