@@ -808,7 +808,7 @@ async function deleteUserAndCleanup(userIdString) {
         restaurantOrdersCollection.deleteMany({ userId: uId }), // NEU: Restaurant
         tindaSwipesCollection.deleteMany({ userId: uId }), // NEU: Tinda Swipes
         teachermonInvCollection.deleteMany({ userId: uId }), // NEU: Teachermon Karten
-        deliveriesCollection.deleteMany({ $or: [{senderId: uId}, {targetId: uId}] }) // NEU: Lieferungen
+        deliveriesCollection.deleteMany({ $or: [{senderId: uId}, {targetId: uId}] })
     ]);
 
     // 3. Komplexe Verknüpfungen lösen (WGs, Häuser, Gangs)
@@ -6574,7 +6574,7 @@ async function updateUserAchievements(user) {
         inventoriesCollection.findOne({ userId, productId: 'tax_shield', quantityOwned: { $gt: 0 } }),
         petsCollection.countDocuments({ userId }),
         db.collection('gangs').countDocuments({ leaderId: userId }),
-        teachermonInvCollection.countDocuments({ userId, quantity: { $gt: 0 } })
+        teachermonInvCollection.countDocuments({ userId, quantity: { $gt: 0 } }),
 		deliveriesCollection.countDocuments({ senderId: userId }),
         inventoriesCollection.countDocuments({ userId, productId: { $regex: '^f_' } })
     ]);
