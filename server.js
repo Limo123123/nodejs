@@ -12013,7 +12013,8 @@ app.get('/api/realestate/my-home', isAuthenticated, async (req, res) => {
             hasHome: true, 
             isOwner: home.ownerId.equals(userId),
             details: home,
-            roommates: roommates
+            roommates: roommates,
+            amongUsMap: home.amongUsMap || []
         });
     } catch (e) { res.status(500).json({ error: "Fehler beim Laden." }); }
 });
@@ -12051,27 +12052,6 @@ app.post('/api/realestate/sell', isAuthenticated, async (req, res) => {
         res.status(400).json({ error: e.message });
     } finally {
         await session.endSession();
-    }
-});
-
-// Map Creator Layout speichern
-app.post('/api/realestate/my-home/amongus-map', isAuthenticated, async (req, res) => {
-    const { mapLayout } = req.body; 
-    const userId = new ObjectId(req.session.userId);
-
-    try {
-        // Suche das Haus des Users (egal ob Owner oder Mitbewohner, wir erlauben es mal dem Owner)
-        const home = await ownedPropertiesCollection.findOne({ ownerId: userId });
-        if (!home) return res.status(403).json({ error: "Nur der Hausbesitzer darf die Among Us Map umbauen." });
-
-        await ownedPropertiesCollection.updateOne(
-            { _id: home._id },
-            { $set: { amongUsMap: mapLayout } }
-        );
-
-        res.json({ message: "Deine Among Us Custom Map wurde erfolgreich in deinem Haus gespeichert!" });
-    } catch (e) {
-        res.status(500).json({ error: "Fehler beim Speichern der Map." });
     }
 });
 
@@ -12689,7 +12669,16 @@ const LIMEA_CATALOG = [
     // --- LUXUS & MEGA-FLEX ---
     { id: 'f_whirlpool', name: 'Indoor Whirlpool', price: 4500, w: 160, h: 160, icon: '🫧', bg: '#00CED1', layer: 'base' },
     { id: 'f_gold_statue', name: 'Limo Goldstatue', price: 50000, w: 60, h: 60, icon: '🗽', bg: '#FFD700', layer: 'decor' },
-    { id: 'f_money_pile', name: 'Geldstapel', price: 100000, w: 80, h: 80, icon: '💸', bg: '#85bb65', layer: 'decor' }
+    { id: 'f_money_pile', name: 'Geldstapel', price: 100000, w: 80, h: 80, icon: '💸', bg: '#85bb65', layer: 'decor' },
+	
+	// --- AMONG US MAP ELEMENTE ---
+    { id: 'au_vent', name: 'Lüftungsschacht (Vent)', price: 500, w: 60, h: 60, icon: '🕳️', bg: '#222222', layer: 'vent' },
+    { id: 'au_task_wires', name: 'Task: Kabel flicken', price: 200, w: 40, h: 40, icon: '🔌', bg: '#fbc02d', layer: 'task' },
+    { id: 'au_task_download', name: 'Task: Daten Download', price: 200, w: 60, h: 40, icon: '💻', bg: '#2196F3', layer: 'task' },
+    { id: 'au_task_engine', name: 'Task: Motor starten', price: 300, w: 80, h: 80, icon: '⚙️', bg: '#757575', layer: 'task' },
+    { id: 'au_wall_long', name: 'Wand (Lang)', price: 50, w: 400, h: 20, icon: '🧱', bg: '#111111', layer: 'wall' },
+    { id: 'au_wall_short', name: 'Wand (Kurz)', price: 25, w: 100, h: 20, icon: '🧱', bg: '#111111', layer: 'wall' },
+    { id: 'au_table_cafeteria', name: 'Cafeteria Tisch', price: 150, w: 160, h: 160, icon: '🍽️', bg: '#455a64', layer: 'base' }
 ];
 
 // Editor-Daten abrufen (Lädt Haus, Möbel, Katalog und Geld auf einmal)
@@ -12788,7 +12777,28 @@ app.post('/api/realestate/my-home/layout', isAuthenticated, async (req, res) => 
     }
 });
 
-// NEU: Nachbarschaft (Alle gebauten Häuser sehen)
+// Map Creator Layout speichern
+app.post('/api/realestate/my-home/amongus-map', isAuthenticated, async (req, res) => {
+    const { mapLayout } = req.body; 
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        // Suche das Haus des Users (egal ob Owner oder Mitbewohner, wir erlauben es mal dem Owner)
+        const home = await ownedPropertiesCollection.findOne({ ownerId: userId });
+        if (!home) return res.status(403).json({ error: "Nur der Hausbesitzer darf die Among Us Map umbauen." });
+
+        await ownedPropertiesCollection.updateOne(
+            { _id: home._id },
+            { $set: { amongUsMap: mapLayout } }
+        );
+
+        res.json({ message: "Deine Among Us Custom Map wurde erfolgreich in deinem Haus gespeichert!" });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Speichern der Map." });
+    }
+});
+
+// Nachbarschaft (Alle gebauten Häuser sehen)
 app.get('/api/realestate/neighborhood', isAuthenticated, async (req, res) => {
     try {
         const houses = await ownedPropertiesCollection.find({}).toArray();
