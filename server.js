@@ -999,6 +999,8 @@ const AVAILABLE_PERMISSIONS = {
     'system_maintenance': { name: 'System & Wartung', desc: 'Health-Check, Stats, Reports abrufen und System-Reparaturen durchführen.' },
     'super_admin': { name: 'Super Admin (Engine)', desc: 'Gefährlich: Voller, ungefilterter Zugriff auf die MongoDB-Engine.' },
 	'manage_requests': { name: 'Support-Anträge', desc: 'Erlaubt das Einsehen und Bearbeiten von User-Formularen (Geld, Account etc.).' },
+	'manage_pets': { name: 'Tier-Gott', desc: 'Tiere vom Friedhof wiederbeleben (Sensenmann austricksen).' },
+    'manage_gangs': { name: 'Kartell-Boss', desc: 'Voller Zugriff auf Gangs und Zonen-Reset.' },
 };
 
 // 2. MAPPING: WELCHER ENDPOINT BRAUCHT WELCHES RECHT
@@ -1089,6 +1091,7 @@ const ENDPOINT_PERMISSIONS = {
 	
 	'GET /api/admin/requests': 'manage_requests',
 	'POST /api/admin/requests/:id/process': 'manage_requests',
+	'POST /api/admin/system/resurrect-pets': 'manage_pets',
 };
 
 // 3. VORGEFERTIGTE GRUPPEN (ROLES)
@@ -6425,6 +6428,44 @@ const ACHIEVEMENT_DEFINITIONS = [
         // Prüft ob man das Item besitzt
         check: (u, s) => s.hasTaxShield
     },
+	
+	// --- 🐾 HAUSTIERE ---
+    {
+        id: 'tierfreund', icon: '🐶', title: 'Tierfreund', desc: 'Adoptiere dein erstes Haustier.',
+        check: (u, s) => s.petCount >= 1
+    },
+    {
+        id: 'zoo_director', icon: '🦁', title: 'Zoodirektor', desc: 'Besitze 5 Haustiere gleichzeitig.',
+        check: (u, s) => s.petCount >= 5
+    },
+
+    // --- 🎰 CASINO (Nutzt direkt die User-Daten) ---
+    {
+        id: 'high_roller', icon: '🎰', title: 'High Roller', desc: 'Setze insgesamt über $1.000.000 im Casino.',
+        check: (u) => (u.casinoStats?.totalWagered || 0) >= 1000000
+    },
+    {
+        id: 'bad_luck', icon: '💸', title: 'Pechvogel', desc: 'Verliere 50 Mal beim Coinflip. Autsch.',
+        check: (u) => (u.casinoStats?.losses || 0) >= 50
+    },
+
+    // --- 💒 STANDESAMT ---
+    {
+        id: 'polygamist', icon: '💍', title: 'Polygamist', desc: 'Sei mit 3 Personen gleichzeitig verheiratet.',
+        check: (u) => (u.spouses?.length || 0) >= 3
+    },
+
+    // --- 🏴‍☠️ GANGS ---
+    {
+        id: 'godfather', icon: '🕴️', title: 'Der Pate', desc: 'Gründe eine Gang und werde der Leader.',
+        check: (u, s) => s.isGangLeader
+    },
+
+    // --- 🃏 TEACHERMON ---
+    {
+        id: 'card_collector', icon: '🎴', title: 'Kartenhai', desc: 'Besitze 25 verschiedene Teachermon-Karten.',
+        check: (u, s) => s.teachermonUniqueCount >= 25
+    },
 
     // --- 🎮 GAMES (HIGHSCORES) ---
     // Hier prüfen wir, ob der User in der Highscore DB einen Score über X hat
@@ -6477,13 +6518,28 @@ const ACHIEVEMENT_DEFINITIONS = [
         id: 'badge_yakuza', icon: '🐉', title: 'Yakuza', desc: 'Teil der Familie. Gekauft im Untergrund.',
         check: () => false
     },
+	// --- 🚚 LOGISTIK ---
+    {
+        id: 'postman', icon: '📦', title: 'Postbote', desc: 'Verschicke dein erstes Paket.',
+        check: (u, s) => s.deliveryCount >= 1
+    },
+    {
+        id: 'logistics_master', icon: '🚚', title: 'Logistik-Meister', desc: 'Verschicke 20 Pakete.',
+        check: (u, s) => s.deliveryCount >= 20
+    },
+
+    // --- 🪑 LIMEA ---
+    {
+        id: 'interior_designer', icon: '🛋️', title: 'Innenarchitekt', desc: 'Besitze 20 Möbelstücke.',
+        check: (u, s) => s.furnitureCount >= 20
+    }
 ];
 
-// Hilfsfunktion: Automatische Prüfung (V3 - Extended Edition)
+// Hilfsfunktion: Automatische Prüfung
 async function updateUserAchievements(user) {
     const userId = user._id;
 
-    // Parallel alle Counts abfragen für Performance
+    // Parallel alle Counts abfragen für Performance (Jetzt mit Pets, Gangs & Teachermon)
     const [
         invCount,
         portCount,
@@ -6494,13 +6550,14 @@ async function updateUserAchievements(user) {
         messageCount,
         ideaCount,
         transferCount,
-        // NEU: Tinda Matches zählen (Chats vom Typ 'tinda')
         tindaMatchCount,
-        // NEU: Highscores abrufen
         bestFlappy,
         bestSnake,
-        // NEU: Hat er ein Steuerschutz-Item?
-        taxShieldItem
+        taxShieldItem,
+        // --- NEUE STATS ---
+        petCount,
+        gangLeaderCount,
+        teachermonUniqueCount
     ] = await Promise.all([
         inventoriesCollection.countDocuments({ userId }),
         portfoliosCollection.countDocuments({ userId }),
@@ -6511,13 +6568,15 @@ async function updateUserAchievements(user) {
         limMessagesCollection.countDocuments({ senderId: userId }),
         ideasCollection.countDocuments({ submitterId: userId }),
         bankTransactionsCollection.countDocuments({ fromId: userId }),
-        // Tinda:
         limChatsCollection.countDocuments({ type: 'tinda', participants: userId }),
-        // Games (Höchster Score):
         highscoresCollection.findOne({ userId, game: 'flappy' }, { sort: { score: -1 } }),
         highscoresCollection.findOne({ userId, game: 'snake' }, { sort: { score: -1 } }),
-        // Inventar Check für Badge:
-        inventoriesCollection.findOne({ userId, productId: 'tax_shield', quantityOwned: { $gt: 0 } })
+        inventoriesCollection.findOne({ userId, productId: 'tax_shield', quantityOwned: { $gt: 0 } }),
+        petsCollection.countDocuments({ userId }),
+        db.collection('gangs').countDocuments({ leaderId: userId }),
+        teachermonInvCollection.countDocuments({ userId, quantity: { $gt: 0 } })
+		deliveriesCollection.countDocuments({ senderId: userId }),
+        inventoriesCollection.countDocuments({ userId, productId: { $regex: '^f_' } })
     ]);
 
     // Das Statistik-Objekt ("s"), das wir an die Checks übergeben
@@ -6536,7 +6595,11 @@ async function updateUserAchievements(user) {
         bestFlappyScore: bestFlappy ? bestFlappy.score : 0,
         bestSnakeScore: bestSnake ? bestSnake.score : 0,
         foodEaten: user.stats?.foodEaten || 0,
-        hasTaxShield: !!taxShieldItem
+        hasTaxShield: !!taxShieldItem,
+        // --- NEUE STATS ---
+        petCount: petCount,
+        isGangLeader: gangLeaderCount > 0,
+        teachermonUniqueCount: teachermonUniqueCount
     };
 
     const unlocked = user.achievements || [];
@@ -7230,7 +7293,11 @@ const JOB_LIST = [
     { id: 'idol', title: 'K-Pop Idol', salary: 12000, cooldownSeconds: 28800, reqLevel: 25, cost: 500000 }, // 8 Std Cooldown, extrem hohes Gehalt
 	{ id: 'hacker', title: 'White-Hat Hacker', salary: 1500, cooldownSeconds: 3600, reqLevel: 10, cost: 15000 }, // 1 Std
     { id: 'streamer', title: 'Twitch Star', salary: 3000, cooldownSeconds: 7200, reqLevel: 15, cost: 40000 }, // 2 Std
-    { id: 'astronaut', title: 'Astronaut', salary: 25000, cooldownSeconds: 86400, reqLevel: 30, cost: 2000000 } // 24 Std
+    { id: 'astronaut', title: 'Astronaut', salary: 25000, cooldownSeconds: 86400, reqLevel: 30, cost: 2000000 }, // 24 Std
+	{ id: 'limo_tester', title: 'Limo-Vorkoster', salary: 250, cooldownSeconds: 600, reqLevel: 3, cost: 1000 }, // 10 Min
+    { id: 'prompt_engineer', title: 'KI-Flüsterer', salary: 800, cooldownSeconds: 1800, reqLevel: 8, cost: 5000 }, // 30 Min
+    { id: 'crypto_bro', title: 'Krypto-Guru', salary: 2000, cooldownSeconds: 5400, reqLevel: 12, cost: 25000 }, // 1.5 Std
+    { id: 'esports_pro', title: 'E-Sports Profi', salary: 7500, cooldownSeconds: 18000, reqLevel: 22, cost: 250000 } // 5 Std
 ];
 
 // GET: Verfügbare Jobs & Mein Status
@@ -12682,6 +12749,13 @@ const LIMEA_CATALOG = [
     { id: 'f_whirlpool', name: 'Indoor Whirlpool', price: 4500, w: 160, h: 160, icon: '🫧', bg: '#00CED1', layer: 'base' },
     { id: 'f_gold_statue', name: 'Limo Goldstatue', price: 50000, w: 60, h: 60, icon: '🗽', bg: '#FFD700', layer: 'decor' },
     { id: 'f_money_pile', name: 'Geldstapel', price: 100000, w: 80, h: 80, icon: '💸', bg: '#85bb65', layer: 'decor' },
+	
+	// --- GAMING & FLEX (Neue Items) ---
+    { id: 'f_gaming_chair', name: 'RGB Gaming-Stuhl', price: 300, w: 40, h: 40, icon: '💺', bg: '#ff00ff', layer: 'base' },
+    { id: 'f_neon_sign', name: 'Neon-Schild "LIMO"', price: 150, w: 80, h: 20, icon: '🚥', bg: '#ff00ff', layer: 'decor' },
+    { id: 'f_smart_fridge', name: 'Smart Kühlschrank', price: 900, w: 60, h: 60, icon: '🧊', bg: '#dcdcdc', layer: 'base' },
+    { id: 'f_indoor_fountain', name: 'Zimmerbrunnen', price: 450, w: 60, h: 60, icon: '⛲', bg: '#87cefa', layer: 'base' },
+    { id: 'f_server_rack', name: 'Home-Server Rack', price: 1200, w: 60, h: 80, icon: '🖧', bg: '#1a1a1a', layer: 'base' },
 	
 	// --- AMONG US MAP ELEMENTE ---
     { id: 'au_vent', name: 'Lüftungsschacht (Vent)', price: 500, w: 60, h: 60, icon: '🕳️', bg: '#222222', layer: 'vent' },
