@@ -7056,27 +7056,39 @@ if (cluster.isPrimary) {
 	
 }
 
-
 // --- API: Steuer-Daten für das Frontend ---
 app.get('/api/taxes/my-stats', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
     try {
-        // WICHTIG: Wir laden jetzt auch isAdmin und infinityMoney
+        // WICHTIG: Wir laden jetzt auch activeSubscriptions und spouses für die Rabatt-Berechnung
         const user = await usersCollection.findOne(
             { _id: userId },
-            { projection: { totalTaxesPaid: 1, balance: 1, isAdmin: 1, infinityMoney: 1 } }
+            { projection: { totalTaxesPaid: 1, balance: 1, isAdmin: 1, infinityMoney: 1, activeSubscriptions: 1, spouses: 1 } }
         );
 
-        // Prüfung korrigiert: Nur steuerpflichtig, wenn KEIN Admin UND KEIN Infinity-User
+        // Prüfung: Nur steuerpflichtig, wenn KEIN Admin UND KEIN Infinity-User
         const isLiable = (user.balance > TAX_THRESHOLD) && !user.isAdmin && !user.infinityMoney;
 
-        const nextTaxEstimation = isLiable ? (user.balance * TAX_RATE) : 0;
+        // 1. Aktuellen Basis-Steuersatz vom Bürgermeister laden (oder Fallback auf 0.5%)
+        const taxConfig = await systemSettingsCollection.findOne({ id: 'tax_config' });
+        let userTaxRate = taxConfig ? taxConfig.rate : TAX_RATE;
+
+        // 2. Rabatte stapeln (Genau wie in collectTaxes)
+        if (user.activeSubscriptions && user.activeSubscriptions.includes('prime')) {
+            userTaxRate = userTaxRate * 0.75; // 25% Rabatt
+        }
+        if (user.spouses && user.spouses.length > 0) {
+            userTaxRate = userTaxRate / 2; // Nur 50% Steuer für Verheiratete
+        }
+
+        // Nächste Abbuchung mit dem personalisierten Steuersatz berechnen
+        const nextTaxEstimation = isLiable ? (user.balance * userTaxRate) : 0;
 
         res.json({
             totalPaid: user.totalTaxesPaid || 0,
             isLiable: isLiable,
             threshold: TAX_THRESHOLD,
-            ratePercent: TAX_RATE * 100,
+            ratePercent: userTaxRate * 100, // Jetzt wird der echte, berechnete Satz gesendet!
             estimatedNextTax: nextTaxEstimation
         });
     } catch (err) {
