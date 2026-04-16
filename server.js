@@ -11603,6 +11603,94 @@ app.delete('/api/teachermon/admin/cards/:id', isAuthenticated, isAdmin, async (r
     }
 });
 
+// =========================================================
+// === SYSTEM REPARATUR: TEACHERMON DUPLIKATE FIXEN ===
+// =========================================================
+app.post('/api/admin/system/fix-teachermon-dupes', isAuthenticated, isAdmin, async (req, res) => {
+    console.log(`${LOG_PREFIX_SERVER} 🔧 Starte Teachermon-Duplikat-Reinigung...`);
+
+    const session = client.startSession();
+    try {
+        let deletedCardsCount = 0;
+        let mergedInvCount = 0;
+
+        await session.withTransaction(async () => {
+            // 1. Alle Karten laden
+            const allCards = await teachermonCardsCollection.find({}, { session }).toArray();
+
+            // 2. Karten nach Namen gruppieren
+            const cardsByName = {};
+            for (const card of allCards) {
+                if (!cardsByName[card.name]) cardsByName[card.name] = [];
+                cardsByName[card.name].push(card);
+            }
+
+            // 3. Duplikate verarbeiten
+            for (const [name, cards] of Object.entries(cardsByName)) {
+                if (cards.length > 1) {
+                    console.log(`${LOG_PREFIX_SERVER} Duplikate für "${name}" gefunden: ${cards.length} Stück.`);
+                    
+                    // Die erste Karte ist unser Master, alle anderen werden vernichtet
+                    const masterCard = cards[0];
+                    const duplicateCards = cards.slice(1);
+
+                    for (const dupe of duplicateCards) {
+                        // A) Inventare der Duplikate finden
+                        const dupeInvs = await teachermonInvCollection.find({ cardId: dupe.id }, { session }).toArray();
+
+                        for (const inv of dupeInvs) {
+                            // B) Menge auf die Master-Karte addieren ($inc)
+                            await teachermonInvCollection.updateOne(
+                                { userId: inv.userId, cardId: masterCard.id },
+                                { $inc: { quantity: inv.quantity } },
+                                { upsert: true, session }
+                            );
+                            mergedInvCount++;
+                        }
+
+                        // C) Alte Inventar-Einträge des Duplikats löschen
+                        await teachermonInvCollection.deleteMany({ cardId: dupe.id }, { session });
+
+                        // D) Laufende Tausch-Angebote (Trades) reparieren
+                        await teachermonTradesCollection.updateMany(
+                            { offerCardId: dupe.id },
+                            { $set: { offerCardId: masterCard.id } },
+                            { session }
+                        );
+                        await teachermonTradesCollection.updateMany(
+                            { wantCardId: dupe.id },
+                            { $set: { wantCardId: masterCard.id } },
+                            { session }
+                        );
+
+                        // E) Die doppelte Karte restlos löschen
+                        await teachermonCardsCollection.deleteOne({ _id: dupe._id }, { session });
+                        deletedCardsCount++;
+                    }
+                }
+            }
+        });
+
+        // 4. CACHE LEEREN & ANDERE WORKER INFORMIEREN
+        cachedTeachermonCards = null;
+        if (global.redisPub) {
+            global.redisPub.publish('sync-teachermon-cache', 'update');
+        }
+
+        console.log(`${LOG_PREFIX_SERVER} ✅ Reparatur abgeschlossen. ${deletedCardsCount} Duplikate gelöscht.`);
+        
+        res.json({ 
+            message: `Reparatur erfolgreich! ${deletedCardsCount} doppelte Karten entfernt und ${mergedInvCount} Inventar-Einträge sauber zusammengeführt.` 
+        });
+
+    } catch (e) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler bei der Duplikat-Reparatur:`, e);
+        res.status(500).json({ error: "Fehler bei der Reparatur: " + e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
 // ==========================================
 // === ⚔️ TEACHERMON ARENA (PVP QUARTETT) ===
 // ==========================================
