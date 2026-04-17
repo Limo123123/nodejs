@@ -1759,10 +1759,10 @@ async function rateLimitLogin(req, res, next) {
         const currentCount = await global.redisPub.incr(redisKey);
 
         if (currentCount === 1) {
-            await global.redisPub.expire(redisKey, 15 * 60); // 15 Minuten Sperre
+            await global.redisPub.expire(redisKey, 5 * 60); // 15 Minuten Sperre
         }
 
-        if (currentCount > 10) { // Max 10 Versuche
+        if (currentCount > 50) { // Max 10 Versuche
             console.warn(`${LOG_PREFIX_SERVER} 🚫 Login Block für IP ${ip} (Zu viele Versuche)`);
             return res.status(429).json({ error: "Zu viele falsche Login-Versuche. Bitte warte 15 Minuten." });
         }
