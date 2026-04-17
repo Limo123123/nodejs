@@ -15659,6 +15659,22 @@ app.get('/api/amongus/signal/:roomCode', isAuthenticated, async (req, res) => {
     res.json({ signals: mySignals, guests: room.guests });
 });
 
+app.post('/api/amongus/buy-skin', isAuthenticated, async (req, res) => {
+    const { skinId, price } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const cost = parseInt(price) || 0;
+
+    if (cost > 0) {
+        const user = await usersCollection.findOne({ _id: userId });
+        if (user.balance < cost) return res.status(400).json({ error: "Zu wenig Geld für diesen Drip!" });
+        
+        // Geld abziehen und in die Staatskasse werfen
+        await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -cost } });
+        await systemSettingsCollection.updateOne({ id: 'state_treasury' }, { $inc: { balance: cost } }, { upsert: true });
+    }
+    res.json({ success: true, message: "Skin freigeschaltet!" });
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
