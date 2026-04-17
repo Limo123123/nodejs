@@ -15656,7 +15656,7 @@ app.get('/api/amongus/signal/:roomCode', isAuthenticated, async (req, res) => {
     }
     
     // Wir senden auch die aktuelle Gästeliste mit, damit der Host neue Spieler sieht
-    res.json({ signals: mySignals, guests: room.guests });
+    res.json({ signals: mySignals, guests: room.guests, hostName: room.hostName });
 });
 
 app.post('/api/amongus/buy-skin', isAuthenticated, async (req, res) => {
