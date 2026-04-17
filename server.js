@@ -1748,8 +1748,8 @@ app.post('/api/auth/register', async (req, res) => {
 // =========================================================
 const loginAttempts = new Map(); // Speichert IP -> { count, expireTime }
 
-const LOGIN_BLOCK_DURATION = 15 * 60 * 1000; // 15 Minuten Sperre
-const MAX_LOGIN_ATTEMPTS = 10; // Max 10 Versuche pro 15 Min
+const LOGIN_BLOCK_DURATION = 5 * 60 * 1000; // 15 Minuten Sperre
+const MAX_LOGIN_ATTEMPTS = 50; // Max 50 Versuche pro 5 Min
 
 async function rateLimitLogin(req, res, next) {
     const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
