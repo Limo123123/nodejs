@@ -193,6 +193,7 @@ let deliveriesCollection;
 let reviewsCollection;
 let requestsCollection;
 let classifiedAdsCollection;
+let orphanageCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -1239,6 +1240,7 @@ MongoClient.connect(mongoUri)
 		requestsCollection = db.collection('userRequests');
 	 	classifiedAdsCollection = db.collection('classifiedAds');
         authCodesCollection = db.collection(authCodesCollectionName);
+		orphanageCollection = db.collection('orphanage');
 
         bankTransactionsCollection = db.collection('bankTransactions');
         console.log(`${LOG_PREFIX_SERVER} ✅ MongoDB verbunden & alle Collections initialisiert.`);
@@ -8457,10 +8459,19 @@ app.post('/api/tinda/chat/:chatId/message', isAuthenticated, isChatParticipant, 
     };
     await limMessagesCollection.insertOne(userMsg);
 
-    // Chat updaten
-    await limChatsCollection.updateOne({ _id: chatId }, {
-        $set: { lastMessagePreview: content.substring(0, 30), updatedAt: new Date() }
-    });
+    // Chat updaten (und Spaß-Balken füllen, wenn es ein Kind ist)
+    const updateData = { 
+        lastMessagePreview: content.substring(0, 30), 
+        updatedAt: new Date() 
+    };
+
+    if (chat.type === 'tinda_child') {
+        updateData.lastChattedAt = new Date();
+        // Spaß um 15 erhöhen, aber nie über 100
+        updateData.fun = Math.min(100, (chat.fun || 100) + 15);
+    }
+
+    await limChatsCollection.updateOne({ _id: chatId }, { $set: updateData });
 
     res.json({ message: "Gesendet", sentMessage: userMsg });
 
@@ -8772,6 +8783,68 @@ app.post('/api/tinda/chat/:chatId/transfer', isAuthenticated, isChatParticipant,
     }
 });
 
+// --- KINDER ÜBERSICHT (Für die Balken im Frontend) ---
+app.get('/api/tinda/my-children', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const children = await limChatsCollection.find({ type: 'tinda_child', participants: userId }).toArray();
+        const now = new Date().getTime();
+
+        const populatedChildren = children.map(child => {
+            const lastFed = child.lastFedAt ? new Date(child.lastFedAt).getTime() : now;
+            const lastChat = child.lastChattedAt ? new Date(child.lastChattedAt).getTime() : now;
+            
+            // Hunger sinkt über 24 Stunden, Spaß über 48 Stunden auf 0
+            const hoursSinceFed = (now - lastFed) / (1000 * 60 * 60);
+            const hoursSinceChat = (now - lastChat) / (1000 * 60 * 60);
+            
+            let currentHunger = Math.max(0, 100 - ((hoursSinceFed / 24) * 100));
+            let currentFun = Math.max(0, (child.fun || 100) - ((hoursSinceChat / 48) * 100));
+
+            return {
+                chatId: child._id,
+                name: child.childName,
+                partnerName: child.tindaPartnerName,
+                hunger: Math.round(currentHunger),
+                fun: Math.round(currentFun),
+                isCritical: currentHunger <= 20 || currentFun <= 20
+            };
+        });
+
+        res.json({ children: populatedChildren });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der Kinder." });
+    }
+});
+
+// --- FÜTTERN BUTTON ---
+app.post('/api/tinda/child/:chatId/feed', isAuthenticated, async (req, res) => {
+    const chatId = new ObjectId(req.params.chatId);
+    const userId = new ObjectId(req.session.userId);
+    const FEED_COST = 50; // $50 für Babynahrung
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (user.balance < FEED_COST) throw new Error(`Du brauchst $${FEED_COST} für Essen!`);
+
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -FEED_COST } }, { session });
+            
+            await limChatsCollection.updateOne(
+                { _id: chatId, type: 'tinda_child', participants: userId },
+                { $set: { hunger: 100, lastFedAt: new Date() } },
+                { session }
+            );
+        });
+        res.json({ message: "Kind ist satt und glücklich!" });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
 // NEU: Heiraten und Zusammenziehen
 app.post('/api/tinda/chat/:chatId/marry', isAuthenticated, isChatParticipant, async (req, res) => {
     const chatId = new ObjectId(req.params.chatId);
@@ -8931,13 +9004,17 @@ app.post('/api/tinda/chat/:chatId/have-child', isAuthenticated, isChatParticipan
             const childChat = {
                 type: 'tinda_child',
                 participants: [userId],
-                tindaPartnerId: chat.tindaPartnerId, // Referenz zum Elternteil
+                tindaPartnerId: chat.tindaPartnerId,
                 tindaPartnerName: chat.tindaPartnerName,
                 childName: newChild.name,
                 createdAt: new Date(),
                 updatedAt: new Date(),
                 lastMessagePreview: "*Babygeräusche*",
-                lastMessageTimestamp: new Date()
+                lastMessageTimestamp: new Date(),
+                hunger: 100,
+                fun: 100,
+                lastFedAt: new Date(),
+                lastChattedAt: new Date()
             };
             await limChatsCollection.insertOne(childChat, { session });
 
@@ -8973,6 +9050,138 @@ app.post('/api/tinda/chat/:chatId/have-child', isAuthenticated, isChatParticipan
         triggerAiResponse(userId, chat.tindaPartnerId, chatId, `*System: Ihr habt soeben ein Kind namens ${childName.trim()} bekommen! Reagiere extrem emotional und glücklich darüber als frischgebackenes Elternteil!*`);
 
         res.json({ message: `Herzlichen Glückwunsch zu eurem Kind ${childName.trim()}!` });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// =========================================================
+// === 🚨 DAS JUGENDAMT (CRON JOB) ===
+// =========================================================
+if (cluster.isPrimary) {
+    setInterval(async () => {
+        try {
+            const now = new Date();
+            const children = await limChatsCollection.find({ type: 'tinda_child' }).toArray();
+            
+            for (const child of children) {
+                const lastFed = child.lastFedAt ? new Date(child.lastFedAt).getTime() : now.getTime();
+                const lastChat = child.lastChattedAt ? new Date(child.lastChattedAt).getTime() : now.getTime();
+                
+                const hoursSinceFed = (now.getTime() - lastFed) / (1000 * 60 * 60);
+                const hoursSinceChat = (now.getTime() - lastChat) / (1000 * 60 * 60);
+                
+                // Verwahrlosungs-Limits: 24h kein Essen ODER 48h keine Aufmerksamkeit
+                // Spaß fängt nicht immer bei 100 an, daher rechnen wir den realen aktuellen Wert aus
+                const currentFun = Math.max(0, (child.fun || 100) - ((hoursSinceChat / 48) * 100));
+
+                if (hoursSinceFed >= 24 || currentFun <= 0) {
+                    const parentId = child.participants[0];
+                    const parent = await usersCollection.findOne({ _id: parentId });
+                    
+                    // 1. Strafe für den Elternteil ($15.000) und Strike erhöhen
+                    await usersCollection.updateOne(
+                        { _id: parentId }, 
+                        { 
+                            $inc: { balance: -15000, jugendamtStrikes: 1 },
+                            $set: { schufaScore: 100 } // Schufa crasht!
+                        }
+                    );
+                    
+                    // 2. Kind ins Waisenhaus verschieben
+                    await orphanageCollection.insertOne({
+                        originalParentId: parentId,
+                        originalParentName: parent ? parent.username : "Unbekannt",
+                        childName: child.childName,
+                        tindaPartnerName: child.tindaPartnerName,
+                        takenAwayAt: now,
+                        hunger: 100, // Wird im Waisenhaus versorgt
+                        fun: 100
+                    });
+                    
+                    // 3. Chat löschen (Damit ist das Kind weg)
+                    await limChatsCollection.deleteOne({ _id: child._id });
+                    await limMessagesCollection.deleteMany({ chatId: child._id });
+                    
+                    // 4. Böse Mail vom Jugendamt
+                    await mailsCollection.insertOne({
+                        userId: parentId,
+                        sender: "🚨 Jugendamt Limazon",
+                        subject: "EINGRIFF: Kind in Obhut genommen!",
+                        content: `Guten Tag,\n\naufgrund schwerer Vernachlässigung mussten wir ${child.childName} in unsere Obhut nehmen. Das Kind befindet sich nun im städtischen Waisenhaus.\n\nEs wurde eine Strafe von $15.000 verhängt und Ihr Schufa-Score wurde massiv herabgestuft.\n\nMit behördlichen Grüßen,\nDas Jugendamt`,
+                        isRead: false,
+                        isClaimed: false,
+                        createdAt: now
+                    });
+                    
+                    console.log(`${LOG_PREFIX_SERVER} 🚨 Jugendamt hat ${child.childName} von ${parent ? parent.username : 'Unbekannt'} abgeholt.`);
+                }
+            }
+        } catch (e) {
+            console.error("Jugendamt Error:", e);
+        }
+    }, 15 * 60 * 1000); // Checkt alle 15 Minuten
+}
+
+// --- ADOPTIONSCENTER ---
+app.get('/api/orphanage/list', async (req, res) => {
+    try {
+        const orphans = await orphanageCollection.find({}).sort({ takenAwayAt: -1 }).toArray();
+        res.json({ orphans });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden des Waisenhauses." });
+    }
+});
+
+app.post('/api/orphanage/adopt', isAuthenticated, async (req, res) => {
+    const { orphanId } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const ADOPTION_FEE = 10000;
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            
+            // Darf der User überhaupt noch adoptieren? (Strikes prüfen)
+            if ((user.jugendamtStrikes || 0) >= 3) {
+                throw new Error("Adoptionssperre! Du stehst auf der schwarzen Liste des Jugendamtes.");
+            }
+            if (user.balance < ADOPTION_FEE) {
+                throw new Error(`Die Adoptionsgebühr beträgt $${ADOPTION_FEE}.`);
+            }
+
+            const orphan = await orphanageCollection.findOne({ _id: new ObjectId(orphanId) }, { session });
+            if (!orphan) throw new Error("Kind ist bereits adoptiert worden.");
+
+            // Geld abziehen
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -ADOPTION_FEE } }, { session });
+
+            // Kind als neuen Chat beim Adoptiv-Elternteil anlegen
+            const childChat = {
+                type: 'tinda_child',
+                participants: [userId],
+                tindaPartnerId: new ObjectId("000000000000000000000000"), // Kein echter Tinda-Partner mehr
+                tindaPartnerName: "Adoptiert",
+                childName: orphan.childName,
+                createdAt: new Date(),
+                updatedAt: new Date(),
+                lastMessagePreview: "Hallo neues Zuhause!",
+                lastMessageTimestamp: new Date(),
+                hunger: 100,
+                fun: 100,
+                lastFedAt: new Date(),
+                lastChattedAt: new Date()
+            };
+            await limChatsCollection.insertOne(childChat, { session });
+            
+            // Kind aus Waisenhaus löschen
+            await orphanageCollection.deleteOne({ _id: orphan._id }, { session });
+        });
+
+        res.json({ message: "Adoption erfolgreich! Kümmere dich gut um das Kind." });
     } catch (e) {
         res.status(400).json({ error: e.message });
     } finally {
