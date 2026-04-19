@@ -6534,7 +6534,12 @@ const ACHIEVEMENT_DEFINITIONS = [
     {
         id: 'interior_designer', icon: '🛋️', title: 'Innenarchitekt', desc: 'Besitze 20 Möbelstücke.',
         check: (u, s) => s.furnitureCount >= 20
-    }
+    },
+	
+	{
+        id: 'god_slayer', icon: '🌩️', title: 'Göttertöter', desc: 'Hat einen Admin erfolgreich ausgeraubt und überlebt.',
+        check: () => false // Wird manuell beim Boss-Raid vergeben
+    },
 ];
 
 // Hilfsfunktion: Automatische Prüfung
@@ -7482,7 +7487,61 @@ app.post('/api/crime/rob', isAuthenticated, async (req, res) => {
             return res.status(429).json({ error: `Polizei ist wachsam! Warte ${waitMin} Min.` });
         }
 
-        if (victim.isAdmin) return res.status(403).json({ error: "Admins sind unantastbar." });
+        // --- ADMIN RAID BOSS LOGIK ---
+        if (victim.isAdmin) {
+            const now = Date.now();
+            // Cooldown check für den Boss-Raid (wie beim normalen Raub)
+            const lastRob = robber.lastRobberyAt ? new Date(robber.lastRobberyAt).getTime() : 0;
+            if (now - lastRob < ROBBERY_COOLDOWN_MS) {
+                const waitMin = Math.ceil((ROBBERY_COOLDOWN_MS - (now - lastRob)) / 60000);
+                return res.status(429).json({ error: `Das SEK sucht noch nach dir! Warte ${waitMin} Min.` });
+            }
+
+            const godSlayerChance = 0.05; // Nur 5% Chance auf Erfolg!
+            const isSuccess = Math.random() < godSlayerChance;
+
+            if (isSuccess) {
+                // SIEG GEGEN DEN ADMIN
+                const massiveLoot = Math.floor(victim.balance * 0.05); // 5% vom Admin-Geld
+                
+                await usersCollection.updateOne({ _id: robberId }, { 
+                    $inc: { balance: massiveLoot, "crimeStats.successfulRobberies": 1, "crimeStats.totalStolen": massiveLoot },
+                    $addToSet: { achievements: 'god_slayer' }, // Neues verstecktes Badge
+                    $set: { lastRobberyAt: new Date() }
+                });
+                await usersCollection.updateOne({ _id: victim._id }, { $inc: { balance: -massiveLoot } });
+                
+                // LNN Breaking News
+                await newsCollection.insertOne({
+                    headline: "GÖTTERDÄMMERUNG! ADMIN BERAUBT! 🌩️",
+                    content: `Unfassbar! ${robberName} hat die Matrix gehackt, das SEK umgangen und den Admin ${victim.username} um satte $${massiveLoot.toLocaleString()} erleichtert! Eine absolute Legende.`,
+                    author: "LNN Breaking", category: "Verbrechen", createdAt: new Date(), likes: 0
+                });
+                if (typeof updateDataVersion === 'function') updateDataVersion('news');
+                
+                // Ins Logbuch schreiben
+                await robberyLogsCollection.insertOne({ victimId: victim._id, attackerName: robberName, success: true, amountLost: massiveLoot, timestamp: new Date() });
+
+                return res.json({ success: true, amount: massiveLoot, message: `UNFASSBAR! Du hast den Admin ausgetrickst! Fette Beute: $${massiveLoot.toLocaleString()}` });
+                
+            } else {
+                // BRUTALE STRAFE (SEK rückt an)
+                let brutalFine = Math.floor(robber.balance * 0.5); // 50% vom eigenen Konto weg
+                if (brutalFine < 10000) brutalFine = 10000; // Mindestens 10.000 Strafe (geht ggf. tief ins Minus)
+
+                await usersCollection.updateOne({ _id: robberId }, { 
+                    $inc: { balance: -brutalFine, "crimeStats.failedRobberies": 1, "crimeStats.totalFines": brutalFine }, 
+                    $set: { schufaScore: 100, lastRobberyAt: new Date() } // Schufa komplett ruiniert
+                });
+                await addToStateTreasury(brutalFine);
+                
+                // Ins Logbuch schreiben
+                await robberyLogsCollection.insertOne({ victimId: victim._id, attackerName: robberName, success: false, amountLost: 0, timestamp: new Date() });
+
+                return res.json({ success: false, amount: -brutalFine, message: `BIST DU WAHNSINNIG?! Du hast dich mit einem Admin angelegt. Das SEK hat deine Tür eingetreten und 50% deines Kontos gepfändet: -$${brutalFine.toLocaleString()}` });
+            }
+        }
+        // --- ENDE ADMIN RAID BOSS ---
 		if (victim.isMayor) return res.status(403).json({ error: "Der Bürgermeister genießt diplomatische Immunität! Ihn auszurauben ist Hochverrat." });
         if (victim.balance < ROBBERY_PROTECTION_LIMIT) return res.status(400).json({ error: "Opfer ist zu arm (< $10k)." });
 
