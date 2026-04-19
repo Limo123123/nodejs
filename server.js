@@ -15794,10 +15794,20 @@ app.post('/api/strikes/join/:id', isAuthenticated, async (req, res) => {
 // 3. Offene Streiks abrufen (für das Frontend Dashboard)
 app.get('/api/strikes', isAuthenticated, async (req, res) => {
     try {
+        const now = new Date();
+
+        // 1. GEISTER-AUSTREIBUNG: Abgelaufene Streiks automatisch löschen!
+        await db.collection('strikes').deleteMany({
+            status: 'active',
+            expiresAt: { $lte: now }
+        });
+
+        // 2. Nur die wirklich noch gültigen Streiks laden
         const activeAndPending = await db.collection('strikes')
             .find({ status: { $in: ['pending', 'active'] } })
             .sort({ createdAt: -1 })
             .toArray();
+
         res.json({ strikes: activeAndPending });
     } catch (e) {
         console.error("Fehler bei /api/strikes:", e);
