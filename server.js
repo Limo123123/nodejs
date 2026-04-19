@@ -5289,35 +5289,47 @@ app.post('/api/daily', isAuthenticated, async (req, res) => {
     const now = new Date();
     const last = user.lastDaily ? new Date(user.lastDaily) : new Date(0);
 
-    // Prüfen ob heute schon abgeholt (gleicher Tag, Monat, Jahr)
+    // Prüfen ob heute schon abgeholt
     if (now.getDate() === last.getDate() && now.getMonth() === last.getMonth() && now.getFullYear() === last.getFullYear()) {
         return res.status(400).json({ error: "Komm morgen wieder!" });
     }
 
-    // Streak Logik (War das letzte mal gestern?)
+    // Streak Logik
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
 
     let streak = user.dailyStreak || 0;
-    // Wenn das letzte mal NICHT gestern war (und nicht heute), ist der Streak gebrochen
     if (last.toDateString() !== yesterday.toDateString()) {
         streak = 0;
     }
     streak++;
 
     // Belohnung berechnen
-    let reward = 100 + (streak * 10); // Start $100, pro Tag +$10
-    if (reward > 500) reward = 500; // Cap bei $500
+    let reward = 100 + (streak * 10);
+    if (reward > 500) reward = 500;
+
+    // --- NEU: Schufa-Erholung ---
+    let currentScore = user.schufaScore || 500;
+    let scoreMsg = "";
+    // Erholt sich langsam bis auf 500
+    if (currentScore < 500) {
+        currentScore = Math.min(500, currentScore + 5);
+        scoreMsg = " Deine Schufa hat sich durch gute Führung um +5 erholt.";
+    }
 
     await usersCollection.updateOne(
         { _id: userId },
         {
             $inc: { balance: reward },
-            $set: { lastDaily: now, dailyStreak: streak }
+            $set: { 
+                lastDaily: now, 
+                dailyStreak: streak,
+                schufaScore: currentScore // Neuen Score speichern
+            }
         }
     );
 
-    res.json({ message: `Daily abgeholt! +$${reward} (Streak: ${streak} Tage)` });
+    res.json({ message: `Daily abgeholt! +$${reward} (Streak: ${streak} Tage).${scoreMsg}` });
 });
 
 // =========================================================
@@ -10195,7 +10207,7 @@ app.get('/api/limterest/my-saved', isAuthenticated, async (req, res) => {
 // =========================================================
 
 // Preise & Config
-const YAKUZA_SERVICE_PRICES = { fakeid: 500000, leak: 1000000 };
+const YAKUZA_SERVICE_PRICES = { fakeid: 500000, leak: 1000000, schufa_hack: 2500000 };
 
 // Preisliste für Badges (alles andere ist 15 Mio Standard)
 const ACHIEVEMENT_MARKET_PRICES = {
@@ -10305,6 +10317,20 @@ app.post('/api/yakuza/buy', isAuthenticated, async (req, res) => {
             return res.json({
                 success: true,
                 message: "Identität bereinigt. Alle Fahndungs-Timer wurden geschreddert.",
+                newBalance: user.balance - price
+            });
+        }
+		
+		// --- LOGIK FÜR SCHUFA HACK ---
+        if (service === 'schufa_hack') {
+            await usersCollection.updateOne({ _id: userId }, {
+                $inc: { balance: -price },
+                $set: { schufaScore: 500 } // Setzt den Score zurück auf Standard
+            });
+
+            return res.json({
+                success: true,
+                message: "Ein Hacker hat die Schufa-Datenbank manipuliert. Deine Bonität ist wieder auf 500 hergestellt.",
                 newBalance: user.balance - price
             });
         }
