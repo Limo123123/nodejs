@@ -8794,12 +8794,13 @@ app.get('/api/tinda/my-children', isAuthenticated, async (req, res) => {
             const lastFed = child.lastFedAt ? new Date(child.lastFedAt).getTime() : now;
             const lastChat = child.lastChattedAt ? new Date(child.lastChattedAt).getTime() : now;
             
-            // Hunger sinkt über 24 Stunden, Spaß über 48 Stunden auf 0
-            const hoursSinceFed = (now - lastFed) / (1000 * 60 * 60);
-            const hoursSinceChat = (now - lastChat) / (1000 * 60 * 60);
+            // Verhindert negative Stunden und Werte > 100
+            const safeHoursSinceFed = Math.max(0, (now - lastFed) / (1000 * 60 * 60));
+            const safeHoursSinceChat = Math.max(0, (now - lastChat) / (1000 * 60 * 60));
             
-            let currentHunger = Math.max(0, 100 - ((hoursSinceFed / 24) * 100));
-            let currentFun = Math.max(0, (child.fun || 100) - ((hoursSinceChat / 48) * 100));
+            // Math.min stellt sicher, dass der Wert nie 100 übersteigt
+            let currentHunger = Math.min(100, Math.max(0, 100 - ((safeHoursSinceFed / 24) * 100)));
+            let currentFun = Math.min(100, Math.max(0, (child.fun || 100) - ((safeHoursSinceChat / 48) * 100)));
 
             return {
                 chatId: child._id,
