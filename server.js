@@ -16088,24 +16088,24 @@ if (cluster.isPrimary) {
 // === 🧟 SATANSKREIS (Tier-Wiederbelebung) ===
 // =========================================================
 app.post('/api/pets/:id/resurrect', isAuthenticated, async (req, res) => {
-    const petId = new ObjectId(req.params.id);
+    const graveId = new ObjectId(req.params.id); // Die ID des Grabsteins!
     const userId = new ObjectId(req.session.userId);
     const RITUAL_COST = 500000000000; // 500 Milliarden
 
     try {
-        const pet = await db.collection('pets').findOne({ _id: petId });
-        const user = await db.collection('users').findOne({ _id: userId });
+        // 1. Suche das Tier auf dem FRIEDHOF (nicht bei den Lebenden!)
+        const deadPet = await petCemeteryCollection.findOne({ _id: graveId });
+        const user = await usersCollection.findOne({ _id: userId });
 
-        if (!pet) return res.status(404).json({ error: "Dieses Tier existiert nicht mehr." });
+        if (!deadPet) return res.status(404).json({ error: "Dieser Geist weilt nicht mehr hier." });
         
-        // Prüfen, ob der User der Original-Besitzer ist (Vorausgesetzt, du speicherst das beim "Töten")
-        if (String(pet.originalOwnerId) !== String(userId)) {
+        // Prüfen, ob der User der Original-Besitzer ist (userId vom Grabstein)
+        if (String(deadPet.userId) !== String(userId)) {
             return res.status(403).json({ error: "Nur der wahre Meister kann dieses Ritual durchführen!" });
         }
 
         // 14-Tage-Frist prüfen
-        const diedAt = new Date(pet.diedAt || pet.updatedAt);
-        const daysDead = (new Date() - diedAt) / (1000 * 60 * 60 * 24);
+        const daysDead = (new Date() - new Date(deadPet.deathDate)) / (1000 * 60 * 60 * 24);
         if (daysDead > 14) {
             return res.status(400).json({ error: "Die Seele ist bereits zu weit im Jenseits. Keine Chance." });
         }
@@ -16115,39 +16115,48 @@ app.post('/api/pets/:id/resurrect', isAuthenticated, async (req, res) => {
             return res.status(400).json({ error: `Du brauchst $${RITUAL_COST.toLocaleString()} für das Ritual!` });
         }
 
-        // 1. Dem User das Geld abziehen (verschwindet einfach, perfekte Geld-Senke)
-        await db.collection('users').updateOne(
+        // 2. Geld gnadenlos abziehen (Die Senke!)
+        await usersCollection.updateOne(
             { _id: userId },
             { $inc: { balance: -RITUAL_COST } }
         );
 
-        // 2. Das Tier modifizieren (Zombie-Tag, Besitzer zurücksetzen)
-        const newName = `${pet.name} 🧟`;
-        await db.collection('pets').updateOne(
-            { _id: petId },
-            { 
-                $set: { 
-                    ownerId: userId, // Zurück zum Original-Besitzer
-                    name: newName,
-                    isZombie: true 
-                },
-                $unset: { diedAt: "", originalOwnerId: "" } // Grabstein-Daten löschen
-            }
-        );
-
-        // 3. Den LNN AI Bot triggern!
-        await db.collection('news').insertOne({
-            headline: "DUNKLES RITUAL AUF DEM FRIEDHOF! 😈",
-            content: `BREAKING: ${user.username} hat soeben für unfassbare $500 Milliarden ein verbotenes Ritual durchgeführt! "${newName}" ist aus dem Tiertöter-Fegefeuer zurückgekehrt. Das Tier riecht nach nassem Hund und Schwefel. Haltet eure Kinder fern!`,
-            author: "LNN AI Bot",
-            category: "Community",
-            createdAt: new Date(),
-            likes: 0
+        // 3. Das Tier als ZOMBIE neu erschaffen und zu den Lebenden packen
+        const newName = `${deadPet.petName} 🧟`;
+        await petsCollection.insertOne({
+            userId: deadPet.userId,
+            ownerName: deadPet.ownerName,
+            name: newName,
+            icon: deadPet.icon,
+            typeName: deadPet.type, // Vom Grabstein übernommen
+            typeId: 'zombie', // Interner Typ
+            enclosure: "Friedhofserde 🏺", // Neues, gruseliges Gehege
+            starvationTimeHours: 12,
+            lastFedAt: new Date(),
+            adoptedAt: new Date(), // "Wiedergeburt"
+            hunger: 100, // Kommt satt aus der Hölle
+            isZombie: true
         });
+
+        // 4. Den Grabstein vom Friedhof endgültig LÖSCHEN
+        await petCemeteryCollection.deleteOne({ _id: graveId });
+
+        // 5. LNN News Bot triggern (Optional, falls du die LNN-Collection hast)
+        try {
+            await db.collection('news').insertOne({
+                headline: "DUNKLES RITUAL AUF DEM FRIEDHOF! 😈",
+                content: `BREAKING: ${user.username} hat soeben für unfassbare $500 Milliarden ein verbotenes Ritual durchgeführt! "${newName}" ist von den Toten zurückgekehrt. Limazon riecht ab sofort nach Schwefel.`,
+                author: "LNN AI Bot",
+                category: "Community",
+                createdAt: new Date(),
+                likes: 0
+            });
+        } catch(e) { /* Falls LNN News nicht existiert, ignorieren */ }
 
         res.json({ success: true, message: "Das Ritual war erfolgreich. Es lebt... irgendwie." });
 
     } catch (e) {
+        console.error("Ritual Fehler:", e);
         res.status(500).json({ error: "Das Ritual ist fehlgeschlagen." });
     }
 });
