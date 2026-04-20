@@ -16017,6 +16017,73 @@ app.get('/api/system/church', isAuthenticated, async (req, res) => {
     }
 });
 
+if (cluster.isPrimary) {
+    setInterval(async () => {
+        try {
+            // 1. Letzte Auszahlung prüfen
+            const settings = await db.collection('systemSettings').findOne({ id: 'church_payout_tracker' });
+            const now = new Date();
+            const lastPayout = settings ? new Date(settings.lastRun) : new Date(0);
+            
+            // Sind 14 Tage (in Millisekunden) vergangen?
+            const fourteenDaysMs = 14 * 24 * 60 * 60 * 1000;
+            
+            if (now.getTime() - lastPayout.getTime() >= fourteenDaysMs) {
+                console.log(`${LOG_PREFIX_SERVER} ⛪ Prüfe Kirchen-Fonds...`);
+                
+                const fund = await db.collection('systemSettings').findOne({ id: 'church_fund' });
+                
+                if (fund && fund.balance > 0) {
+                    // Finde den ärmsten (aktiven) User, der KEIN Bot und KEIN Admin ist
+                    const poorestUser = await db.collection('users')
+                        .find({ isAdmin: { $ne: true }, isBot: { $ne: true } })
+                        .sort({ balance: 1 }) // Aufsteigend sortieren
+                        .limit(1)
+                        .toArray();
+
+                    if (poorestUser.length > 0) {
+                        const luckyPoor = poorestUser[0];
+                        const payoutAmount = fund.balance;
+
+                        // 1. Dem Armen das Geld geben
+                        await db.collection('users').updateOne(
+                            { _id: luckyPoor._id }, 
+                            { $inc: { balance: payoutAmount } }
+                        );
+
+                        // 2. Den Fonds leeren
+                        await db.collection('systemSettings').updateOne(
+                            { id: 'church_fund' }, 
+                            { $set: { balance: 0 } }
+                        );
+
+                        // 3. Im LNN verkünden!
+                        await db.collection('news').insertOne({
+                            headline: "GÖTTLICHE FÜGUNG! ⛪",
+                            content: `Die Kirche hat ihren Spendentopf geleert! ${luckyPoor.username} ist der ärmste Bürger und erhält ein göttliches Almosen in Höhe von $${payoutAmount.toLocaleString()}. Möge der Pi dich segnen!`,
+                            author: "LNN Religion",
+                            category: "Gesellschaft",
+                            createdAt: new Date(),
+                            likes: 0
+                        });
+                        
+                        console.log(`${LOG_PREFIX_SERVER} ⛪ ${payoutAmount} an ${luckyPoor.username} ausgeschüttet.`);
+                    }
+                }
+
+                // Tracker updaten, damit es erst in 14 Tagen wieder läuft
+                await db.collection('systemSettings').updateOne(
+                    { id: 'church_payout_tracker' },
+                    { $set: { lastRun: now } },
+                    { upsert: true }
+                );
+            }
+        } catch (e) {
+            console.error("Fehler bei der Kirchen-Ausschüttung:", e);
+        }
+    }, 24 * 60 * 60 * 1000); // Checkt 1x am Tag
+}
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
