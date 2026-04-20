@@ -15980,6 +15980,43 @@ app.post('/api/amongus/buy-skin', isAuthenticated, async (req, res) => {
     res.json({ success: true, message: "Skin freigeschaltet!" });
 });
 
+// =========================================================
+// === ⛪ KIRCHE DES PI ===
+// =========================================================
+
+// API: Spende an die Kirche (Robin Hood Topf)
+app.post('/api/system/donate', isAuthenticated, async (req, res) => {
+    const { amount } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (!amount || amount <= 0) return res.status(400).json({ error: "Ungültiger Betrag." });
+
+    const user = await db.collection('users').findOne({ _id: userId });
+    if (user.balance < amount) return res.status(400).json({ error: "Du bist zu arm für diese Frömmigkeit." });
+
+    // 1. Dem User abziehen
+    await db.collection('users').updateOne({ _id: userId }, { $inc: { balance: -amount } });
+
+    // 2. In den Kirchen-Fonds packen (upsert erstellt das Dokument, falls es nicht existiert)
+    await db.collection('systemSettings').updateOne(
+        { id: 'church_fund' },
+        { $inc: { balance: amount } },
+        { upsert: true }
+    );
+
+    res.json({ success: true, message: "Dein Opfer wurde im System registriert." });
+});
+
+// API: Aktuellen Kirchen-Fonds abrufen
+app.get('/api/system/church', isAuthenticated, async (req, res) => {
+    try {
+        const fund = await db.collection('systemSettings').findOne({ id: 'church_fund' });
+        res.json({ balance: fund ? fund.balance : 0 });
+    } catch (error) {
+        res.status(500).json({ error: "Fehler beim Laden des Fonds." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
