@@ -16084,6 +16084,97 @@ if (cluster.isPrimary) {
     }, 24 * 60 * 60 * 1000); // Checkt 1x am Tag
 }
 
+// =========================================================
+// === 🧟 SATANSKREIS (Tier-Wiederbelebung) ===
+// =========================================================
+app.post('/api/pets/:id/resurrect', isAuthenticated, async (req, res) => {
+    const petId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+    const RITUAL_COST = 500000000000; // 500 Milliarden
+
+    try {
+        const pet = await db.collection('pets').findOne({ _id: petId });
+        const user = await db.collection('users').findOne({ _id: userId });
+
+        if (!pet) return res.status(404).json({ error: "Dieses Tier existiert nicht mehr." });
+        
+        // Prüfen, ob der User der Original-Besitzer ist (Vorausgesetzt, du speicherst das beim "Töten")
+        if (String(pet.originalOwnerId) !== String(userId)) {
+            return res.status(403).json({ error: "Nur der wahre Meister kann dieses Ritual durchführen!" });
+        }
+
+        // 14-Tage-Frist prüfen
+        const diedAt = new Date(pet.diedAt || pet.updatedAt);
+        const daysDead = (new Date() - diedAt) / (1000 * 60 * 60 * 24);
+        if (daysDead > 14) {
+            return res.status(400).json({ error: "Die Seele ist bereits zu weit im Jenseits. Keine Chance." });
+        }
+
+        // Geld prüfen
+        if (user.balance < RITUAL_COST) {
+            return res.status(400).json({ error: `Du brauchst $${RITUAL_COST.toLocaleString()} für das Ritual!` });
+        }
+
+        // 1. Dem User das Geld abziehen (verschwindet einfach, perfekte Geld-Senke)
+        await db.collection('users').updateOne(
+            { _id: userId },
+            { $inc: { balance: -RITUAL_COST } }
+        );
+
+        // 2. Das Tier modifizieren (Zombie-Tag, Besitzer zurücksetzen)
+        const newName = `${pet.name} 🧟`;
+        await db.collection('pets').updateOne(
+            { _id: petId },
+            { 
+                $set: { 
+                    ownerId: userId, // Zurück zum Original-Besitzer
+                    name: newName,
+                    isZombie: true 
+                },
+                $unset: { diedAt: "", originalOwnerId: "" } // Grabstein-Daten löschen
+            }
+        );
+
+        // 3. Den LNN AI Bot triggern!
+        await db.collection('news').insertOne({
+            headline: "DUNKLES RITUAL AUF DEM FRIEDHOF! 😈",
+            content: `BREAKING: ${user.username} hat soeben für unfassbare $500 Milliarden ein verbotenes Ritual durchgeführt! "${newName}" ist aus dem Tiertöter-Fegefeuer zurückgekehrt. Das Tier riecht nach nassem Hund und Schwefel. Haltet eure Kinder fern!`,
+            author: "LNN AI Bot",
+            category: "Community",
+            createdAt: new Date(),
+            likes: 0
+        });
+
+        res.json({ success: true, message: "Das Ritual war erfolgreich. Es lebt... irgendwie." });
+
+    } catch (e) {
+        res.status(500).json({ error: "Das Ritual ist fehlgeschlagen." });
+    }
+});
+
+// =========================================================
+// === 🗑️ FRIEDHOF-REINIGER (Endgültiger Tod) ===
+// =========================================================
+if (cluster.isPrimary) {
+    setInterval(async () => {
+        try {
+            const fourteenDaysAgo = new Date();
+            fourteenDaysAgo.setDate(fourteenDaysAgo.getDate() - 14);
+
+            // Löscht alle Tiere, die einen diedAt-Stempel haben, der älter als 14 Tage ist
+            const result = await db.collection('pets').deleteMany({
+                diedAt: { $lt: fourteenDaysAgo }
+            });
+
+            if (result.deletedCount > 0) {
+                console.log(`${LOG_PREFIX_SERVER} 🪦 Friedhof gereinigt: ${result.deletedCount} Tiere endgültig gelöscht.`);
+            }
+        } catch (e) {
+            console.error("Fehler beim Friedhof-Reiniger:", e);
+        }
+    }, 24 * 60 * 60 * 1000); // Einmal täglich
+}
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
