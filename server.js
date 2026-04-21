@@ -16184,6 +16184,104 @@ if (cluster.isPrimary) {
     }, 24 * 60 * 60 * 1000); // Einmal täglich
 }
 
+// =========================================================
+// === DETAILED SYSTEM METRICS (FÜR GRAPHEN IM FRONTEND) ===
+// =========================================================
+
+// Speichert den exakten rohen CPU-Zustand des letzten Aufrufs
+let lastCpus = os.cpus();
+
+app.get('/api/status/metrics', async (req, res) => {
+    // 1. CPU Auslastung berechnen (Gesamt & Pro Kern)
+    const currentCpus = os.cpus();
+    
+    let totalActiveDiff = 0;
+    let totalTotalDiff = 0;
+    
+    const coreMetrics = currentCpus.map((core, index) => {
+        const lastCore = lastCpus[index] || core; // Fallback, falls sich die Array-Länge ändert (selten)
+        
+        // Aktuelle Zeiten
+        const active = core.times.user + core.times.nice + core.times.sys + core.times.irq;
+        const total = active + core.times.idle;
+        
+        // Letzte Zeiten
+        const lastActive = lastCore.times.user + lastCore.times.nice + lastCore.times.sys + lastCore.times.irq;
+        const lastTotal = lastActive + lastCore.times.idle;
+        
+        // Differenz berechnen
+        const activeDiff = active - lastActive;
+        const totalDiff = total - lastTotal;
+        
+        // Für die Gesamtauslastung aufsummieren
+        totalActiveDiff += activeDiff;
+        totalTotalDiff += totalDiff;
+        
+        // Auslastung für diesen spezifischen Kern berechnen
+        const corePercent = totalDiff === 0 ? 0 : (activeDiff / totalDiff) * 100;
+        
+        return {
+            coreId: index,
+            percent: parseFloat(corePercent.toFixed(2))
+        };
+    });
+
+    // Gesamtauslastung berechnen
+    const overallCpuPercent = totalTotalDiff === 0 ? 0 : (totalActiveDiff / totalTotalDiff) * 100;
+    
+    // Status für den nächsten Polling-Aufruf speichern
+    lastCpus = currentCpus;
+
+    // 2. RAM Auslastung des gesamten Systems
+    const totalMem = os.totalmem();
+    const freeMem = os.freemem();
+    const usedMem = totalMem - freeMem;
+    const ramPercent = (usedMem / totalMem) * 100;
+
+    // 3. Node.js spezifischer RAM (Der Prozess selbst)
+    const processMem = process.memoryUsage();
+    const nodeHeapUsedMB = parseFloat((processMem.heapUsed / 1024 / 1024).toFixed(2));
+
+    // 4. Datenbank Status
+    let dbOnline = false;
+    try {
+        if (client) {
+            await db.command({ ping: 1 });
+            dbOnline = true;
+        }
+    } catch (e) {
+        dbOnline = false;
+    }
+
+    res.json({
+        timestamp: new Date().toISOString(),
+        system: {
+            uptime: os.uptime(), 
+            platform: os.platform(),
+        },
+        cpu: {
+            overallPercent: parseFloat(overallCpuPercent.toFixed(2)),
+            coreCount: currentCpus.length,
+            cores: coreMetrics, // <-- Hier ist das Array mit allen einzelnen Kernen!
+            loadAvg: os.loadavg() 
+        },
+        memory: {
+            totalBytes: totalMem,
+            usedBytes: usedMem,
+            freeBytes: freeMem,
+            percent: parseFloat(ramPercent.toFixed(2)),
+            nodeProcessMB: nodeHeapUsedMB
+        },
+        database: {
+            status: dbOnline ? 'online' : 'offline'
+        },
+        cluster: {
+            isMaster: cluster.isPrimary,
+            workers: Object.keys(cluster.workers || {}).length
+        }
+    });
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
