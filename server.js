@@ -9146,18 +9146,46 @@ if (cluster.isPrimary) {
                 const hoursSinceChat = (now.getTime() - lastChat) / (1000 * 60 * 60);
                 
                 // Verwahrlosungs-Limits: 24h kein Essen ODER 48h keine Aufmerksamkeit
-                // Spaß fängt nicht immer bei 100 an, daher rechnen wir den realen aktuellen Wert aus
                 const currentFun = Math.max(0, (child.fun || 100) - ((hoursSinceChat / 48) * 100));
 
                 if (hoursSinceFed >= 24 || currentFun <= 0) {
                     const parentId = child.participants[0];
                     const parent = await usersCollection.findOne({ _id: parentId });
+
+                    // --- FIX: PARTNER ÜBERNIMMT VERANTWORTUNG ---
+                    // 50% Chance, dass der Tinda-Partner in letzter Sekunde einspringt
+                    const partnerCares = Math.random() < 0.5;
+
+                    if (partnerCares) {
+                        // Partner füttert und bespaßt das Kind
+                        await limChatsCollection.updateOne(
+                            { _id: child._id },
+                            { $set: { hunger: 100, fun: 100, lastFedAt: now, lastChattedAt: now } }
+                        );
+
+                        // Mail an den User schicken
+                        await mailsCollection.insertOne({
+                            userId: parentId,
+                            sender: "🍼 Familien-Update",
+                            subject: `${child.tindaPartnerName} hat sich gekümmert!`,
+                            content: `Puh! Du hast ${child.childName} völlig vergessen, aber zum Glück ist dein Partner ${child.tindaPartnerName} eingesprungen. Das Kind wurde gefüttert und bespaßt. Das Jugendamt war schon auf dem Weg!`,
+                            isRead: false,
+                            isClaimed: false,
+                            createdAt: now
+                        });
+
+                        console.log(`${LOG_PREFIX_SERVER} 🍼 ${child.tindaPartnerName} hat das Kind ${child.childName} vor dem Jugendamt gerettet.`);
+                        continue; // Bricht hier ab, Jugendamt kommt NICHT!
+                    }
+                    // ---------------------------------------------
                     
-                    // 1. Strafe für den Elternteil ($15.000) und Strike erhöhen
+                    // 1. Strafe für den Elternteil (Auf 7.500$ halbiert, weil der Partner die andere Hälfte zahlt)
+                    const fine = 7500;
+
                     await usersCollection.updateOne(
                         { _id: parentId }, 
                         { 
-                            $inc: { balance: -15000, jugendamtStrikes: 1 },
+                            $inc: { balance: -fine, jugendamtStrikes: 1 },
                             $set: { schufaScore: 100 } // Schufa crasht!
                         }
                     );
@@ -9182,7 +9210,7 @@ if (cluster.isPrimary) {
                         userId: parentId,
                         sender: "🚨 Jugendamt Limazon",
                         subject: "EINGRIFF: Kind in Obhut genommen!",
-                        content: `Guten Tag,\n\naufgrund schwerer Vernachlässigung mussten wir ${child.childName} in unsere Obhut nehmen. Das Kind befindet sich nun im städtischen Waisenhaus.\n\nEs wurde eine Strafe von $15.000 verhängt und Ihr Schufa-Score wurde massiv herabgestuft.\n\nMit behördlichen Grüßen,\nDas Jugendamt`,
+                        content: `Guten Tag,\n\naufgrund schwerer Vernachlässigung mussten wir ${child.childName} in unsere Obhut nehmen. Weder Sie noch ${child.tindaPartnerName} haben sich gekümmert.\n\nDa Sie das Sorgerecht teilen, wurde eine geteilte Strafe von $${fine.toLocaleString()} gegen Sie verhängt und Ihr Schufa-Score massiv herabgestuft.\n\nMit behördlichen Grüßen,\nDas Jugendamt`,
                         isRead: false,
                         isClaimed: false,
                         createdAt: now
