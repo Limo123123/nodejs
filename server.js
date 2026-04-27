@@ -6552,6 +6552,11 @@ const ACHIEVEMENT_DEFINITIONS = [
         id: 'god_slayer', icon: '🌩️', title: 'Göttertöter', desc: 'Hat einen Admin erfolgreich ausgeraubt und überlebt.',
         check: () => false // Wird manuell beim Boss-Raid vergeben
     },
+	
+    {
+        id: 'schnitzel_thief', icon: '🥩', title: 'Veggie-Terrorist', desc: 'Erreiche einen Score von 50 in Schnitzel-Alarm.',
+        check: (u, s) => s.bestSchnitzelScore >= 50
+    },
 ];
 
 // Hilfsfunktion: Automatische Prüfung
@@ -6572,6 +6577,7 @@ async function updateUserAchievements(user) {
         tindaMatchCount,
         bestFlappy,
         bestSnake,
+		bestSchnitzel,
         taxShieldItem,
         // --- NEUE STATS ---
         petCount,
@@ -6590,6 +6596,7 @@ async function updateUserAchievements(user) {
         limChatsCollection.countDocuments({ type: 'tinda', participants: userId }),
         highscoresCollection.findOne({ userId, game: 'flappy' }, { sort: { score: -1 } }),
         highscoresCollection.findOne({ userId, game: 'snake' }, { sort: { score: -1 } }),
+		highscoresCollection.findOne({ userId, game: 'schnitzel' }, { sort: { score: -1 } }),
         inventoriesCollection.findOne({ userId, productId: 'tax_shield', quantityOwned: { $gt: 0 } }),
         petsCollection.countDocuments({ userId }),
         db.collection('gangs').countDocuments({ leaderId: userId }),
@@ -6613,9 +6620,9 @@ async function updateUserAchievements(user) {
         tindaMatchCount: tindaMatchCount,
         bestFlappyScore: bestFlappy ? bestFlappy.score : 0,
         bestSnakeScore: bestSnake ? bestSnake.score : 0,
+		bestSchnitzelScore: bestSchnitzel ? bestSchnitzel.score : 0,
         foodEaten: user.stats?.foodEaten || 0,
         hasTaxShield: !!taxShieldItem,
-        // --- NEUE STATS ---
         petCount: petCount,
         isGangLeader: gangLeaderCount > 0,
         teachermonUniqueCount: teachermonUniqueCount
@@ -7885,7 +7892,7 @@ app.post('/api/admin/engine', isAuthenticated, isAdmin, async (req, res) => {
 // === GAME CENTER API (AUTOMATISCH & DIREKT) ===
 // =========================================================
 
-const ALLOWED_GAMES = ['flappy', 'snake', 'slots', 'memory', 'limway', 'amongus'];
+const ALLOWED_GAMES = ['flappy', 'snake', 'slots', 'memory', 'limway', 'amongus', 'schnitzel'];
 
 // 1. Status abrufen
 app.get('/api/games/status', isAuthenticated, async (req, res) => {
