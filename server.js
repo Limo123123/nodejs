@@ -5633,39 +5633,82 @@ async function gatherSmartNewsContext(lastRun) {
         createdAt: { $gt: lastRun }
     });
 
-    // 6. Neu: Heist Status (Falls die Firewall gerade gefallen ist)
+    // 6. Heist Status
     const firewall = await systemSettingsCollection.findOne({ id: 'heist_firewall' });
     const heistOpen = firewall && firewall.integrity <= 0 && Date.now() < firewall.openUntil;
 
-    // --- KONTEXT BAUEN (Ohne Aktien!) ---
+    // --- NEUE QUELLEN FÜR MAXIMALES DRAMA ---
+
+    // 7. Jugendamt (Waisenhaus)
+    let orphanNews = [];
+    if (typeof orphanageCollection !== 'undefined') {
+        orphanNews = await orphanageCollection.find({ takenAwayAt: { $gt: lastRun } }).limit(2).toArray();
+    }
+
+    // 8. Tierfriedhof
+    let deadPets = [];
+    if (typeof petCemeteryCollection !== 'undefined') {
+        deadPets = await petCemeteryCollection.find({ deathDate: { $gt: lastRun } }).limit(2).toArray();
+    }
+
+    // 9. Gang-Kriege (Zonen)
+    const newZones = await db.collection('zones').find({ rentedAt: { $gt: lastRun } }).limit(2).toArray();
+
+    // 10. Krypto-Trades (aus Activity Logs)
+    const cryptoTrades = await db.collection('activityLogs').find({ 
+        action: 'CRYPTO_TRADE', 
+        timestamp: { $gt: lastRun } 
+    }).sort({ timestamp: -1 }).limit(2).toArray();
+
+    // 11. Petitionen
+    const newPetitions = await db.collection('petitions').find({ createdAt: { $gt: lastRun } }).limit(2).toArray();
+
+    // --- KONTEXT BAUEN ---
     let contextParts = [];
 
     if (newConfessions.length > 0) {
         const texts = newConfessions.map(c => `"${c.reason}" (von ${c.username})`).join(", ");
         contextParts.push(`- Beichten: Neue schmutzige Geheimnisse: ${texts}.`);
     }
-
     if (bigOrders.length > 0) {
         const buyers = bigOrders.map(o => `${o.username} hat heftig geshoppt ($${o.total.toFixed(0)})`).join(", ");
         contextParts.push(`- Konsum: Diese User lassen das Geld fließen: ${buyers}.`);
     }
-
     if (crimeNews.length > 0) {
         const heist = crimeNews[0];
         contextParts.push(`- Kriminalität: ${heist.attackerName} hat erfolgreich zugeschlagen und $${heist.amountLost.toFixed(2)} erbeutet!`);
     }
-
     if (endedAuctions.length > 0) {
         const auc = endedAuctions[0];
         contextParts.push(`- Auktion: "${auc.productName}" ging für kranke $${auc.currentBid} an ${auc.highestBidderUsername}.`);
     }
-
     if (tindaMatches > 0) {
         contextParts.push(`- Dating: Es gab ${tindaMatches} neue Matches auf Tinda. Limazon wird wieder horny.`);
     }
-
     if (heistOpen) {
         contextParts.push(`- EILMELDUNG: Die Firewall der Staatskasse ist momentan deaktiviert! Diebstahl für alle!`);
+    }
+    
+    // Die neuen fetzigen Details
+    if (orphanNews.length > 0) {
+        const names = orphanNews.map(o => o.originalParentName).join(", ");
+        contextParts.push(`- Jugendamt: Rabeneltern! ${names} wurden die Kinder vom Jugendamt weggenommen.`);
+    }
+    if (deadPets.length > 0) {
+        const petNames = deadPets.map(p => `${p.petName} (Besitzer: ${p.ownerName})`).join(", ");
+        contextParts.push(`- Tierschutz: Skandal auf dem Friedhof. Folgende Tiere sind jämmerlich verhungert: ${petNames}.`);
+    }
+    if (newZones.length > 0) {
+        const zones = newZones.map(z => `[${z.ownerTag}] kontrolliert jetzt ${z.ownerName}`).join(", ");
+        contextParts.push(`- Gang-Kriege: Machtverschiebungen auf der Straße! ${zones}.`);
+    }
+    if (cryptoTrades.length > 0) {
+        const trades = cryptoTrades.map(t => `${t.username} hat ${t.details.amount}x ${t.details.coinId} getradet`).join(", ");
+        contextParts.push(`- Krypto-Wale: Große Bewegungen am Schwarzmarkt! ${trades}.`);
+    }
+    if (newPetitions.length > 0) {
+        const pets = newPetitions.map(p => `"${p.title}"`).join(", ");
+        contextParts.push(`- Bürgeraufstand: Neue Petitionen fordern: ${pets}. Das Volk muckt auf.`);
     }
 
     if (contextParts.length === 0) return null;
@@ -5693,7 +5736,7 @@ async function generateAiNews(force = false) {
 
     const promptData = contextData || "Es ist verdächtig ruhig. Die User planen wohl gerade den nächsten großen Coup.";
 
-    const modelName = "gemini-3.1-flash-lite-preview"; // Nutze das aktuellste Modell
+    const modelName = "gemini-3.1-flash-lite-preview"; 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
 
     const prompt = `
@@ -5705,10 +5748,11 @@ async function generateAiNews(force = false) {
 
     WICHTIGE REGELN:
     1. Erwähne NIEMALS Aktien, Kurse, Stonks oder die Börse. Das ist langweilig und verboten.
-    2. Konzentriere dich auf Beichten, Raubüberfälle, Dating-Drama oder Reichtum einzelner User.
-    3. Sei extrem sarkastisch, humorvoll und reißerisch (Boulevard-Stil).
-    4. Die letzte Schlagzeile war "${lastHeadline}". Wiederhole dich nicht!
-    5. Länge: Max. 45 Wörter.
+    2. Erwähne NIEMALS Steuern, Steuersätze oder das Finanzamt! Der Bürgermeister nervt uns damit schon genug. Ignoriere alles, was mit Steuern zu tun hat.
+    3. Konzentriere dich auf Drama: Jugendamt, tote Tiere, Beichten, Raubüberfälle, Dating-Drama, Gang-Kriege oder Krypto-Wale.
+    4. Sei extrem sarkastisch, humorvoll und reißerisch (Boulevard-Stil).
+    5. Die letzte Schlagzeile war "${lastHeadline}". Wiederhole dich nicht!
+    6. Länge: Max. 45 Wörter.
 
     Antworte NUR als JSON:
     {
@@ -5725,7 +5769,7 @@ async function generateAiNews(force = false) {
         if (!response.data || !response.data.candidates[0]) throw new Error("API Error");
 
         let textResponse = response.data.candidates[0].content.parts[0].text;
-        textResponse = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
+        textResponse = textResponse.replace(/\`\`\`json/g, '').replace(/\`\`\`/g, '').trim();
 
         const article = JSON.parse(textResponse);
 
@@ -5742,7 +5786,7 @@ async function generateAiNews(force = false) {
         await getLastNewsTime(true);
         updateDataVersion('news');
 
-        console.log(`${LOG_PREFIX_SERVER} [LNN] News ohne Aktien-Gelaber gepostet: "${article.headline}"`);
+        console.log(`${LOG_PREFIX_SERVER} [LNN] News gepostet (Ohne Steuern!): "${article.headline}"`);
         return newEntry;
 
     } catch (apiErr) {
