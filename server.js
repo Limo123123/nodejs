@@ -8689,25 +8689,34 @@ async function triggerAiResponse(userId, humanId, chatId, userMessage) {
         const GROQ_API_KEY = process.env.GROQ_API_KEY;
         if (!GROQ_API_KEY) return;
 
-        const human = await humansCollection.findOne({ _id: new ObjectId(humanId) });
-        if (!human) return;
+        // 1. CHAT ZUERST LADEN
+        const chat = await limChatsCollection.findOne({ _id: new ObjectId(chatId) });
+        if (!chat) return;
+
+        // 2. FIX: ADOPTIVKINDER HABEN KEINEN ECHTEN PARTNER IN DER DB!
+        let humanName = chat.tindaPartnerName || "Unbekannt";
+        
+        if (humanId.toString() !== "000000000000000000000000") {
+            const human = await humansCollection.findOne({ _id: new ObjectId(humanId) });
+            if (!human) return; // Echtes Match existiert nicht mehr -> Abbruch
+            humanName = human.name;
+        }
 
         const recentMessages = await limMessagesCollection.find({ chatId: new ObjectId(chatId) })
             .sort({ timestamp: 1 })
             .toArray();
         
         const lastMessages = recentMessages.slice(-30);
-        const chat = await limChatsCollection.findOne({ _id: new ObjectId(chatId) });
 
         let systemPrompt = "";
 
         if (chat.type === 'tinda') {
-            // NORMALER TINDA CHAT (Ehepartner)
+            // NORMALER TINDA CHAT (Ehepartner/Match)
             const childrenText = (chat.children && chat.children.length > 0) 
                 ? `IHR HABT GEMEINSAME KINDER: ${chat.children.map(c=>c.name).join(', ')}. Erwähne sie gelegentlich liebevoll.` 
                 : '';
                 
-            systemPrompt = `Du bist die echte Person ${human.name}.
+            systemPrompt = `Du bist die echte Person ${humanName}.
 Szenario: Du schreibst mit dem User auf Tinda. ${chat.isMarried ? 'IHR SEID VERHEIRATET UND WOHNT ZUSAMMEN!' : 'Ihr datet euch gerade.'}
 ${childrenText}
 
@@ -8719,8 +8728,12 @@ WICHTIGE REGELN:
 
         } else if (chat.type === 'tinda_child') {
             // KINDER CHAT
-            systemPrompt = `VERGISS DEINE VORHERIGE ROLLE! Du bist JETZT ${chat.childName}, das Kind des Users und von ${chat.tindaPartnerName}.
-Szenario: Du schreibst mit deinem Elternteil (dem User) über WhatsApp.
+            const parentContext = chat.tindaPartnerName === "Adoptiert"
+                ? "Du bist ein Adoptivkind und wurdest kürzlich aus dem Waisenhaus geholt."
+                : `Du bist das Kind des Users und von ${chat.tindaPartnerName}.`;
+
+            systemPrompt = `VERGISS DEINE VORHERIGE ROLLE! Du bist JETZT ${chat.childName}.
+Szenario: Du schreibst mit deinem Elternteil (dem User) über WhatsApp. ${parentContext}
 WICHTIGE REGELN:
 1. VERHALTEN: Verhalte dich wie ein Kind/Teenager. Sei frech, süß oder genervt.
 2. ANREDE: Sprich den User IMMER mit "Mama" oder "Papa" an. Erwähne niemals, dass du eine KI bist.
@@ -8728,7 +8741,6 @@ WICHTIGE REGELN:
 
         } else if (chat.type === 'tinda_family') {
             // FAMILIEN CHAT
-            // Filtere den Partnernamen aus den familyNames heraus, falls er reingerutscht ist
             let kids = [];
             if (chat.familyNames) {
                 kids = chat.familyNames.filter(n => n !== chat.tindaPartnerName);
@@ -8783,18 +8795,17 @@ ${kids[0] || 'Kind'}: Boah, seid ihr peinlich... 🙄
         const aiText = aiRes.data.choices[0].message.content;
 
         if (aiText) {
-            // --- HIER IST DER FIX FÜR DEN FALSCHEN NAMEN IM CHAT ---
-            let aiSenderName = human.name;
+            let aiSenderName = humanName;
             if (chat.type === 'tinda_child') {
                 aiSenderName = chat.childName;
             } else if (chat.type === 'tinda_family') {
-                aiSenderName = "Familie"; // Im Gruppenchat heißt der Bot einfach "Familie"
+                aiSenderName = "Familie"; 
             }
 
             const aiMsg = {
                 chatId: new ObjectId(chatId),
-                senderId: humanId, // Behalten wir bei für die Logik
-                senderUsername: aiSenderName, // HIER wird nun der richtige Name (z.B. "Sahra") gespeichert!
+                senderId: humanId,
+                senderUsername: aiSenderName, 
                 content: aiText.trim(),
                 timestamp: new Date(),
                 isAi: true
