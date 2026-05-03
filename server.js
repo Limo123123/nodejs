@@ -8451,7 +8451,7 @@ app.get('/api/tinda/stack', isAuthenticated, async (req, res) => {
     }
 });
 
-// 2. SWIPE AKTION (Rechts = Match Chance, Links = Skip)
+// 2. SWIPE AKTION (Rechts = Match Chance, Links = Skip) + PAPARAZZI SKANDAL 📸
 app.post('/api/tinda/swipe', isAuthenticated, async (req, res) => {
     const { humanId, direction } = req.body; // direction: 'left' oder 'right'
     const userId = new ObjectId(req.session.userId);
@@ -8470,8 +8470,97 @@ app.post('/api/tinda/swipe', isAuthenticated, async (req, res) => {
             return res.json({ match: false, message: "Nope." });
         }
 
-        // Sugar Daddy Check
+        // --- 📸 PAPARAZZI SKANDAL LOGIK (Nur beim Rechts-Swipe!) ---
         const user = await usersCollection.findOne({ _id: userId });
+        
+        const hasRealSpouses = user.spouses && user.spouses.length > 0;
+        const hasTindaSpouse = !!user.isMarriedTo;
+
+        if (hasRealSpouses || hasTindaSpouse) {
+            // 5% Chance, vom Paparazzi-Bot erwischt zu werden
+            if (Math.random() < 0.05) {
+                let totalPenalty = 0;
+                let scandalNames = [];
+
+                // A) Echte Ehepartner abfertigen (Unterhalt: 20% deines Geldes pro Partner!)
+                if (hasRealSpouses) {
+                    for (const spouse of user.spouses) {
+                        const alimony = Math.floor(user.balance * 0.20);
+                        totalPenalty += alimony;
+                        scandalNames.push(spouse.name);
+
+                        // Dem Ex-Partner das Geld überweisen und ihn aus der Ehe befreien
+                        await usersCollection.updateOne(
+                            { _id: spouse.id },
+                            { 
+                                $inc: { balance: alimony },
+                                $pull: { spouses: { id: userId } }
+                            }
+                        );
+                    }
+                }
+
+                // B) KI-Ehepartner abfertigen (Scheidung kostet $25.000)
+                if (hasTindaSpouse) {
+                    totalPenalty += 25000;
+                    scandalNames.push(user.isMarriedTo);
+
+                    // Alle aktiven Tinda-Ehen des Users suchen
+                    const aiChats = await limChatsCollection.find({ type: 'tinda', participants: userId, isMarried: true }).toArray();
+                    
+                    for (const c of aiChats) {
+                        // System-Nachricht in den Chat werfen
+                        await limMessagesCollection.insertOne({
+                            chatId: c._id, senderId: null, senderUsername: "System", 
+                            content: `📸 SKANDAL! Die Paparazzi-Bilder sind überall. Die Scheidung ist eingereicht.`, 
+                            timestamp: new Date(), isSystem: true
+                        });
+                        
+                        // Die KI wird getriggert, um extrem wütend zu reagieren!
+                        triggerAiResponse(userId, c.tindaPartnerId, c._id, "*System: Du hast gerade in den LNN News gesehen, dass dein Ehepartner heimlich auf Tinda nach anderen Dates sucht. Reagiere extrem wütend, verletzend und pack deine Koffer!*");
+                    }
+                    
+                    // Chat-Status auf "Geschieden" setzen
+                    await limChatsCollection.updateMany(
+                        { type: 'tinda', participants: userId, isMarried: true },
+                        { $set: { isMarried: false, lastMessagePreview: "SCHEIDUNG eingereicht!", updatedAt: new Date() } }
+                    );
+                }
+
+                // C) User bestrafen & komplett scheiden lassen
+                await usersCollection.updateOne(
+                    { _id: userId },
+                    { 
+                        $inc: { balance: -totalPenalty },
+                        $set: { spouses: [] },
+                        $unset: { isMarriedTo: "" }
+                    }
+                );
+
+                // D) LNN News-Eilmeldung für den ganzen Server
+                await newsCollection.insertOne({
+                    headline: "TINDA-SKANDAL! 📸💔",
+                    content: `${user.username} wurde von Paparazzi beim Fremd-Swipen auf Tinda erwischt! Die Ehe mit ${scandalNames.join(', ')} ist sofort annulliert. Unterhalts- und Anwaltskosten: $${totalPenalty.toLocaleString()}.`,
+                    author: "LNN Klatsch & Tratsch",
+                    category: "Community",
+                    createdAt: new Date(),
+                    likes: 0
+                });
+                if (typeof updateDataVersion === 'function') updateDataVersion('news');
+                if (typeof updateDataVersion === 'function') updateDataVersion('chat');
+
+                // Dem User die Schock-Nachricht ins UI drücken
+                return res.json({ 
+                    match: false, 
+                    paparazzi: true, // Könntest du im Frontend nutzen, um ein rotes Blitzlicht aufblinken zu lassen
+                    message: `📸 BLITZLICHT! Paparazzi haben dich erwischt! Deine Ehe ist Geschichte und du verlierst $${totalPenalty.toLocaleString()}!` 
+                });
+            }
+        }
+        // --- ENDE PAPARAZZI LOGIK ---
+
+
+        // --- NORMALE MATCH LOGIK ---
         let matchChance = 0.8; // Normal 80%
         if (user.activeSubscriptions && user.activeSubscriptions.includes('sugar_daddy')) {
             matchChance = 0.95; // 95% Chance
@@ -8482,12 +8571,10 @@ app.post('/api/tinda/swipe', isAuthenticated, async (req, res) => {
         if (isMatch) {
             const human = await humansCollection.findOne({ _id: hIdObj });
 
-            // Chat erstellen (Typ 'tinda')
-            // WICHTIG: Wir nutzen humanId als Pseudo-Partner
             const newChat = {
                 type: 'tinda',
-                participants: [userId], // Nur User ist "echter" Teilnehmer
-                tindaPartnerId: hIdObj, // Referenz auf Human DB
+                participants: [userId], 
+                tindaPartnerId: hIdObj, 
                 tindaPartnerName: human.name,
                 createdAt: new Date(),
                 updatedAt: new Date(),
@@ -8495,17 +8582,12 @@ app.post('/api/tinda/swipe', isAuthenticated, async (req, res) => {
                 lastMessageTimestamp: new Date()
             };
 
-            // Prüfen ob Chat schon existiert (Reset Logik optional)
             const existingChat = await limChatsCollection.findOne({ type: 'tinda', participants: userId, tindaPartnerId: hIdObj });
 
             if (!existingChat) {
                 await limChatsCollection.insertOne(newChat);
-
-                // NEU: Wir triggern das Polling SOFORT, damit das Frontend den leeren Chat anzeigt, 
-                // BEVOR die KI überhaupt anfängt zu tippen!
                 if (typeof updateDataVersion === 'function') updateDataVersion('chat');
 
-                // KI Trigger läuft jetzt wirklich komplett unbemerkt im Hintergrund
                 triggerAiResponse(userId, hIdObj, newChat._id, "Generiere einen kurzen, flirty Anmachspruch.");
             }
             return res.json({ match: true, humanName: human.name });
