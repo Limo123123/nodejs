@@ -16317,6 +16317,65 @@ app.get('/api/status/metrics', async (req, res) => {
     });
 });
 
+// =========================================================
+// === 📦 DSGVO / DATEN-EXPORT (DATA TAKEOUT) ===
+// =========================================================
+
+app.get('/api/account/export', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    
+    try {
+        // 1. Alle Daten parallel sammeln (Performance!)
+        const [
+            user, 
+            inventory, 
+            portfolios, 
+            pets, 
+            houses,
+            bankLogs
+        ] = await Promise.all([
+            usersCollection.findOne({ _id: userId }, { projection: { password: 0 } }),
+            inventoriesCollection.find({ userId: userId }).toArray(),
+            portfoliosCollection.find({ userId: userId }).toArray(),
+            petsCollection.find({ userId: userId }).toArray(),
+            ownedPropertiesCollection.find({ ownerId: userId }).toArray(),
+            bankTransactionsCollection.find({ $or: [{ fromId: userId }, { toId: userId }] }).sort({ timestamp: -1 }).limit(100).toArray()
+        ]);
+
+        if (!user) return res.status(404).json({ error: "Benutzerdaten nicht gefunden." });
+
+        // 2. Ein schönes, strukturiertes Objekt bauen
+        const exportData = {
+            metadata: {
+                exportedAt: new Date().toISOString(),
+                service: "Limazon",
+                notice: "Dies ist ein maschinenlesbarer Export deiner persönlichen Daten. Ein Re-Import in das System ist aus Sicherheits- und Wirtschaftsgruenden ausgeschlossen."
+            },
+            profile: user,
+            assets: {
+                inventory: inventory,
+                stocks: portfolios,
+                realEstate: houses,
+                pets: pets
+            },
+            recentActivity: {
+                transactions: bankLogs
+            }
+        };
+
+        // 3. Dem Browser sagen, dass er eine Datei herunterladen soll
+        res.setHeader('Content-disposition', `attachment; filename=limazon_export_${user.username}_${Date.now()}.json`);
+        res.setHeader('Content-type', 'application/json');
+        
+        // 4. Daten formatiert (mit Einrückung) senden
+        res.send(JSON.stringify(exportData, null, 2));
+
+    } catch (e) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Datenexport für ${req.session.username}:`, e);
+        res.status(500).json({ error: "Fehler beim Erstellen der Export-Datei." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
