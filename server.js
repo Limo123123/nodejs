@@ -5862,7 +5862,8 @@ app.get('/api/admin/users', isAuthenticated, isAdmin, async (req, res) => {
 
 // User bearbeiten (Geld, Tokens, Admin-Status UND Infinity Money)
 app.put('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
-    const { balance, tokens, infinityMoney, role, permissions } = req.body;
+    const { balance, tokens, infinityMoney, role, permissions, schufaScore } = req.body; 
+    
     try {
         const updateData = {};
         if (balance !== undefined) updateData.balance = parseFloat(balance);
@@ -5872,24 +5873,31 @@ app.put('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
             updateData.unlockedInfinityMoney = infinityMoney;
         }
         
-        // NEU: Rolle und Rechte speichern
         if (role !== undefined) {
             updateData.role = role;
-            // Legacy Support: Wenn Rolle "admin" ist, setze isAdmin auf true, sonst false
             updateData.isAdmin = (role === 'admin'); 
         }
         if (permissions !== undefined) updateData.permissions = permissions;
-		
-		if (schufaScore !== undefined) {
-    		updateData.schufaScore = parseInt(schufaScore);
-    		// Optional: Cap einbauen
-    		if (updateData.schufaScore > 1000) updateData.schufaScore = 1000;
-    		if (updateData.schufaScore < 0) updateData.schufaScore = 0;
-		}
+        
+        // Jetzt ist schufaScore definiert und kann geprüft werden
+        if (schufaScore !== undefined) {
+            updateData.schufaScore = parseInt(schufaScore);
+            if (updateData.schufaScore > 1000) updateData.schufaScore = 1000;
+            if (updateData.schufaScore < 0) updateData.schufaScore = 0;
+        }
 
-        await usersCollection.updateOne({ _id: new ObjectId(req.params.id) }, { $set: updateData });
+        const result = await usersCollection.updateOne(
+            { _id: new ObjectId(req.params.id) }, 
+            { $set: updateData }
+        );
+
+        if (result.matchedCount === 0) {
+            return res.status(404).json({ error: "User nicht gefunden." });
+        }
+
         res.json({ message: "User erfolgreich aktualisiert." });
     } catch (e) {
+        console.error("Update Error:", e); // Hilft dir beim Debuggen im Terminal
         res.status(500).json({ error: "Fehler beim Aktualisieren." });
     }
 });
