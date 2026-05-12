@@ -1021,7 +1021,7 @@ const ENDPOINT_PERMISSIONS = {
     // --- User Management ---
     'GET /api/admin/users': 'manage_users',
     'PUT /api/admin/users/:id': 'manage_users_critical',
-    'POST /api/admin/users/:id/fine': 'manage_users',
+    'POST /api/admin/users/:id/fine': 'manage_users_critical,
     'POST /api/admin/users/:id/reset-pw': 'manage_users_critical',
     'DELETE /api/admin/users/:id': 'manage_users_critical',
     'POST /api/admin/banUser': 'manage_users_critical', 
@@ -5394,7 +5394,7 @@ app.post('/api/bank/loan/apply', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
     const loanAmount = roundMoney(parseFloat(amount));
 
-    if (!loanAmount || loanAmount <= 0) return res.status(400).json({ error: "Ungültiger Betrag." });
+    if (!loanAmount || loanAmount < 500) return res.status(400).json({ error: "Die Bank vergibt Kredite erst ab $500." });
 
     const session = client.startSession();
     try {
@@ -5483,9 +5483,11 @@ app.post('/api/bank/loan/pay', isAuthenticated, async (req, res) => {
             const updateOps = { $inc: { balance: -actualPayment } };
 
             if (newRemaining <= 0) {
-                // Kredit komplett abbezahlt! Schufa Score erhöhen.
+                // Kredit komplett abbezahlt! Schufa Score basierend auf der Kredithöhe erhöhen
                 const currentScore = user.schufaScore || DEFAULT_SCHUFA_SCORE;
-                let newScore = currentScore + 25; // 25 Punkte Plus für gutes Verhalten
+                // +1 Punkt pro $500 Kredit, maximal aber +25 Punkte pro abbezahltem Kredit
+                const earnedPoints = Math.min(25, Math.floor(user.activeLoan.principal / 500));
+                let newScore = currentScore + earnedPoints;
                 if (newScore > 1000) newScore = 1000; // Cap bei 1000
 
                 updateOps.$unset = { activeLoan: "" };
@@ -16659,6 +16661,80 @@ app.get('/api/admin/quick-logs', isAuthenticated, isAdmin, async (req, res) => {
         res.send(html);
     } catch (e) {
         res.status(500).send("Fehler beim Laden der Logs: " + e.message);
+    }
+});
+
+app.patch('/api/account/password', isAuthenticated, async (req, res) => {
+    const { currentPassword, newPassword } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (!currentPassword || !newPassword || newPassword.length < 6) {
+        return res.status(400).json({ error: "Bitte aktuelles Passwort und neues Passwort (min. 6 Zeichen) eingeben." });
+    }
+
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        const match = await bcrypt.compare(currentPassword, user.password);
+        
+        if (!match) {
+            return res.status(401).json({ error: "Das aktuelle Passwort ist falsch." });
+        }
+
+        const hashedPassword = await bcrypt.hash(newPassword, SALT_ROUNDS);
+        await usersCollection.updateOne({ _id: userId }, { $set: { password: hashedPassword } });
+
+        console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} hat sein Passwort geändert.`);
+        res.json({ message: "Passwort erfolgreich geändert!" });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler bei Passwortänderung für ${req.session.username}:`, err);
+        res.status(500).json({ error: "Fehler beim Speichern des neuen Passworts." });
+    }
+});
+
+app.patch('/api/account/username', isAuthenticated, async (req, res) => {
+    const { newUsername } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (!newUsername || typeof newUsername !== 'string' || newUsername.length < 3 || newUsername.length > 30) {
+        return res.status(400).json({ error: 'Der neue Benutzername muss zwischen 3 und 30 Zeichen lang sein.' });
+    }
+
+    // Die Namens-Polizei aus der Registrierung anwenden
+    const usernameRegex = /^[a-zA-Z0-9_äöüÄÖÜß]+$/;
+    if (!usernameRegex.test(newUsername)) {
+        return res.status(400).json({ error: 'Der Name darf keine Emojis, Leerzeichen oder Sonderzeichen enthalten!' });
+    }
+    
+    if (containsForbiddenWords(newUsername)) {
+        return res.status(400).json({ error: 'Dieser Name ist vom Einwohnermeldeamt blockiert.' });
+    }
+
+    try {
+        const lowerNewName = newUsername.toLowerCase();
+        
+        // Prüfen, ob der Name schon weg ist
+        const existing = await usersCollection.findOne({ username: lowerNewName });
+        if (existing) {
+            return res.status(409).json({ error: 'Dieser Name ist bereits vergeben.' });
+        }
+
+        const oldName = req.session.username;
+
+        // 1. Account updaten
+        await usersCollection.updateOne({ _id: userId }, { $set: { username: lowerNewName } });
+        
+        // 2. Session updaten
+        req.session.username = lowerNewName;
+
+        // 3. Wichtige Verknüpfungen updaten (Chats & Häuser)
+        await ownedPropertiesCollection.updateMany({ ownerId: userId }, { $set: { ownerName: lowerNewName } });
+        await limMessagesCollection.updateMany({ senderId: userId }, { $set: { senderUsername: lowerNewName } });
+
+        console.log(`${LOG_PREFIX_SERVER} User hat sich umbenannt: ${oldName} -> ${lowerNewName}`);
+        res.json({ message: "Benutzername erfolgreich geändert!", username: lowerNewName });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler bei Namensänderung für ${req.session.username}:`, err);
+        res.status(500).json({ error: "Fehler beim Ändern des Benutzernamens." });
     }
 });
 
