@@ -1881,6 +1881,88 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
     }
 });
 
+// =========================================================
+// 🚨 AUTH: Einloggen mit Admin-Temp-Code
+// =========================================================
+app.post('/api/auth/temp-login', rateLimitLogin, async (req, res) => {
+    const { username, tempCode } = req.body;
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
+
+    if (!username || !tempCode) {
+        return res.status(400).json({ error: "Username und Temp-Code erforderlich." });
+    }
+
+    try {
+        const user = await usersCollection.findOne({ username: username.toLowerCase() });
+
+        // Prüfen, ob Code existiert und übereinstimmt
+        if (!user || user.tempLoginCode !== tempCode) {
+            return res.status(401).json({ error: "Ungültiger Code oder User." });
+        }
+
+        // Prüfen, ob Code abgelaufen ist
+        if (new Date() > new Date(user.tempLoginCodeExpires)) {
+            // Aufräumen
+            await usersCollection.updateOne({ _id: user._id }, { $unset: { tempLoginCode: "", tempLoginCodeExpires: "" } });
+            return res.status(401).json({ error: "Der temporäre Code ist abgelaufen (älter als 10 Minuten)." });
+        }
+
+        // 🛑 Code war gültig! Sofort vernichten, damit er wirklich nur ein EINZIGES Mal funktioniert
+        await usersCollection.updateOne(
+            { _id: user._id },
+            { 
+                $unset: { tempLoginCode: "", tempLoginCodeExpires: "" },
+                $set: { lastIp: clientIp, lastLogin: new Date() }
+            }
+        );
+
+        // Login-Sperre Zähler für diese IP zurücksetzen (aus deiner rateLimitLogin Middleware)
+        if (req.loginRateLimitKey && global.redisPub) {
+            global.redisPub.del(req.loginRateLimitKey).catch(e => console.error("Redis Del Error", e));
+        }
+
+        await logActivity(req, "ADMIN_TEMP_LOGIN_USED", { status: "success", targetUser: user.username });
+
+        // Session aufbauen
+        req.session.userId = user._id.toString();
+        req.session.username = user.username;
+        req.session.isAdmin = user.isAdmin || false;
+        
+        // WICHTIG: Da es ein Temp-Login ist, vergeben wir absichtlich KEIN "Remember Me" Cookie
+        req.session.cookie.expires = false; 
+        req.session.cookie.maxAge = null;
+
+        req.session.save(err => {
+            if (err) {
+                console.error(`${LOG_PREFIX_SERVER} Fehler Speichern Session Temp-Login ${user.username}:`, err);
+                return res.status(500).json({ error: 'Fehler Session.' });
+            }
+
+            console.log(`${LOG_PREFIX_SERVER} 🕵️ Admin hat sich erfolgreich als ${user.username} eingeloggt. Session ID: ${req.session.id}`);
+
+            const effectiveInfinityMoney = user.isAdmin ? true : (user.infinityMoney || false);
+
+            res.json({
+                message: `Admin-Override erfolgreich! Eingeloggt als ${user.username}.`,
+                user: {
+                    userId: user._id.toString(),
+                    username: user.username,
+                    balance: IS_APRIL_FOOLS ? 0 : user.balance,
+                    tokens: IS_APRIL_FOOLS ? 0 : (user.tokens || 0),
+                    isAdmin: user.isAdmin || false,
+                    infinityMoney: effectiveInfinityMoney,
+                    unlockedInfinityMoney: user.unlockedInfinityMoney || false,
+                    productSellCooldowns: user.productSellCooldowns || {}
+                }
+            });
+        });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Serverfehler Temp-Login ${username}:`, err);
+        res.status(500).json({ error: "Serverfehler beim Temp-Login." });
+    }
+});
+
 app.post('/api/auth/logout', (req, res) => {
     const username = req.session.username || 'Unbek. User'; const sessionId = req.session.id;
     console.log(`${LOG_PREFIX_SERVER} Logout User: ${username}. Session ID: ${sessionId}`);
@@ -6167,6 +6249,60 @@ if (cluster.isPrimary) {
     // Starte ihn einmalig 10 Sekunden nach Serverstart, um jetzt direkt aufzuräumen!
     setTimeout(cleanupOrphanedData, 10000); 
 }
+
+// =========================================================
+// 🚨 ADMIN: Temporären Login-Code generieren (Impersonation)
+// =========================================================
+app.post('/api/admin/users/:id/temp-login-code', isAuthenticated, isAdmin, async (req, res) => {
+    const { adminPassword } = req.body;
+    const targetUserId = req.params.id;
+    const adminId = new ObjectId(req.session.userId);
+
+    if (!adminPassword) {
+        return res.status(400).json({ error: "Bitte gib dein Admin-Passwort zur Bestätigung ein." });
+    }
+
+    try {
+        // 1. Admin-Passwort verifizieren (Sicherheit gegen Session-Hijacking)
+        const adminUser = await usersCollection.findOne({ _id: adminId });
+        const match = await bcrypt.compare(adminPassword, adminUser.password);
+        
+        if (!match) {
+            console.warn(`${LOG_PREFIX_SERVER} 🚨 Warnung: Falsches Admin-Passwort beim Versuch, einen Temp-Code zu generieren! User: ${req.session.username}`);
+            return res.status(401).json({ error: "Falsches Admin-Passwort! Vorgang abgebrochen." });
+        }
+
+        // 2. Ziel-User suchen
+        if (!ObjectId.isValid(targetUserId)) return res.status(400).json({ error: "Ungültige User-ID." });
+        const targetUser = await usersCollection.findOne({ _id: new ObjectId(targetUserId) });
+        
+        if (!targetUser) return res.status(404).json({ error: "Ziel-User nicht gefunden." });
+
+        // 3. Temporären Code generieren (Gültig für 10 Minuten)
+        // Wir nutzen uuidv4(), das du in server.js schon importiert hast
+        const tempCode = "LIMO-ADMIN-" + uuidv4().substring(0, 8).toUpperCase();
+        const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 Minuten
+
+        await usersCollection.updateOne(
+            { _id: targetUser._id },
+            { $set: { tempLoginCode: tempCode, tempLoginCodeExpires: expiresAt } }
+        );
+
+        // 4. In die Activity Logs eintragen (damit du später nachvollziehen kannst, wenn ein Admin das nutzt)
+        await logActivity(req, "ADMIN_TEMP_LOGIN_GENERATED", { targetUser: targetUser.username });
+        console.log(`${LOG_PREFIX_SERVER} 🕵️ Admin ${req.session.username} hat einen Einmal-Code für ${targetUser.username} generiert.`);
+
+        res.json({ 
+            message: `Temporärer Login-Code für ${targetUser.username} generiert (10 Min gültig).`, 
+            username: targetUser.username,
+            tempCode: tempCode 
+        });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler bei Temp-Code Generierung:`, err);
+        res.status(500).json({ error: "Serverfehler." });
+    }
+});
 
 // =========================================================
 // === SMARTER CONTENT CLEANER (AUTO-UPDATED BAD WORDS) ===
