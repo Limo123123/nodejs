@@ -1722,9 +1722,20 @@ app.post('/api/auth/register', async (req, res) => {
     }
     const { username, password } = req.body;
     console.log(`${LOG_PREFIX_SERVER} Registrierungsversuch für User: ${username ? username.substring(0, 3) + "***" : "LEER"}`);
+    
     if (!username || !password || typeof username !== 'string' || typeof password !== 'string' || username.length < 3 || username.length > 30 || password.length < 6) {
         return res.status(400).json({ error: 'Benutzername (3-30 Zeichen) und Passwort (min 6 Zeichen) erforderlich.' });
     }
+
+    const usernameRegex = /^[a-zA-Z0-9_äöüÄÖÜß]+$/;
+    if (!usernameRegex.test(username)) {
+        return res.status(400).json({ error: 'Der Name darf keine Emojis, Leerzeichen oder komischen Sonderzeichen enthalten!' });
+    }
+    
+    if (containsForbiddenWords(username)) {
+        return res.status(400).json({ error: 'Netter Versuch, aber dieser Name steht auf der schwarzen Liste des Einwohnermeldeamtes.' });
+    }
+
     try {
         const existingUser = await usersCollection.findOne({ username: username.toLowerCase() });
         if (existingUser) {
@@ -9213,6 +9224,15 @@ app.post('/api/tinda/chat/:chatId/have-child', isAuthenticated, isChatParticipan
     if (!chat.isMarried) return res.status(400).json({ error: "Ihr müsst zuerst heiraten!" });
     if (!childName || childName.trim().length < 2) return res.status(400).json({ error: "Bitte gib einen gültigen Namen für das Kind ein." });
 
+    const childNameRegex = /^[a-zA-ZäöüÄÖÜß\s\-]+$/; 
+    if (!childNameRegex.test(childName)) {
+        return res.status(400).json({ error: 'Das Jugendamt erlaubt keine Emojis oder Zahlen als Kindernamen!' });
+    }
+
+    if (containsForbiddenWords(childName)) {
+        return res.status(400).json({ error: 'Das Jugendamt hat diesen Namen wegen Obszönität abgelehnt. Denk dir was Besseres aus!' });
+    }
+
     const session = client.startSession();
     try {
         await session.withTransaction(async () => {
@@ -9243,7 +9263,6 @@ app.post('/api/tinda/chat/:chatId/have-child', isAuthenticated, isChatParticipan
             await limChatsCollection.insertOne(childChat, { session });
 
             // 3. Neuen Chat erstellen: Familien-Gruppenchat (User + Ehepartner + Kind)
-            // Wir erstellen ihn nur, wenn er noch nicht existiert
             const existingFamilyChat = await limChatsCollection.findOne({ type: 'tinda_family', participants: userId, tindaPartnerId: chat.tindaPartnerId }, { session });
             
             if (!existingFamilyChat) {
@@ -9252,7 +9271,7 @@ app.post('/api/tinda/chat/:chatId/have-child', isAuthenticated, isChatParticipan
                     participants: [userId],
                     tindaPartnerId: chat.tindaPartnerId,
                     tindaPartnerName: chat.tindaPartnerName,
-                    familyNames: [chat.tindaPartnerName, newChild.name], // Wird später für den Prompt genutzt
+                    familyNames: [chat.tindaPartnerName, newChild.name],
                     createdAt: new Date(),
                     updatedAt: new Date(),
                     lastMessagePreview: "Familien-Chat erstellt!",
