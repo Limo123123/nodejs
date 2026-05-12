@@ -2485,24 +2485,30 @@ app.post('/api/products/sell', isAuthenticated, async (req, res) => {
                 }
             }
 
-            // C. Wahrscheinlichkeits-Berechnung (Deine Original-Logik)
-            const origPrice = prodToSell.basePrice || parseFloat((prodToSell.price || "$0").replace(/[^0-9.]/g, '')) || 1;
+            // C. Wahrscheinlichkeits-Berechnung
+			const origPrice = prodToSell.basePrice || parseFloat((prodToSell.price || "$0").replace(/[^0-9.]/g, '')) || 1;
 
-            let prob = 1.0;
-            if (sellPrice > origPrice) prob = origPrice / sellPrice;
-            else if (sellPrice < origPrice * 0.5) prob = 1.0;
+			// 🚨 ANTI-WUCHER SCHUTZ: Maximal den 3-fachen Preis erlauben!
+			if (sellPrice > origPrice * 3) {
+			    throw new Error(`Wucher! Niemand kauft "${prodToSell.name}" für mehr als das Dreifache des Wertes.`);
+			}
 
-            // Markt-Sättigung einbeziehen
-            const globStock = prodToSell.stock || 0;
-            const defGlobStock = prodToSell.default_stock || 20;
+			let prob = 1.0;
+			if (sellPrice > origPrice) prob = origPrice / sellPrice;
+			else if (sellPrice < origPrice * 0.5) prob = 1.0;
 
-            if (globStock > defGlobStock * 2.5) prob *= 0.1;      // Markt überschwemmt -> schwer zu verkaufen
-            else if (globStock > defGlobStock * 1.8) prob *= 0.5;
-            else if (globStock > defGlobStock * 1.2) prob *= 0.8;
+			// Markt-Sättigung einbeziehen
+			const globStock = prodToSell.stock || 0;
+			const defGlobStock = prodToSell.default_stock || 20;
 
-            prob = Math.max(0.01, Math.min(1.0, prob));
+			if (globStock > defGlobStock * 2.5) prob *= 0.1;      
+			else if (globStock > defGlobStock * 1.8) prob *= 0.5;
+			else if (globStock > defGlobStock * 1.2) prob *= 0.8;
 
-            const wasSold = Math.random() < prob;
+			// Das Minimum von 1% ist okay, ABER nur, weil der Preis jetzt maximal 3x so hoch sein kann!
+			prob = Math.max(0.01, Math.min(1.0, prob));
+
+			const wasSold = Math.random() < prob;
 
             // D. Transaktionen ausführen
             if (wasSold) {
