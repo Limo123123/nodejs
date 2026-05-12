@@ -1021,7 +1021,7 @@ const ENDPOINT_PERMISSIONS = {
     // --- User Management ---
     'GET /api/admin/users': 'manage_users',
     'PUT /api/admin/users/:id': 'manage_users_critical',
-    'POST /api/admin/users/:id/fine': 'manage_users_critical,
+    'POST /api/admin/users/:id/fine': 'manage_users_critical',
     'POST /api/admin/users/:id/reset-pw': 'manage_users_critical',
     'DELETE /api/admin/users/:id': 'manage_users_critical',
     'POST /api/admin/banUser': 'manage_users_critical', 
