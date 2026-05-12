@@ -1020,7 +1020,7 @@ const ENDPOINT_PERMISSIONS = {
 
     // --- User Management ---
     'GET /api/admin/users': 'manage_users',
-    'PUT /api/admin/users/:id': 'manage_users',
+    'PUT /api/admin/users/:id': 'manage_users_critical',
     'POST /api/admin/users/:id/fine': 'manage_users',
     'POST /api/admin/users/:id/reset-pw': 'manage_users_critical',
     'DELETE /api/admin/users/:id': 'manage_users_critical',
@@ -5896,6 +5896,15 @@ app.put('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
             if (updateData.schufaScore > 1000) updateData.schufaScore = 1000;
             if (updateData.schufaScore < 0) updateData.schufaScore = 0;
         }
+		
+		if (role !== undefined) {
+            // Nur der echte Master-Admin (oder User mit 'super_admin' Recht) darf Rollen ändern
+            if (!req.session.isAdmin && !req.user?.permissions?.includes('super_admin')) {
+                 return res.status(403).json({ error: "Nur Super-Admins dürfen Rollen und Berechtigungen verändern!" });
+            }
+            updateData.role = role;
+            updateData.isAdmin = (role === 'admin'); 
+        }
 
         const result = await usersCollection.updateOne(
             { _id: new ObjectId(req.params.id) }, 
@@ -9155,57 +9164,84 @@ app.post('/api/tinda/chat/:chatId/shared-account', isAuthenticated, isChatPartic
     res.json({ message: `$${DAILY_ALLOWANCE} vom gemeinsamen Konto abgehoben. Dein Partner hat das sicher gemerkt.`, newBalance: user.balance + DAILY_ALLOWANCE });
 });
 
-// Scheidung und Auszug
+// Scheidung und Sorgerechtsstreit
 app.post('/api/tinda/chat/:chatId/divorce', isAuthenticated, isChatParticipant, async (req, res) => {
     const chatId = new ObjectId(req.params.chatId);
     const userId = new ObjectId(req.session.userId);
     const chat = req.chat;
-    const DIVORCE_COST = 5000; // Anwaltskosten
+    const DIVORCE_COST = 25000; // Anwaltskosten
 
     if (chat.type !== 'tinda') return res.status(400).json({ error: "Das geht nur bei Tinda-Matches." });
     if (!chat.isMarried) return res.status(400).json({ error: "Ihr seid gar nicht verheiratet!" });
 
     const session = client.startSession();
     try {
+        let isCourtCase = false;
+        
         await session.withTransaction(async () => {
             const user = await usersCollection.findOne({ _id: userId }, { session });
             if (user.balance < DIVORCE_COST) throw new Error(`Die Scheidung kostet $${DIVORCE_COST} Anwaltsgebühren. Du bist zu arm für die Trennung!`);
 
-            // 1. Kosten abziehen & Beziehungsstatus beim User entfernen
-            await usersCollection.updateOne(
-                { _id: userId }, 
-                { $inc: { balance: -DIVORCE_COST }, $unset: { isMarriedTo: "" } }, 
-                { session }
-            );
+            // GELD ABZIEHEN FÜR DEN ANWALT
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -DIVORCE_COST } }, { session });
 
-            // 2. Chat auf "nicht mehr verheiratet" setzen
-            await limChatsCollection.updateOne(
-                { _id: chatId }, 
-                { $set: { isMarried: false } }, 
-                { session }
-            );
+            // SIND KINDER IM SPIEL? -> SORGERECHTSSTREIT!
+            if (chat.children && chat.children.length > 0) {
+                isCourtCase = true;
+                
+                // Gerichtsfall erstellen
+                const newCase = {
+                    accusedId: userId,
+                    accusedName: req.session.username,
+                    plaintiffId: new ObjectId("000000000000000000000000"), // System/Ex-Partner
+                    plaintiffName: chat.tindaPartnerName,
+                    crime: `Sorgerechtsstreit um ${chat.children[0].name}`,
+                    description: `${req.session.username} hat die Scheidung eingereicht. ${chat.tindaPartnerName} klagt nun auf das alleinige Sorgerecht und 50% des Vermögens! Das Volk muss entscheiden, wer das Kind behalten darf.`,
+                    status: 'active',
+                    isCustodyBattle: true, // WICHTIGER FLAG für die harte Strafe
+                    childChatId: chatId, // Wir merken uns den Tinda Chat, um ihn später bei Urteil zu löschen
+                    createdAt: new Date(),
+                    votes_guilty: [],   
+                    votes_innocent: [], 
+                    voted_devices: []   
+                };
+                await db.collection('courtCases').insertOne(newCase, { session });
 
-            // 3. Auszug (Partner aus der eigenen Immobilie werfen)
-            const home = await ownedPropertiesCollection.findOne({ ownerId: userId }, { session });
-            if (home) {
-                await ownedPropertiesCollection.updateOne(
-                    { _id: home._id }, 
-                    { $pull: { roommates: chat.tindaPartnerId } }, 
-                    { session }
-                );
+                // Nachricht im Chat
+                const sysMsgContent = `⚖️ SORGERECHTSSTREIT! Du willst die Scheidung? ${chat.tindaPartnerName} zieht vor das Limo Gericht! Das Volk entscheidet über dein Geld und dein Kind.`;
+                await limMessagesCollection.insertOne({
+                    chatId, senderId: null, senderUsername: "System", content: sysMsgContent, timestamp: new Date(), isSystem: true
+                }, { session });
+                
+                // KI extrem wütend machen
+                triggerAiResponse(userId, chat.tindaPartnerId, chatId, "*System: Der User hat die Scheidung eingereicht. Du hast ihn daraufhin auf das Sorgerecht und 50% seines Vermögens verklagt. Sei extrem wütend und siegessicher!*");
+            } else {
+                // NORMALE SCHEIDUNG (Ohne Kinder)
+                await usersCollection.updateOne({ _id: userId }, { $unset: { isMarriedTo: "" } }, { session });
+                await limChatsCollection.updateOne({ _id: chatId }, { $set: { isMarried: false } }, { session });
+
+                // Auszug aus WG
+                const home = await ownedPropertiesCollection.findOne({ ownerId: userId }, { session });
+                if (home) {
+                    await ownedPropertiesCollection.updateOne({ _id: home._id }, { $pull: { roommates: chat.tindaPartnerId } }, { session });
+                }
+
+                const sysMsgContent = `💔 IHR HABT EUCH GESCHIEDEN! ${chat.tindaPartnerName} ist ausgezogen.`;
+                await limMessagesCollection.insertOne({
+                    chatId, senderId: null, senderUsername: "System", content: sysMsgContent, timestamp: new Date(), isSystem: true
+                }, { session });
+                
+                triggerAiResponse(userId, chat.tindaPartnerId, chatId, "*System: Der User hat soeben die Scheidung eingereicht und dich aus der Wohnung geworfen. Reagiere wütend, dramatisch oder fassungslos!*");
             }
-
-            // 4. System-Nachricht in den Chat
-            const sysMsgContent = `💔 IHR HABT EUCH GESCHIEDEN! ${chat.tindaPartnerName} ist ausgezogen.`;
-            await limMessagesCollection.insertOne({
-                chatId, senderId: null, senderUsername: "System", content: sysMsgContent, timestamp: new Date(), isSystem: true
-            }, { session });
         });
 
         updateDataVersion('chat');
-        triggerAiResponse(userId, chat.tindaPartnerId, chatId, "*System: Der User hat soeben die Scheidung eingereicht und dich aus der Wohnung geworfen. Reagiere wütend, dramatisch oder fassungslos!*");
+        if (isCourtCase) {
+            res.json({ message: `Sorgerechtsklage eingereicht! Du bist nun im Limo Court angeklagt. Verteidige dich, sonst verlierst du 50% deines Vermögens und Tokens!` });
+        } else {
+            res.json({ message: "Scheidung erfolgreich eingereicht. Dein Ex-Partner ist ausgezogen." });
+        }
 
-        res.json({ message: "Scheidung erfolgreich eingereicht. Dein Ex-Partner ist ausgezogen." });
     } catch (e) {
         res.status(400).json({ error: e.message });
     } finally {
@@ -10602,7 +10638,7 @@ app.get('/api/court/status', isAuthenticated, async (req, res) => {
                 if (total >= MIN_VOTES || now > hardLimit) {
 
                     // === FALL SCHLIESSEN ===
-                    const verdict = gCount > iCount ? 'guilty' : 'innocent';
+                    let verdict = gCount > iCount ? 'guilty' : 'innocent';
                     // Bei Gleichstand im Hard Limit: Freispruch (In dubio pro reo)
                     if (gCount === iCount) verdict = 'innocent';
 
@@ -10613,10 +10649,49 @@ app.get('/api/court/status', isAuthenticated, async (req, res) => {
 
                     // Strafe vollstrecken
                     if (verdict === 'guilty') {
-                        await usersCollection.updateOne(
-                            { username: activeCase.accusedName },
-                            { $mul: { balance: 0.9 } } // 10% Strafe
-                        );
+                        // WENN ES EIN SORGERECHTSSTREIT IST
+                        if (activeCase.isCustodyBattle) {
+                            const loser = await usersCollection.findOne({ username: activeCase.accusedName });
+                            if (loser) {
+                                const moneyLoss = Math.floor(loser.balance * 0.5);
+                                const tokenLoss = Math.floor((loser.tokens || 0) * 0.5);
+
+                                // 50% Geld, 50% Tokens abziehen & Scheidung durchziehen
+                                await usersCollection.updateOne(
+                                    { _id: loser._id },
+                                    { 
+                                        $inc: { balance: -moneyLoss, tokens: -tokenLoss },
+                                        $unset: { isMarriedTo: "" }
+                                    }
+                                );
+
+                                // Kindes-Chats und Familienchat löschen
+                                await limChatsCollection.deleteMany({ participants: loser._id, type: { $in: ['tinda_child', 'tinda_family'] } });
+                                // Hauptchat auf geschieden setzen und Kinder löschen
+                                await limChatsCollection.updateOne({ _id: activeCase.childChatId }, { $set: { isMarried: false, children: [] } });
+
+                                // LNN News
+                                await newsCollection.insertOne({
+                                    headline: "SORGERECHT VERLOREN! 📉💔",
+                                    content: `${activeCase.accusedName} hat das Sorgerecht an ${activeCase.plaintiffName} verloren! Das Gericht hat das Kind zugesprochen und direkt 50% des Geldes ($${moneyLoss.toLocaleString()}) und ${tokenLoss.toLocaleString()} Tokens als Unterhalt gepfändet!`,
+                                    author: "LNN Justiz", category: "Justiz", createdAt: new Date(), likes: 0
+                                });
+                                if (typeof updateDataVersion === 'function') updateDataVersion('news');
+                            }
+                        } else {
+                            // NORMALE STRAFE (10% für reguläre Anklagen)
+                            await usersCollection.updateOne(
+                                { username: activeCase.accusedName },
+                                { $mul: { balance: 0.9 } } // 10% Strafe
+                            );
+                        }
+                    } else if (verdict === 'innocent' && activeCase.isCustodyBattle) {
+                        // Bei Unschuld im Sorgerechtsstreit behält der User das Kind und die Scheidung ist einfach durch
+                        const winner = await usersCollection.findOne({ username: activeCase.accusedName });
+                        if (winner) {
+                            await usersCollection.updateOne({ _id: winner._id }, { $unset: { isMarriedTo: "" } });
+                            await limChatsCollection.updateOne({ _id: activeCase.childChatId }, { $set: { isMarried: false } });
+                        }
                     }
 
                     return res.redirect('/api/court/status'); // Reload für nächsten Fall
