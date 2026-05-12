@@ -16540,6 +16540,53 @@ app.get('/api/account/export', isAuthenticated, async (req, res) => {
     }
 });
 
+// =========================================================
+// 🚨 NOTFALL ADMIN LOG-VIEWER (DIREKTES HTML)
+// =========================================================
+app.get('/api/admin/quick-logs', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        // Die letzten 200 Einträge holen
+        const logs = await db.collection('activityLogs').find({}).sort({ timestamp: -1 }).limit(200).toArray();
+        
+        let html = `
+        <html>
+        <head>
+            <title>Limo Activity Logs</title>
+            <style>
+                body { font-family: monospace; background-color: #1e1e1e; color: #c5c8c6; padding: 20px; }
+                table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+                th, td { border: 1px solid #444; padding: 10px; text-align: left; vertical-align: top; }
+                th { background-color: #333; color: #fff; }
+                tr:nth-child(even) { background-color: #252526; }
+                tr:hover { background-color: #3a3d41; }
+                .action { color: #569cd6; font-weight: bold; }
+                pre { margin: 0; color: #ce9178; white-space: pre-wrap; word-wrap: break-word; }
+            </style>
+        </head>
+        <body>
+            <h2>🕵️ Limo Activity Logs (Letzte 200)</h2>
+            <table>
+                <tr><th>Datum & Zeit</th><th>User</th><th>Aktion</th><th>Details</th><th>IP</th></tr>`;
+        
+        logs.forEach(l => {
+            const time = new Date(l.timestamp).toLocaleString('de-DE');
+            const details = JSON.stringify(l.details, null, 2);
+            html += `<tr>
+                <td style="width: 150px;">${time}</td>
+                <td><b>${l.username || 'System'}</b><br><small>${l.userId || ''}</small></td>
+                <td class="action">${l.action}</td>
+                <td><pre>${details}</pre></td>
+                <td>${l.ip || '-'}</td>
+            </tr>`;
+        });
+        
+        html += `</table></body></html>`;
+        res.send(html);
+    } catch (e) {
+        res.status(500).send("Fehler beim Laden der Logs: " + e.message);
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
