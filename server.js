@@ -834,7 +834,12 @@ const API_WINDOW_MS = 60 * 1000; // 1 Minute Zeitfenster
 const API_MAX_REQS = 300;        // Max 300 Requests pro Minute pro IP
 
 async function globalApiRateLimit(req, res, next) {
+    // 1. Dein alter God-Mode-Header (für externe Skripte)
     if (req.headers['x-bot-bypass'] === 'limo-god-mode') {
+        return next();
+    }
+
+    if (req.session && req.session.isAdmin === true) {
         return next();
     }
 
@@ -842,7 +847,6 @@ async function globalApiRateLimit(req, res, next) {
     const redisKey = `rate_limit:global:${ip}`;
 
     try {
-        // Erhöht den Zähler für diese IP um 1
         const currentCount = await global.redisPub.incr(redisKey);
 
         // Wenn es der erste Request in diesem Zeitfenster ist, setze den Ablauf-Timer (60 Sekunden)
@@ -2623,7 +2627,6 @@ app.post('/api/products/sell', isAuthenticated, async (req, res) => {
         }
 
     } catch (err) {
-        // Fehlerbehandlung
         console.error(`${LOG_PREFIX_SERVER} Fehler Verkauf (${username}):`, err.message);
 
         if (err.message.startsWith("COOLDOWN_ACTIVE")) {
@@ -2631,7 +2634,9 @@ app.post('/api/products/sell', isAuthenticated, async (req, res) => {
             return res.status(429).json({ success: false, error: `Cooldown aktiv: Warte ${seconds}s.` });
         }
 
-        if (err.message.includes("Nicht genügend Items") || err.message.includes("Fehler: Item wurde während")) {
+        if (err.message.includes("Nicht genügend Items") || 
+            err.message.includes("Fehler: Item wurde während") || 
+            err.message.startsWith("Wucher!")) {
             return res.status(400).json({ error: err.message });
         }
 
