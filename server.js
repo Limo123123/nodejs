@@ -15486,7 +15486,7 @@ app.get('/api/admin/requests', isAuthenticated, isAdmin, async (req, res) => {
 const LIMO_PLUS_SUBS = {
     'prime': { 
         id: 'prime', name: 'Limazon Prime', costPerDay: 3500, icon: '🚀', 
-        desc: 'Kostenloser Express-Versand bei Limo Post & 25% Rabatt auf deine Steuern.' 
+        desc: '"Kostenloser Express-Versand, 25% Steuerrabatt & Werbefrei auf der Startseite!' 
     },
     'hustler': { 
         id: 'hustler', name: 'Hustler Pass', costPerDay: 1500, icon: '💼', 
