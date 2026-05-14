@@ -16885,6 +16885,24 @@ app.patch('/api/account/username', isAuthenticated, async (req, res) => {
     }
 });
 
+// =========================================================
+// === 📢 LIMO ADS (WERBE-NETZWERK) ===
+// =========================================================
+const LIMO_ADS = [
+    { id: 1, title: "Das Limazon Casino", text: "Waren Sie schonmal im Casino? Verdoppeln Sie jetzt Ihr Geld! (Oder verlieren Sie alles...)", icon: "🎰", link: "themes/casino.html" },
+    { id: 2, title: "LimoStonks Crash?", text: "Kaufe jetzt LIMO BTC günstiger! Der Markt ist heiß, werde zum Limo Bezos!", icon: "📈", link: "themes/finance.html" },
+    { id: 3, title: "Limazon+", text: "Werde VIP! Hol dir den Sugar-Pass und maximiere deine Tinda-Matches sofort.", icon: "💎", link: "themes/limoplus.html" },
+    { id: 4, title: "Immobilienmarkt", text: "Miete dich nicht arm! Kaufe heute noch deine eigene Luxus-Villa und kassiere Miete.", icon: "🏰", link: "themes/realestate.html" },
+    { id: 5, title: "Teachermon Pro", text: "Dein Deck ist zu schwach? Öffne ein neues Pack und dominiere die Arena!", icon: "🃏", link: "themes/teachermon.html" },
+    { id: 6, title: "Hungrig?", text: "Limo's Diner hat geöffnet! Tanke jetzt Energie für deinen nächsten Raubüberfall.", icon: "🍔", link: "themes/restaurant.html" }
+];
+
+app.get('/api/ads/random', (req, res) => {
+    // Zieht eine zufällige Werbung aus dem Array
+    const randomAd = LIMO_ADS[Math.floor(Math.random() * LIMO_ADS.length)];
+    res.json({ ad: randomAd });
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
