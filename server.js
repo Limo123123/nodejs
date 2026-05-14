@@ -16894,13 +16894,35 @@ const LIMO_ADS = [
     { id: 3, title: "Limazon+", text: "Werde VIP! Hol dir den Sugar-Pass und maximiere deine Tinda-Matches sofort.", icon: "💎", link: "themes/limoplus.html" },
     { id: 4, title: "Immobilienmarkt", text: "Miete dich nicht arm! Kaufe heute noch deine eigene Luxus-Villa und kassiere Miete.", icon: "🏰", link: "themes/realestate.html" },
     { id: 5, title: "Teachermon Pro", text: "Dein Deck ist zu schwach? Öffne ein neues Pack und dominiere die Arena!", icon: "🃏", link: "themes/teachermon.html" },
-    { id: 6, title: "Hungrig?", text: "Limo's Diner hat geöffnet! Tanke jetzt Energie für deinen nächsten Raubüberfall.", icon: "🍔", link: "themes/restaurant.html" }
+    { id: 6, title: "Hungrig?", text: "Limo's Diner hat geöffnet! Tanke jetzt Energie für deinen nächsten Raubüberfall.", icon: "🍔", link: "themes/restaurant.html" },
+    { id: 7, title: "Einsam?", text: "Finde dein perfektes Match auf Tinda! 80% Match-Garantie (mit Sugar-Pass).", icon: "🔥", link: "themes/tinda.html" },
+    { id: 8, title: "Schlechte Noten?", text: "Bewerte jetzt deine Mitmenschen in Human Grades. Rache ist süß!", icon: "🎓", link: "ot/tcg/index.html" },
+    { id: 9, title: "Limo Post", text: "Verschicke Items sicher an deine Freunde. Prime-User zahlen keine Versandkosten!", icon: "🚚", link: "themes/logistics.html" },
+    { id: 10, title: "Gebrauchtmarkt", text: "Dein Inventar quillt über? Verkaufe Items auf Limo Kleinanzeigen und mach Kohle!", icon: "🏷️", link: "themes/kleinanzeigen.html" },
+    { id: 11, title: "Göttlicher Segen", text: "Spende an die Kirche des Pi und erkaufe dir ein gutes Gewissen.", icon: "🕯️", link: "themes/kirche.html" },
+    { id: 12, title: "Kopfgeldjäger gesucht", text: "Verdiene dir eine goldene Nase im Bounty Hub! Die Liste der Gesuchten wird länger.", icon: "🎯", link: "themes/wanted.html" },
+    { id: 13, title: "Gründe dein Imperium", text: "Werde der Pate! Gründe eine Gang, kaufe dir Waffen und reiße Limazon an dich.", icon: "🏴‍☠️", link: "themes/gangs.html" },
+    { id: 14, title: "Limipedia", text: "Du hast den Durchblick verloren? Lies das offizielle Limazon Wiki!", icon: "📖", link: "https://limipedia.any64.de" },
+    { id: 15, title: "Neues Sofa gefällig?", text: "Richte dein Traumhaus im Limea-Möbelhaus ein! Tausende Layouts im Community Store.", icon: "🪑", link: "themes/limea.html" }
 ];
 
-app.get('/api/ads/random', (req, res) => {
-    // Zieht eine zufällige Werbung aus dem Array
+app.get('/api/ads/random', async (req, res) => {
+    // 1. Prüfen, ob der User eingeloggt ist und Prime hat
+    if (req.session && req.session.userId) {
+        try {
+            const user = await usersCollection.findOne({ _id: new ObjectId(req.session.userId) }, { projection: { activeSubscriptions: 1 } });
+            if (user && user.activeSubscriptions && user.activeSubscriptions.includes('prime')) {
+                // Prime User sehen KEINE Werbung!
+                return res.json({ ad: null, isAdFree: true });
+            }
+        } catch (e) {
+            console.error("Ad-Check Fehler:", e);
+        }
+    }
+
+    // 2. Normalen Usern (oder Gästen) eine Werbung ins Gesicht drücken
     const randomAd = LIMO_ADS[Math.floor(Math.random() * LIMO_ADS.length)];
-    res.json({ ad: randomAd });
+    res.json({ ad: randomAd, isAdFree: false });
 });
 
 app.use((req, res) => {
