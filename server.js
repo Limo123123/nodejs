@@ -90,7 +90,6 @@ if (!mongoUri) { console.error(`${LOG_PREFIX_SERVER} !!! FEHLER: Keine MongoDB U
 // --- Middleware ---
 const allowedOrigins = [
     frontendDevUrlHttp,
-    frontendDevUrlHttps,
     'https://raspberrypi.tail75d81e.ts.net:8443',
     'https://api.limazon.v6.rocks',
 ];
