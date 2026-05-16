@@ -67,7 +67,6 @@ const sessionSecret = process.env.SESSION_SECRET;
 const SALT_ROUNDS = 12;
 const frontendProdUrl = process.env.FRONTEND_URL;
 const frontendDevUrlHttp = 'http://127.0.0.1:8080';
-const frontendDevUrlHttps = 'https://wl.limazon.v6.rocks';
 const PRICE_UPDATE_INTERVAL_MS = 5 * 60 * 1000; // 5 Minuten
 const PRICE_VOLATILITY_FACTOR = 0.005; // Wie stark Preise reagieren
 const MINIMUM_PRODUCT_PRICE = 1.00; // Minimaler Preis für ein Produkt
@@ -94,7 +93,6 @@ const allowedOrigins = [
     frontendDevUrlHttps,
     'https://raspberrypi.tail75d81e.ts.net:8443',
     'https://api.limazon.v6.rocks',
-    'https://limohub.app',
 ];
 if (frontendProdUrl) { allowedOrigins.push(frontendProdUrl); }
 console.log(`${LOG_PREFIX_SERVER} Erlaubte CORS Origins:`, allowedOrigins);
