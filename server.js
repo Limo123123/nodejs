@@ -3093,6 +3093,60 @@ app.get('/api/chat/chats/:chatId/messages', isAuthenticated, isChatParticipant, 
     }
 });
 
+// Allgemeine Route zum Senden von Nachrichten (Wird von Kleinanzeigen genutzt!)
+app.post('/api/chat/chats/:chatId/messages', isAuthenticated, isChatParticipant, async (req, res) => {
+    const chatId = req.chat._id; // Wird durch die Middleware isChatParticipant validiert
+    const senderId = new ObjectId(req.session.userId);
+    const senderUsername = req.session.username;
+    const { content } = req.body;
+
+    if (!content || typeof content !== 'string' || content.trim().length === 0 || content.length > 2000) {
+        return res.status(400).json({ error: "Nachrichteninhalt (1-2000 Zeichen) ist erforderlich." });
+    }
+
+    try {
+        const now = new Date();
+        const newMessageData = {
+            chatId: chatId,
+            senderId: senderId,
+            senderUsername: senderUsername,
+            content: content.trim(),
+            timestamp: now
+        };
+
+        // 1. Nachricht in die DB speichern
+        const result = await limMessagesCollection.insertOne(newMessageData);
+        const newMessage = { _id: result.insertedId, ...newMessageData };
+
+        // 2. Chat-Vorschau aktualisieren (damit es in der Übersicht nach oben rutscht)
+        await limChatsCollection.updateOne(
+            { _id: chatId },
+            {
+                $set: {
+                    updatedAt: now,
+                    lastMessagePreview: content.trim().substring(0, 50),
+                    lastMessageSenderId: senderId,
+                    lastMessageTimestamp: now
+                }
+            }
+        );
+
+        // 3. Smart Polling für das Frontend triggern
+        if (typeof updateDataVersion === 'function') updateDataVersion('chat');
+
+        res.status(201).json({ message: "Nachricht gesendet.", sentMessage: newMessage });
+
+        // Optionales Logging, falls du es aktiv hast
+        if (typeof logActivity === 'function') {
+            await logActivity(req, "CHAT_MESSAGE", { chatId: req.params.chatId, preview: content.substring(0, 50) });
+        }
+
+    } catch (err) {
+        console.error(`Fehler bei POST /api/chat/chats/:chatId/messages:`, err);
+        res.status(500).json({ error: "Fehler beim Senden der Nachricht." });
+    }
+});
+
 app.get('/health', (req, res) => {
     res.status(200).send('OK');
 });
