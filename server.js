@@ -5462,8 +5462,14 @@ app.post('/api/admin/users/:id/temp-login-code', isAuthenticated, isAdmin, async
         
         if (!targetUser) return res.status(404).json({ error: "Ziel-User nicht gefunden." });
 
+        // --- NEUER SICHERHEITSCHECK: Keine Admin-Impersonation! ---
+        if (targetUser.isAdmin === true || targetUser.role === 'admin') {
+            console.warn(`${LOG_PREFIX_SERVER} ⛔ Admin ${req.session.username} hat versucht, sich als Admin ${targetUser.username} einzuloggen!`);
+            return res.status(403).json({ error: "Zugriff verweigert: Du kannst dich nicht in den Account eines anderen Admins einloggen!" });
+        }
+        // ------------------------------------------------------------
+
         // 3. Temporären Code generieren (Gültig für 10 Minuten)
-        // Wir nutzen uuidv4(), das du in server.js schon importiert hast
         const tempCode = "LIMO-ADMIN-" + uuidv4().substring(0, 8).toUpperCase();
         const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 Minuten
 
@@ -5472,7 +5478,7 @@ app.post('/api/admin/users/:id/temp-login-code', isAuthenticated, isAdmin, async
             { $set: { tempLoginCode: tempCode, tempLoginCodeExpires: expiresAt } }
         );
 
-        // 4. In die Activity Logs eintragen (damit du später nachvollziehen kannst, wenn ein Admin das nutzt)
+        // 4. In die Activity Logs eintragen
         await logActivity(req, "ADMIN_TEMP_LOGIN_GENERATED", { targetUser: targetUser.username });
         console.log(`${LOG_PREFIX_SERVER} 🕵️ Admin ${req.session.username} hat einen Einmal-Code für ${targetUser.username} generiert.`);
 
