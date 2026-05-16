@@ -1117,7 +1117,10 @@ async function isAdmin(req, res, next) {
         const user = await usersCollection.findOne({ _id: new ObjectId(req.session.userId) });
         if (!user) return res.status(401).json({ error: 'User nicht gefunden.' });
 
-        // A) Legacy-Support: Hat der User noch das alte "isAdmin: true" Feld?
+        // Den frisch aus der DB geladenen User an den Request hängen!
+        req.user = user;
+
+        // A) Legacy-Support
         if (user.isAdmin === true) {
             return next();
         }
@@ -1127,30 +1130,21 @@ async function isAdmin(req, res, next) {
         const routeKey = `${req.method} ${routePath}`;
         const requiredPermission = ENDPOINT_PERMISSIONS[routeKey];
 
-        // Wenn der User gar keine Rolle in der DB hat, ist er ein normaler 'user'
         const userRole = user.role || 'user';
 
         // C) Prüfung 1: Ist er in einer VORGEFERTIGTEN Gruppe?
         if (PREDEFINED_ROLES[userRole]) {
             const rolePerms = PREDEFINED_ROLES[userRole].permissions;
-            
-            // Wenn die Gruppe 'ALL' hat (z.B. Admin), darf er sofort durch
             if (rolePerms.includes('ALL')) return next();
-            
-            // Wenn die Gruppe das spezifische Recht hat, darf er durch
-            if (requiredPermission && rolePerms.includes(requiredPermission)) {
-                return next();
-            }
+            if (requiredPermission && rolePerms.includes(requiredPermission)) return next();
         }
 
         // D) Prüfung 2: Hat er die Rolle 'custom' (Spezialanfertigung)?
         if (userRole === 'custom' && user.permissions) {
-            if (requiredPermission && user.permissions.includes(requiredPermission)) {
-                return next();
-            }
+            if (requiredPermission && user.permissions.includes(requiredPermission)) return next();
         }
 
-        // E) Rauswurf: Weder Admin, noch passende Gruppe, noch passendes Custom-Recht
+        // E) Rauswurf
         console.warn(`${LOG_PREFIX_SERVER} ⛔ Zugriff verweigert für User ${req.session.username} (Rolle: ${userRole}) auf ${req.originalUrl}`);
         res.status(403).json({ error: 'Zugriff verweigert. Fehlende Berechtigungen.' });
 
@@ -5156,26 +5150,28 @@ app.put('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
             updateData.unlockedInfinityMoney = infinityMoney;
         }
         
-        if (role !== undefined) {
-            updateData.role = role;
-            updateData.isAdmin = (role === 'admin'); 
-        }
-        if (permissions !== undefined) updateData.permissions = permissions;
-        
-        // Jetzt ist schufaScore definiert und kann geprüft werden
         if (schufaScore !== undefined) {
             updateData.schufaScore = parseInt(schufaScore);
             if (updateData.schufaScore > 1000) updateData.schufaScore = 1000;
             if (updateData.schufaScore < 0) updateData.schufaScore = 0;
         }
-		
-		if (role !== undefined) {
-            // Nur der echte Master-Admin (oder User mit 'super_admin' Recht) darf Rollen ändern
-            if (!req.session.isAdmin && !req.user?.permissions?.includes('super_admin')) {
+        
+        // --- SICHERHEITSCHECK FÜR ROLLEN & RECHTE ---
+        if (role !== undefined || permissions !== undefined) {
+            // Nutzt jetzt req.user (frisch aus DB) statt req.session!
+            const isSuperAdmin = req.user.isAdmin || (req.user.permissions && req.user.permissions.includes('super_admin'));
+            
+            if (!isSuperAdmin) {
                  return res.status(403).json({ error: "Nur Super-Admins dürfen Rollen und Berechtigungen verändern!" });
             }
-            updateData.role = role;
-            updateData.isAdmin = (role === 'admin'); 
+            
+            if (role !== undefined) {
+                updateData.role = role;
+                updateData.isAdmin = (role === 'admin'); 
+            }
+            if (permissions !== undefined) {
+                updateData.permissions = permissions;
+            }
         }
 
         const result = await usersCollection.updateOne(
@@ -5189,7 +5185,7 @@ app.put('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
 
         res.json({ message: "User erfolgreich aktualisiert." });
     } catch (e) {
-        console.error("Update Error:", e); // Hilft dir beim Debuggen im Terminal
+        console.error("Update Error:", e);
         res.status(500).json({ error: "Fehler beim Aktualisieren." });
     }
 });
