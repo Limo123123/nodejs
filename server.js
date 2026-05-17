@@ -1482,8 +1482,17 @@ MongoClient.connect(mongoUri)
             redisSub.subscribe('sync-product-cache', async () => {
                 await refreshProductCache(false); 
             });
+			
+			redisSub.subscribe('sync-crypto-market', (message) => {
+    			// Die Worker empfangen die frisch berechneten Kurse vom Master und updaten ihr RAM
+    			try {
+					CRYPTO_MARKET = JSON.parse(message);
+				} catch (e) {
+					console.error("Fehler beim Synchronisieren des Krypto-Marktes:", e);
+				}
+			});
 
-            // NEU: Teachermon-Cache auf allen Kernen leeren
+            // Teachermon-Cache auf allen Kernen leeren
             redisSub.subscribe('sync-teachermon-cache', () => {
                 cachedTeachermonCards = null;
                 // Optionaler Log, um zu sehen, dass alle Kerne gehorchen:
@@ -10841,6 +10850,12 @@ if (cluster.isPrimary) {
                 CRYPTO_MARKET[key].history.shift();
             }
         }
+
+        // Sende die frisch berechneten Kurse an alle Worker-Kerne!
+        if (global.redisPub) {
+            global.redisPub.publish('sync-crypto-market', JSON.stringify(CRYPTO_MARKET));
+        }
+
     }, 30000);
 }
 
