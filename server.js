@@ -1318,7 +1318,7 @@ MongoClient.connect(mongoUri)
 			
 			// --- AUTO-DELETE FÜR LIMTEREST & FRIEDHOF (14 TAGE) ---
 
-			// Limterest Posts nach 14 Tagen (1.209.600 Sekunden) automatisch löschen
+			// Limterest Posts nach 730 Tagen automatisch löschen
 			await limterestCollection.createIndex(
     			{ "createdAt": 1 },
     			{ expireAfterSeconds: 730 * 24 * 60 * 60 }
@@ -12355,20 +12355,19 @@ async function runWeeklyLottery() {
         const pot = lotto ? lotto.pot : 0;
         if (pot <= 0) return;
 
-        // 1. Zählen, wie viele Lose insgesamt im Topf sind (Das kostet fast keine Leistung)
+        // 1. Zählen, wie viele Lose insgesamt im Topf sind
         const totalTickets = await db.collection('lotteryTickets').countDocuments();
         if (totalTickets === 0) {
             console.log(`${LOG_PREFIX_SERVER} Niemand hat Lose gekauft. Jackpot bleibt bestehen.`);
             return;
         }
 
-        // 2. DATENBANK-MAGIE: Wir lassen MongoDB direkt 100 zufällige Lose ziehen!
-        // Das verbraucht fast keinen RAM, egal ob es 100 oder 50 Millionen Lose in der DB gibt.
+        // 2. 100 zufällige Lose aus der DB ziehen
         const randomTickets = await db.collection('lotteryTickets').aggregate([
             { $sample: { size: 100 } }
         ]).toArray();
 
-        // 3. Gewinner herausfiltern (Jeder User darf nur 1x pro Ziehung gewinnen)
+        // 3. Gewinner herausfiltern (Deduplizierung: Jeder User nur 1x Gewinn pro Woche)
         const winners = [];
         const seenUsers = new Set();
 
@@ -12377,13 +12376,16 @@ async function runWeeklyLottery() {
                 winners.push(t);
                 seenUsers.add(t.userId.toString());
             }
-            if (winners.length === 3) break; // Wir haben unsere Top 3!
+            if (winners.length === 3) break; // Top 3 ermittelt
         }
 
         if (winners.length === 0) return;
 
-        // Verteilung: 1. (60%), 2. (25%), 3. (15%)
-        const shares = [0.60, 0.25, 0.15];
+        // Dynamische Verteilung, falls weniger als 3 einzigartige Spieler teilgenommen haben!
+        let shares = [0.60, 0.25, 0.15];
+        if (winners.length === 2) shares = [0.70, 0.30]; // Nur 2 Spieler? 70% / 30% Aufteilung
+        if (winners.length === 1) shares = [1.00];         // Nur 1 Spieler? Er kriegt den gesamten Topf!
+
         let resultsText = "";
         let totalPaidOut = 0;
 
@@ -12391,8 +12393,15 @@ async function runWeeklyLottery() {
             const prize = Math.floor(pot * shares[i]);
             totalPaidOut += prize;
 
-            // Geld gutschreiben
-            await usersCollection.updateOne({ _id: winners[i].userId }, { $inc: { balance: prize } });
+            // 🚨 FIX: Die ID explizit in einen String und wieder in eine saubere ObjectId gießen!
+            const cleanUserObjectId = new ObjectId(winners[i].userId.toString());
+
+            // Geld atomar gutschreiben
+            await usersCollection.updateOne(
+                { _id: cleanUserObjectId }, 
+                { $inc: { balance: prize } }
+            );
+            
             resultsText += `${i + 1}. Platz: ${winners[i].username} ($${prize.toLocaleString()}) `;
             
             // Log in LNN News
@@ -12406,14 +12415,14 @@ async function runWeeklyLottery() {
             });
         }
 
-        // Reset: Pot auf den Restwert setzen (falls weniger als 3 Leute gespielt haben, bleibt der Rest für nächste Woche)
-        const remainingPot = pot - totalPaidOut;
+        // Reset: Pot auf den echten Restwert setzen
+        const remainingPot = Math.max(0, pot - totalPaidOut);
         await systemSettingsCollection.updateOne(
             { id: 'lottery_state' }, 
             { $set: { pot: remainingPot, lastWinners: resultsText } }
         );
 
-        // Alle Lose löschen (Bei 5 Millionen Losen dauert das ein paar Sekunden, aber blockiert nicht den RAM)
+        // Alle Lose für die neue Woche schreddern
         await db.collection('lotteryTickets').deleteMany({});
 
         console.log(`${LOG_PREFIX_SERVER} Ziehung beendet: ${resultsText}`);
