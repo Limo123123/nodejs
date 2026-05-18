@@ -1321,7 +1321,7 @@ MongoClient.connect(mongoUri)
 			// Limterest Posts nach 14 Tagen (1.209.600 Sekunden) automatisch löschen
 			await limterestCollection.createIndex(
     			{ "createdAt": 1 },
-    			{ expireAfterSeconds: 14 * 24 * 60 * 60 }
+    			{ expireAfterSeconds: 730 * 24 * 60 * 60 }
 			);
 
 			// Pet Cemetery (Friedhof) nach 14 Tagen auflösen (Gerechnet ab dem Todesdatum)
