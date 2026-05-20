@@ -132,7 +132,64 @@ app.use(helmet({
     contentSecurityPolicy: false, // Falls du Probleme mit Bildern/Scripts von extern hast, deaktiviere CSP erstmal
     crossOriginResourcePolicy: { policy: "cross-origin" } // Wichtig für deine CORS Konfiguration
 }));
-app.use('/api/', globalApiRateLimit); // Schützt alle API-Routen
+
+// =========================================================
+// === ZEITGESTEUERTE IP-SPERRE & WHITELIST (WIP) ===
+// =========================================================
+// Zum Testen: Hier trägst du die IP und die Uhrzeit ein.
+const BLOCKED_IP = "185.113.145.159"; // Die IP deines Freundes / Ziel-Users eintragen
+const BLOCK_START_HOUR = 8;       // Sperre beginnt um 22:00 Uhr
+const BLOCK_END_HOUR = 13;          // Sperre endet um 06:00 Uhr
+
+async function timeBasedIpBlock(req, res, next) {
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
+
+    // Prüfen, ob die aufrufende IP die gesperrte IP ist
+    if (clientIp === BLOCKED_IP) {
+        const currentHour = new Date().getHours();
+        let isBlockedTime = false;
+
+        // Logik für Zeiten, die über Mitternacht gehen (z.B. 22 bis 6 Uhr)
+        if (BLOCK_START_HOUR > BLOCK_END_HOUR) {
+            if (currentHour >= BLOCK_START_HOUR || currentHour < BLOCK_END_HOUR) isBlockedTime = true;
+        } else {
+            // Logik für Zeiten am selben Tag (z.B. 8 bis 12 Uhr)
+            if (currentHour >= BLOCK_START_HOUR && currentHour < BLOCK_END_HOUR) isBlockedTime = true;
+        }
+
+        if (isBlockedTime) {
+            // Wenn der User eingeloggt ist, prüfen wir seine Whitelist-Rechte
+            if (req.session && req.session.userId) {
+                try {
+                    const user = await usersCollection.findOne({ _id: new ObjectId(req.session.userId) });
+                    if (user) {
+                        // Admins, Owner oder Whitelist-User dürfen IMMER rein!
+                        if (user.isAdmin === true) return next();
+                        
+                        const userRole = user.role || 'user';
+                        const rolePerms = PREDEFINED_ROLES[userRole]?.permissions || [];
+                        const customPerms = user.permissions || [];
+                        
+                        if (rolePerms.includes('ALL') || rolePerms.includes('whitelist') || customPerms.includes('whitelist')) {
+                            return next(); // Whitelist umgeht die Sperre!
+                        }
+                    }
+                } catch(e) {
+                    console.error("Fehler bei Whitelist-Prüfung:", e);
+                }
+            }
+            
+            // Wenn wir hier ankommen, ist der User NICHT auf der Whitelist und es ist Sperrzeit.
+            return res.status(403).json({ 
+                error: "Sperrstunde! Zugriff für deine IP momentan blockiert. Nur VIPs / Whitelist-User dürfen jetzt rein." 
+            });
+        }
+    }
+    
+    // Alles okay, IP nicht gesperrt oder falsche Uhrzeit
+    next();
+}
+app.use('/api/', globalApiRateLimit, timeBasedIpBlock);
 
 // =========================================================
 // === STREIK-SYSTEM: BLOCKIERTE ROUTEN ===
