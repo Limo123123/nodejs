@@ -975,6 +975,7 @@ const AVAILABLE_PERMISSIONS = {
 	'manage_requests': { name: 'Support-Anträge', desc: 'Erlaubt das Einsehen und Bearbeiten von User-Formularen (Geld, Account etc.).' },
 	'manage_pets': { name: 'Tier-Gott', desc: 'Tiere vom Friedhof wiederbeleben (Sensenmann austricksen).' },
     'manage_gangs': { name: 'Kartell-Boss', desc: 'Voller Zugriff auf Gangs und Zonen-Reset.' },
+    'whitelist': { name: 'Whitelist', desc: 'Rechte zur Umgehung der Sperre.' },
 };
 
 // 2. MAPPING: WELCHER ENDPOINT BRAUCHT WELCHES RECHT
@@ -1000,6 +1001,7 @@ const ENDPOINT_PERMISSIONS = {
     'POST /api/admin/banUser': 'manage_users_critical', 
     'GET /api/admin/roles': 'manage_users_critical',
     'GET /api/admin/permissions': 'manage_users_critical',
+    'GET /api/admin/whitelist': 'whitelist',
 
     // --- LNN News ---
     'POST /api/admin/news': 'manage_news',
@@ -1070,6 +1072,11 @@ const ENDPOINT_PERMISSIONS = {
 
 // 3. VORGEFERTIGTE GRUPPEN (ROLES)
 const PREDEFINED_ROLES = {
+    'owner': { 
+        name: 'Owner',
+        desc: 'Inhaber des Systems.',
+        permissions: ['ALL']
+    },
     'admin': { 
         name: 'Administrator',
         desc: 'Hat vollen Zugriff auf alles.',
@@ -1081,10 +1088,8 @@ const PREDEFINED_ROLES = {
         permissions: [
             'manage_users', 
             'manage_news', 
-            'manage_ideas', 
-            'manage_bugs',
-            'manage_human_grades', 
-            'manage_human_ratings', 
+            'manage_ideas',
+            'manage_human_grades',
             'manage_chats',
 			'manage_requests'
         ]
@@ -1099,6 +1104,13 @@ const PREDEFINED_ROLES = {
             'manage_limea',
             'manage_cdn'
         ]
+    },
+    'whitelisted_user': {
+        name: 'VIP User',
+        desc: 'VIP-Benutzer mit rechten zur umgehung der Sperre.',
+        permissions: [
+            'whitelist'
+        ] // Hat Zugriff auf keinen einzigen Admin-Endpoint
     },
     'user': {
         name: 'Standard User',
@@ -9222,12 +9234,12 @@ app.post('/api/heist/start', isAuthenticated, async (req, res) => {
             const isSuccess = Math.random() < 0.25; 
 
             if (isSuccess) {
-                // Beute: Nur noch 0.5% bis 2% des Pots
-                const percent = (Math.random() * 0.015) + 0.005;
+                // Beute: Nur noch 0.5% bis 1% des Pots
+                const percent = (Math.random() * 0.005) + 0.005;
                 let loot = Math.floor(pot * percent);
                 
-                // Hard-Cap: Maximal 50 Millionen auf einmal (verhindert Milliarden-Diebstähle)
-                if (loot > 50000000) loot = 50000000;
+                // Hard-Cap: Maximal 10 Millionen auf einmal (verhindert Milliarden-Diebstähle)
+                if (loot > 10000000) loot = 10000000;
 
                 await systemSettingsCollection.updateOne({ id: 'state_treasury' }, { $inc: { balance: -loot } }, { session });
                 await usersCollection.updateOne(
@@ -9237,10 +9249,10 @@ app.post('/api/heist/start', isAuthenticated, async (req, res) => {
                 );
                 result = { success: true, message: `TREFFER! Du hast $${loot.toLocaleString()} erbeutet!` };
             } else {
-                // Erwischt: Dynamische Strafe! 2% des EIGENEN Geldes (Mindestens 5000, Maximal 10 Millionen)
-                let fine = Math.floor(user.balance * 0.02);
-                if (fine < 5000) fine = 5000;
-                if (fine > 10000000) fine = 10000000;
+                // Erwischt: Dynamische Strafe! 1.5% des EIGENEN Geldes (Mindestens 4000, Maximal 15 Millionen)
+                let fine = Math.floor(user.balance * 0.015);
+                if (fine < 4000) fine = 4000;
+                if (fine > 15000000) fine = 15000000;
 
                 await usersCollection.updateOne(
                     { _id: userId }, 
