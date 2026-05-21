@@ -133,60 +133,132 @@ app.use(helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" } // Wichtig für deine CORS Konfiguration
 }));
 
-// =========================================================
-// === ZEITGESTEUERTE IP-SPERRE & WHITELIST (WIP) ===
-// =========================================================
-// Zum Testen: Hier trägst du die IP und die Uhrzeit ein.
-const BLOCKED_IP = ""; // Die IP deines Freundes / Ziel-Users eintragen
-const BLOCK_START_HOUR = 8;       // Sperre beginnt um 22:00 Uhr
-const BLOCK_END_HOUR = 13;          // Sperre endet um 06:00 Uhr
+// ================================================
+// === ZEITGESTEUERTE IP-SPERRE MIT DOMAIN-IP ====
+// ================================================
 
-async function timeBasedIpBlock(req, res, next) {
-    const clientIp = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
+const dns = require("dns").promises;
 
-    // Prüfen, ob die aufrufende IP die gesperrte IP ist
-    if (clientIp === BLOCKED_IP) {
-        const currentHour = new Date().getHours();
-        let isBlockedTime = false;
+// Domain die geprüft werden soll
+const DOMAIN_TO_BLOCK = "ah-afr.de";
 
-        // Logik für Zeiten, die über Mitternacht gehen (z.B. 22 bis 6 Uhr)
-        if (BLOCK_START_HOUR > BLOCK_END_HOUR) {
-            if (currentHour >= BLOCK_START_HOUR || currentHour < BLOCK_END_HOUR) isBlockedTime = true;
-        } else {
-            // Logik für Zeiten am selben Tag (z.B. 8 bis 12 Uhr)
-            if (currentHour >= BLOCK_START_HOUR && currentHour < BLOCK_END_HOUR) isBlockedTime = true;
-        }
+// Zeiten
+const BLOCK_START_HOUR = 8;
+const BLOCK_END_HOUR = 13;
 
-        if (isBlockedTime) {
-            // Wenn der User eingeloggt ist, prüfen wir seine Whitelist-Rechte
-            if (req.session && req.session.userId) {
-                try {
-                    const user = await usersCollection.findOne({ _id: new ObjectId(req.session.userId) });
-                    if (user) {
-                        // Admins, Owner oder Whitelist-User dürfen IMMER rein!
-                        if (user.isAdmin === true) return next();
-                        
-                        const userRole = user.role || 'user';
-                        const rolePerms = PREDEFINED_ROLES[userRole]?.permissions || [];
-                        const customPerms = user.permissions || [];
-                        
-                        if (rolePerms.includes('ALL') || rolePerms.includes('whitelist') || customPerms.includes('whitelist')) {
-                            return next(); // Whitelist umgeht die Sperre!
-                        }
-                    }
-                } catch(e) {
-                    console.error("Fehler bei Whitelist-Prüfung:", e);
-                }
-            }
-            
-            // Wenn wir hier ankommen, ist der User NICHT auf der Whitelist und es ist Sperrzeit.
-            return res.status(403).json({ 
-                error: "Sperrstunde! Zugriff für deine IP momentan blockiert. Nur VIPs / Whitelist-User dürfen jetzt rein." 
-            });
+// Cache für die Domain-IP
+let cachedDomainIP = null;
+let lastLookup = 0;
+
+// Domain-IP holen
+async function getDomainIP() {
+    const now = Date.now();
+
+    // Nur alle 10 Minuten neu auflösen
+    if (!cachedDomainIP || now - lastLookup > 10 * 60 * 1000) {
+        try {
+            const result = await dns.lookup(DOMAIN_TO_BLOCK);
+            cachedDomainIP = result.address;
+            lastLookup = now;
+
+            console.log("Aktuelle Domain-IP:", cachedDomainIP);
+        } catch (err) {
+            console.error("Fehler beim Auflösen der Domain:", err);
         }
     }
-    
-    // Alles okay, IP nicht gesperrt oder falsche Uhrzeit
+
+    return cachedDomainIP;
+}
+
+async function timeBasedIpBlock(req, res, next) {
+
+    // IP des Besuchers holen
+    const clientIp =
+        req.headers['x-forwarded-for']?.split(',')[0] ||
+        req.socket.remoteAddress;
+
+    // Domain-IP holen
+    const blockedIP = await getDomainIP();
+
+    // Prüfen ob aktuelle Uhrzeit in Sperrzeit liegt
+    const currentHour = new Date().getHours();
+
+    let isBlockedTime = false;
+
+    // Für Zeiten über Mitternacht
+    if (BLOCK_START_HOUR > BLOCK_END_HOUR) {
+
+        if (
+            currentHour >= BLOCK_START_HOUR ||
+            currentHour < BLOCK_END_HOUR
+        ) {
+            isBlockedTime = true;
+        }
+
+    } else {
+
+        // Normale Zeiten (z.B. 8 bis 13 Uhr)
+        if (
+            currentHour >= BLOCK_START_HOUR &&
+            currentHour < BLOCK_END_HOUR
+        ) {
+            isBlockedTime = true;
+        }
+    }
+
+    // Prüfen ob User die Domain-IP benutzt
+    if (clientIp === blockedIP && isBlockedTime) {
+
+        // =========================================
+        // === WHITELIST / ADMIN CHECK ============
+        // =========================================
+
+        if (req.session && req.session.userId) {
+
+            try {
+
+                const user = await userCollection.findOne({
+                    _id: new ObjectId(req.session.userId)
+                });
+
+                // Admin darf immer rein
+                if (user?.isAdmin === true) {
+                    return next();
+                }
+
+                const userRole = user.role || 'User';
+
+                const rolePerms =
+                    PREDEFINED_ROLES[userRole]?.permissions || [];
+
+                const customPerms =
+                    user.permissions || [];
+
+                // Whitelist-Rechte prüfen
+                if (
+                    rolePerms.includes('ALL') ||
+                    rolePerms.includes('whitelist') ||
+                    customPerms.includes('whitelist')
+                ) {
+                    return next();
+                }
+
+            } catch (e) {
+                console.error("Whitelist-Fehler:", e);
+            }
+        }
+
+        // =========================================
+        // === BLOCKIEREN ==========================
+        // =========================================
+
+        return res.status(403).json({
+            error:
+                "Sperrstunde! Zugriff momentan blockiert."
+        });
+    }
+
+    // Alles okay
     next();
 }
 app.use('/api/', globalApiRateLimit, timeBasedIpBlock);
@@ -1014,8 +1086,8 @@ function isAuthenticated(req, res, next) {
 const AVAILABLE_PERMISSIONS = {
     'manage_products': { name: 'Shop & Produkte', desc: 'Produkte erstellen, bearbeiten, löschen und Lagerbestände ändern.' },
     'manage_tokens': { name: 'Token-Generierung', desc: 'Erlaubt das Generieren von neuen Token-Guthabencodes.' },
-    'manage_users': { name: 'Nutzerverwaltung (Basis)', desc: 'Nutzerdaten anpassen (Geld, Tokens) und Geldstrafen verhängen.' },
-    'manage_users_critical': { name: 'Nutzerverwaltung (Kritisch)', desc: 'Achtung: Erlaubt das Löschen, Bannen, Rollen-Zuweisung und Passwort-Zurücksetzen von Nutzern.' },
+    'manage_users': { name: 'Knölchen Block', desc: 'Geldstrafen verhängen.' },
+    'manage_users_critical': { name: 'Nutzerverwaltung (Kritisch)', desc: 'Achtung: Erlaubt das Ändern von Währung, Löschen, Bannen, Rollen-Zuweisung und Passwort-Zurücksetzen von Nutzern.' },
     'manage_news': { name: 'LNN News', desc: 'Manuelle News posten, AI-Trigger ausführen und Artikel löschen.' },
     'manage_ideas': { name: 'Ideenbox Moderation', desc: 'Ideen-Status ändern, löschen und Nutzer für die Ideenbox sperren/entsperren.' },
     'manage_bugs': { name: 'Bug Bounty Moderation', desc: 'Bug-Reports einsehen, Status ändern und Delta-Coins vergeben.' }, // NEU
@@ -1026,13 +1098,13 @@ const AVAILABLE_PERMISSIONS = {
     'manage_cdn': { name: 'Bilder & CDN', desc: 'Hochgeladene Bilder vom Server löschen.' },
     'manage_limea': { name: 'Limea Moderation', desc: 'Limea Layouts aus dem Community Store löschen.' }, // NEU
     'manage_economy': { name: 'Wirtschaftskontrolle', desc: 'Steuer-Razzia erzwingen, Vermögen kappen und Infinity-Money entziehen.' },
-    'manage_chats': { name: 'Chat Inspektor', desc: 'Tinda-Chats und private Nachrichten lesen sowie als Admin Systemnachrichten senden.' },
+    'manage_chats': { name: 'Chat God', desc: 'Als Admin Systemnachrichten senden.' },
     'system_maintenance': { name: 'System & Wartung', desc: 'Health-Check, Stats, Reports abrufen und System-Reparaturen durchführen.' },
-    'super_admin': { name: 'Super Admin (Engine)', desc: 'Gefährlich: Voller, ungefilterter Zugriff auf die MongoDB-Engine.' },
+    'super_admin': { name: 'Super Admin (Engine)', desc: 'GEFÄHRLICH: Voller, ungefilterter Zugriff auf die MongoDB-Engine.' },
 	'manage_requests': { name: 'Support-Anträge', desc: 'Erlaubt das Einsehen und Bearbeiten von User-Formularen (Geld, Account etc.).' },
 	'manage_pets': { name: 'Tier-Gott', desc: 'Tiere vom Friedhof wiederbeleben (Sensenmann austricksen).' },
     'manage_gangs': { name: 'Kartell-Boss', desc: 'Voller Zugriff auf Gangs und Zonen-Reset.' },
-    'whitelist': { name: 'Whitelist', desc: 'Rechte zur Umgehung der Sperre.' },
+    'whitelist': { name: 'Florian\'s Haustürschlüssel', desc: 'Rechte zur Umgehung der Sperre.' },
 };
 
 // 2. MAPPING: WELCHER ENDPOINT BRAUCHT WELCHES RECHT
@@ -1141,14 +1213,13 @@ const PREDEFINED_ROLES = {
     },
     'moderator': {
         name: 'Moderator',
-        desc: 'Kümmert sich um die Community, Chats und Strafen.',
+        desc: 'Kümmert sich um die Community und Strafen.',
         permissions: [
             'manage_users', 
             'manage_news', 
             'manage_ideas',
-            'manage_human_grades',
-            'manage_chats',
-			'manage_requests'
+			'manage_requests',
+            'whitelist'
         ]
     },
     'shop_manager': {
@@ -1163,8 +1234,8 @@ const PREDEFINED_ROLES = {
         ]
     },
     'whitelisted_user': {
-        name: 'VIP User',
-        desc: 'VIP-Benutzer mit rechten zur umgehung der Sperre.',
+        name: 'Whitelisted User',
+        desc: 'Benutzer mit rechten zur umgehung der Sperre.',
         permissions: [
             'whitelist'
         ] // Hat Zugriff auf keinen einzigen Admin-Endpoint
