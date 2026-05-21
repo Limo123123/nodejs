@@ -137,7 +137,7 @@ app.use(helmet({
 // === ZEITGESTEUERTE IP-SPERRE & WHITELIST (WIP) ===
 // =========================================================
 // Zum Testen: Hier trägst du die IP und die Uhrzeit ein.
-const BLOCKED_IP = "185.113.145.159"; // Die IP deines Freundes / Ziel-Users eintragen
+const BLOCKED_IP = ""; // Die IP deines Freundes / Ziel-Users eintragen
 const BLOCK_START_HOUR = 8;       // Sperre beginnt um 22:00 Uhr
 const BLOCK_END_HOUR = 13;          // Sperre endet um 06:00 Uhr
 
