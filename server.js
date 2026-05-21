@@ -2638,13 +2638,14 @@ app.post('/api/products/sell', isAuthenticated, async (req, res) => {
 
         // Cache aktualisieren, da sich der Global Stock geändert hat		
 		if (resultData.success) {
-    		await logActivity(req, "SHOP_SELL", { 
-        		productId, 
-        		quantity: qty, 
-        		sellPrice, 
-        		earnings: resultData.earnings 
             refreshProductCache();
-		});
+            await logActivity(req, "SHOP_SELL", { 
+                productId, 
+                quantity: quantity, // FIX: 'quantity' statt 'qty'
+                sellPrice, 
+                earnings: resultData.earnings 
+            });
+        }
 
         // Frische User-Daten für das Frontend holen (außerhalb der Transaction)
         const updatedUser = await usersCollection.findOne({ _id: userId }, { projection: { password: 0 } });
