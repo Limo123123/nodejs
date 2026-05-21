@@ -1342,6 +1342,9 @@ MongoClient.connect(mongoUri)
                 await tokenTransactionsCollection.createIndex({ type: 1 });
                 await tokenTransactionsCollection.createIndex({ timestamp: -1 });
             }
+			await dontBlameMeCollection.dropIndex("createdAt_1").catch(() => {
+        		console.log(`${LOG_PREFIX_SERVER} Hinweis: Index 'createdAt_1' existierte nicht oder musste nicht gelöscht werden.`);
+    		});
             await dontBlameMeCollection.createIndex(
                 { "createdAt": 1 },
                 { expireAfterSeconds: 72 * 60 * 60 }
