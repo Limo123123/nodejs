@@ -1685,6 +1685,11 @@ app.post('/api/admin/system/force-tax', isAuthenticated, isAdmin, async (req, re
                 likes: 0
             });
         }
+		
+		await logActivity(req, "ADMIN_FORCE_TAX", { 
+    		collected: totalTaxCollected, 
+    		taxedCount: taxedUsersCount 
+		});
 
         res.json({
             success: true,
@@ -2631,10 +2636,15 @@ app.post('/api/products/sell', isAuthenticated, async (req, res) => {
 
         // E. Transaktion erfolgreich beendet
 
-        // Cache aktualisieren, da sich der Global Stock geändert hat
-        if (resultData.success) {
+        // Cache aktualisieren, da sich der Global Stock geändert hat		
+		if (resultData.success) {
+    		await logActivity(req, "SHOP_SELL", { 
+        		productId, 
+        		quantity: qty, 
+        		sellPrice, 
+        		earnings: resultData.earnings 
             refreshProductCache();
-        }
+		});
 
         // Frische User-Daten für das Frontend holen (außerhalb der Transaction)
         const updatedUser = await usersCollection.findOne({ _id: userId }, { projection: { password: 0 } });
@@ -3573,6 +3583,11 @@ app.post('/api/auctions', isAuthenticated, async (req, res) => {
         };
 
         const result = await auctionsCollection.insertOne(newAuction);
+		await logActivity(req, "AUCTION_CREATED", { 
+    		productId, 
+    		quantity, 
+    		startingBid 
+		});
         console.log(`${LOG_PREFIX_SERVER} Auktion ${result.insertedId} für "${product.name}" von ${req.session.username} erstellt.`);
 
         res.status(201).json({ message: 'Auktion erfolgreich erstellt!', auction: newAuction });
@@ -4655,6 +4670,13 @@ app.post('/api/bank/transfer', isAuthenticated, async (req, res) => {
                 timestamp: new Date()
             }, { session });
         });
+		
+		await logActivity(req, "BANK_TRANSFER", { 
+    		target: recipientName, 
+    		amount: cleanAmount, 
+    		fee: fee,
+    		type: type 
+		});
 
         const updatedUser = await usersCollection.findOne({ _id: senderId });
         res.json({ message: "Überweisung erfolgreich!", newBalance: updatedUser.balance });
@@ -5314,6 +5336,11 @@ app.put('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
         if (result.matchedCount === 0) {
             return res.status(404).json({ error: "User nicht gefunden." });
         }
+		
+		await logActivity(req, "ADMIN_UPDATE_USER", { 
+    		targetUserId: req.params.id, 
+    		changes: updateData 
+		});
 
         res.json({ message: "User erfolgreich aktualisiert." });
     } catch (e) {
@@ -5333,7 +5360,8 @@ app.post('/api/admin/users/:id/reset-pw', isAuthenticated, isAdmin, async (req, 
             { _id: new ObjectId(req.params.id) },
             { $set: { password: hashedPassword } }
         );
-        res.json({ message: "Passwort geändert." });
+        await logActivity(req, "ADMIN_RESET_PASSWORD", { targetUserId: req.params.id });
+		res.json({ message: "Passwort geändert." });
     } catch (e) { res.status(500).json({ error: "Fehler." }); }
 });
 
@@ -5396,6 +5424,7 @@ app.delete('/api/account/me', isAuthenticated, async (req, res) => {
 
         // 3. Wenn Passwort stimmt: Account und alle Spuren vernichten
         const success = await deleteUserAndCleanup(userIdStr);
+		await logActivity(req, "USER_DELETE_ACCOUNT", { status: "success" });
         if (!success) return res.status(500).json({ error: "Kritischer Fehler beim Löschen." });
         
         // 4. Session zerstören und ausloggen
@@ -5524,6 +5553,12 @@ app.post('/api/admin/banUser', async (req, res) => {
 
         // B. User endgültig löschen
         await usersCollection.deleteOne({ _id: new ObjectId(targetUserId) });
+		
+		await logActivity(req, "ADMIN_BAN_USER", { 
+    		targetUserId: targetUserId, 
+    		targetUsername: targetUser.username,
+    		reason: "Account Deleted & Banned by Admin" 
+		});
 
         console.log(`${LOG_PREFIX_SERVER} ADMIN ACTION: User ${targetUser.username} gelöscht und IP ${targetUser.lastIp} gebannt.`);
         res.json({ success: true, message: "User vernichtet und IP gebannt." });
@@ -7411,6 +7446,13 @@ app.post('/api/admin/engine', isAuthenticated, isAdmin, async (req, res) => {
         } else {
             return res.status(400).json({ error: "Unbekannter Modus." });
         }
+		
+		await logActivity(req, "ADMIN_ENGINE_QUERY", { 
+    		mode, 
+    		collection, 
+    		operation, 
+    		filter: cleanFilter // Vorsicht: Pass auf, dass du keine riesigen Payloads loggst
+		});
 
         res.json({ success: true, result });
 
@@ -16155,6 +16197,7 @@ app.patch('/api/account/password', isAuthenticated, async (req, res) => {
 
         const hashedPassword = await bcrypt.hash(newPassword, SALT_ROUNDS);
         await usersCollection.updateOne({ _id: userId }, { $set: { password: hashedPassword } });
+		await logActivity(req, "USER_CHANGE_PASSWORD", { status: "success" });
 
         console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} hat sein Passwort geändert.`);
         res.json({ message: "Passwort erfolgreich geändert!" });
@@ -16202,6 +16245,7 @@ app.patch('/api/account/username', isAuthenticated, async (req, res) => {
         // 3. Wichtige Verknüpfungen updaten (Chats & Häuser)
         await ownedPropertiesCollection.updateMany({ ownerId: userId }, { $set: { ownerName: lowerNewName } });
         await limMessagesCollection.updateMany({ senderId: userId }, { $set: { senderUsername: lowerNewName } });
+		await logActivity(req, "USER_CHANGE_USERNAME", { oldName: oldName, newName: lowerNewName });
 
         console.log(`${LOG_PREFIX_SERVER} User hat sich umbenannt: ${oldName} -> ${lowerNewName}`);
         res.json({ message: "Benutzername erfolgreich geändert!", username: lowerNewName });
