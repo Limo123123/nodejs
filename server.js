@@ -211,15 +211,15 @@ async function timeBasedIpBlock(req, res, next) {
 
         // =========================================
         // === WHITELIST / ADMIN CHECK ============
-        // =========================================
+  		// =========================================
 
         if (req.session && req.session.userId) {
 
             try {
 
-                const user = await userCollection.findOne({
-                    _id: new ObjectId(req.session.userId)
-                });
+                const user = await usersCollection.findOne({
+            		_id: new ObjectId(req.session.userId)
+        		});
 
                 // Admin darf immer rein
                 if (user?.isAdmin === true) {
