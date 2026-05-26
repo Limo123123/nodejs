@@ -1294,6 +1294,23 @@ async function isAdmin(req, res, next) {
     }
 }
 
+function isEnvWhitelisted(req, res, next) {
+    // Lade die erlaubten Namen aus der .env und mache sie zu einem sauberen Array
+    const allowedUsers = (process.env.ENGINE_WHITELIST || "")
+        .split(',')
+        .map(u => u.trim().toLowerCase());
+
+    const currentUser = (req.session?.username || "").toLowerCase();
+
+    // Prüfen, ob der aktuelle Nutzer in der .env Liste steht
+    if (currentUser && allowedUsers.includes(currentUser)) {
+        return next();
+    }
+
+    console.warn(`${LOG_PREFIX_SERVER} ⛔ Blockiert: ${currentUser || 'Unbekannt'} versuchte auf die Engine zuzugreifen (Nicht in .env)`);
+    return res.status(403).json({ error: 'Zugriff verweigert. Du stehst nicht auf der .env Whitelist für diesen Bereich.' });
+}
+
 // --- Init MongoDB-Verbindung und Serverstart ---
 MongoClient.connect(mongoUri)
     .then(async mongoClient => {
@@ -7443,13 +7460,18 @@ const ENGINE_ALLOWED_COLLECTIONS = [
     'gangs', 'publicGangChat', 'zones', 'bounties', 'lotteryTickets', 'banned_ips'
 ];
 
-app.post('/api/admin/engine', isAuthenticated, isAdmin, async (req, res) => {
+app.post('/api/admin/engine', isAuthenticated, isAdmin, isEnvWhitelisted, async (req, res) => {
     const { mode, collection, operation, filter, payload } = req.body;
 
     console.log(`${LOG_PREFIX_SERVER} ⚙️ Engine Command von ${req.session.username}: [${mode}] ${collection}.${operation}`);
 
     try {
         let result = null;
+
+        // Wir parsen die Daten ganz oben, damit der Scope für 
+        // den gesamten try-Block (und das Logging ganz unten) gilt!
+        const cleanFilter = parseQuery(filter || {});
+        const cleanPayload = parseQuery(payload || {});
 
         // MODUS 1: RAW DATABASE ACCESS
         if (mode === 'db') {
@@ -7463,14 +7485,9 @@ app.post('/api/admin/engine', isAuthenticated, isAdmin, async (req, res) => {
 
             const targetCol = db.collection(collection);
 
-            // Query Parsing (IDs umwandeln)
-            const cleanFilter = parseQuery(filter || {});
-            const cleanPayload = parseQuery(payload || {});
-
             switch (operation) {
                 case 'find':
-                    // Bei Find ist payload das Limit (optional)
-                    const limit = (typeof payload === 'number') ? payload : 20;
+                    const limit = (typeof cleanPayload === 'number') ? cleanPayload : 20;
                     result = await targetCol.find(cleanFilter).limit(limit).toArray();
                     break;
                 case 'findOne':
@@ -7499,35 +7516,31 @@ app.post('/api/admin/engine', isAuthenticated, isAdmin, async (req, res) => {
             }
         }
 
-        // MODUS 2: SHORTCUTS (Deine gewünschte "prd/add" Logik)
+        // MODUS 2: SHORTCUTS
         else if (mode === 'shortcut') {
-            // Beispiel: collection='product', operation='add'
             if (collection === 'product') {
                 if (operation === 'add') {
-                    // Payload muss das Produkt sein
-                    // Auto-ID Generierung nutzen wir von deiner bestehenden Funktion oder Logik
                     const newId = await generateUniqueId(productsCollection);
-                    const prod = { ...payload, id: newId };
+                    const prod = { ...cleanPayload, id: newId };
                     await productsCollection.insertOne(prod);
                     result = { message: "Produkt erstellt", product: prod };
                 }
                 else if (operation === 'remove') {
-                    // Filter ist hier z.B. { id: 123456 }
-                    const delRes = await productsCollection.deleteOne(parseQuery(filter));
+                    const delRes = await productsCollection.deleteOne(cleanFilter);
                     result = { message: "Gelöscht", deletedCount: delRes.deletedCount };
                 }
             }
-            // Hier kannst du weitere Shortcuts definieren
         } else {
             return res.status(400).json({ error: "Unbekannter Modus." });
         }
-		
-		await logActivity(req, "ADMIN_ENGINE_QUERY", { 
-    		mode, 
-    		collection, 
-    		operation, 
-    		filter: cleanFilter // Vorsicht: Pass auf, dass du keine riesigen Payloads loggst
-		});
+        
+        // Das Log funktioniert jetzt fehlerfrei, da cleanFilter ganz oben definiert wurde!
+        await logActivity(req, "ADMIN_ENGINE_QUERY", { 
+            mode, 
+            collection, 
+            operation, 
+            filter: cleanFilter 
+        });
 
         res.json({ success: true, result });
 
