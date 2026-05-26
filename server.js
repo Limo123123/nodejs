@@ -14835,7 +14835,7 @@ app.post('/api/pets/:id/pension', isAuthenticated, async (req, res) => {
 app.get('/api/admin/activity-logs', isAuthenticated, isAdmin, async (req, res) => {
     try {
         const page = parseInt(req.query.page) || 1;
-        const limit = 100; // Letzte 100 Einträge
+        const limit = 500; // Letzte 100 Einträge
         const skip = (page - 1) * limit;
 
         const logs = await db.collection('activityLogs')
