@@ -133,6 +133,12 @@ app.use(helmet({
     contentSecurityPolicy: false, // Falls du Probleme mit Bildern/Scripts von extern hast, deaktiviere CSP erstmal
     crossOriginResourcePolicy: { policy: "cross-origin" } // Wichtig für deine CORS Konfiguration
 }));
+const cookieParser = require('cookie-parser');
+app.use(cookieParser());
+app.use((req, res, next) => {
+    req.deviceId = req.cookies['limo_device_id'];
+    next();
+});
 
 // ================================================
 // === ZEITGESTEUERTE IP-SPERRE MIT DOMAIN-IP ====
@@ -1310,6 +1316,23 @@ function isEnvWhitelisted(req, res, next) {
     return res.status(403).json({ error: 'Zugriff verweigert. Du stehst nicht auf der .env Whitelist für diesen Bereich.' });
 }
 
+async function checkDeviceBan(req, res, next) {
+    // Admin-Bypass: Wenn du dich mit Admin-Token oder Admin-Status identifizierst,
+    // könnten wir hier eine Ausnahme machen, aber Vorsicht!
+    // Am besten lassen wir Admins normal gebannt werden, damit man sich nicht "ausversehen" selbst bannt.
+    
+    const isBanned = await db.collection('banned_devices').findOne({ deviceId: req.deviceId });
+    
+    if (isBanned) {
+        console.warn(`[Security] Gebanntes Gerät versucht Zugriff: ${req.deviceId} auf ${req.originalUrl}`);
+        return res.status(403).json({ error: "Dieses Gerät wurde vom Server gesperrt." });
+    }
+    next();
+}
+
+// Global anwenden (oder nur auf spezielle API-Routen)
+app.use('/api/', checkDeviceBan);
+
 // --- Init MongoDB-Verbindung und Serverstart ---
 MongoClient.connect(mongoUri)
     .then(async mongoClient => {
@@ -1854,10 +1877,11 @@ app.post('/api/auth/register', async (req, res) => {
     const clientIp = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
 
     // Prüfen ob IP gebannt ist
-    const isBanned = await db.collection('banned_ips').findOne({ ip: clientIp });
-    if (isBanned) {
-        return res.status(403).json({ error: "Du wurdest von diesem Server gebannt." });
-    }
+    // Beispiel für den Check in /api/auth/register
+	const isBanned = await db.collection('banned_devices').findOne({ deviceId: req.deviceId });
+	if (isBanned) {
+	    return res.status(403).json({ error: "Dieses Gerät wurde vom Server gesperrt." });
+	}
     const { username, password } = req.body;
     console.log(`${LOG_PREFIX_SERVER} Registrierungsversuch für User: ${username ? username.substring(0, 3) + "***" : "LEER"}`);
     
@@ -1953,29 +1977,27 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
             }
 			await logActivity(req, "USER_LOGIN", { status: "success" });
 
-            // =========================================================
-            // 🛑 NEU: BAN-CHECK & IP-UPDATE
-            // =========================================================
+			// 1. Hole die Device-ID aus dem Request (wird durch deine Middleware gesetzt)
+			const deviceId = req.deviceId;
 
-            // 1. Prüfen, ob die IP auf der schwarzen Liste steht
-            const isBanned = await db.collection('banned_ips').findOne({ ip: clientIp });
+			// 2. Prüfen, ob das Gerät gesperrt ist (Nur wenn überhaupt eine DeviceID vorliegt)
+			const isDeviceBanned = deviceId ? await db.collection('banned_devices').findOne({ deviceId: deviceId }) : null;
 
-            if (isBanned) {
-                // Wenn gebannt, prüfen wir: Ist es ein Admin?
-                if (user.isAdmin) {
-                    console.log(`${LOG_PREFIX_SERVER} ⚠️ ADMIN BYPASS: Gebannte IP ${clientIp} loggt sich als Admin ${user.username} ein.`);
-                } else {
-                    console.warn(`${LOG_PREFIX_SERVER} ⛔ ZUGRIFF VERWEIGERT: Gebannte IP ${clientIp} versuchte Login als ${user.username}.`);
-                    return res.status(403).json({ error: 'Dieser Account oder diese IP ist gesperrt.' });
-                }
-            }
+			if (isDeviceBanned) {
+			    // Wenn das Gerät gebannt ist, prüfen wir: Ist es trotzdem ein Admin?
+    			if (user.isAdmin) {
+        			console.log(`${LOG_PREFIX_SERVER} ⚠️ ADMIN BYPASS: Gebanntes Gerät ${deviceId} loggt sich als Admin ${user.username} ein.`);
+    			} else {
+        			console.warn(`${LOG_PREFIX_SERVER} ⛔ ZUGRIFF VERWEIGERT: Gebanntes Gerät ${deviceId} versuchte Login als ${user.username}.`);
+        			return res.status(403).json({ error: 'Dieser Account oder dieses Gerät ist gesperrt.' });
+    			}
+			}
 
-            // 2. IP im User speichern (damit wir sie später bannen können)
-            await usersCollection.updateOne(
-                { _id: user._id },
-                { $set: { lastIp: clientIp, lastLogin: new Date() } }
-            );
-            // =========================================================
+			// 3. Wenn alles passt, IP (oder DeviceID) im User-Dokument speichern
+			await usersCollection.updateOne(
+    			{ _id: user._id },
+    			{ $set: { lastDeviceId: deviceId, lastIp: clientIp, lastLogin: new Date() } }
+			);
 
             req.session.userId = user._id.toString();
             req.session.username = user.username;
@@ -5609,12 +5631,8 @@ app.post('/api/admin/system/normalize', isAuthenticated, isAdmin, async (req, re
 });
 
 // POST /api/admin/banUser
-// Body: { targetUserId: "ID_DES_USERS" }
 app.post('/api/admin/banUser', async (req, res) => {
-    // 1. Sicherheitscheck: Ist der Ausführende ein Admin?
-    if (!req.session.userId || !req.session.isAdmin) {
-        return res.status(403).json({ error: "Keine Rechte." });
-    }
+    if (!req.session.userId || !req.session.isAdmin) return res.status(403).json({ error: "Keine Rechte." });
 
     const { targetUserId } = req.body;
     if (!targetUserId) return res.status(400).json({ error: "User ID fehlt." });
@@ -5623,39 +5641,31 @@ app.post('/api/admin/banUser', async (req, res) => {
         const targetUser = await usersCollection.findOne({ _id: new ObjectId(targetUserId) });
         if (!targetUser) return res.status(404).json({ error: "User nicht gefunden." });
 
-        // Verhindern, dass man sich selbst oder andere Admins bannt (optional, aber empfohlen)
         if (targetUser.isAdmin) return res.status(403).json({ error: "Admins können nicht gebannt werden." });
 
-        // A. IP in die Blacklist eintragen
-        if (targetUser.lastIp) {
-            await db.collection('banned_ips').updateOne(
-                { ip: targetUser.lastIp },
+        // BAN: Wir speichern die Device-ID (falls er sie jemals hinterlassen hat)
+        // Du solltest in deinem User-Objekt idealerweise die 'lastDeviceId' speichern, 
+        // wenn er sich einloggt.
+        if (targetUser.lastDeviceId) {
+            await db.collection('banned_devices').updateOne(
+                { deviceId: targetUser.lastDeviceId },
                 {
                     $set: {
-                        ip: targetUser.lastIp,
+                        deviceId: targetUser.lastDeviceId,
                         bannedAt: new Date(),
                         bannedBy: req.session.username,
-                        reason: "Account Deleted & Banned by Admin"
+                        reason: "Account gelöscht & Gerät gebannt"
                     }
                 },
-                { upsert: true } // Erstellt den Eintrag, falls er noch nicht existiert
+                { upsert: true }
             );
         }
 
-        // B. User endgültig löschen
         await usersCollection.deleteOne({ _id: new ObjectId(targetUserId) });
-		
-		await logActivity(req, "ADMIN_BAN_USER", { 
-    		targetUserId: targetUserId, 
-    		targetUsername: targetUser.username,
-    		reason: "Account Deleted & Banned by Admin" 
-		});
-
-        console.log(`${LOG_PREFIX_SERVER} ADMIN ACTION: User ${targetUser.username} gelöscht und IP ${targetUser.lastIp} gebannt.`);
-        res.json({ success: true, message: "User vernichtet und IP gebannt." });
-
+        await logActivity(req, "ADMIN_BAN_DEVICE", { targetUsername: targetUser.username });
+        
+        res.json({ success: true, message: "User vernichtet und Gerät gebannt." });
     } catch (err) {
-        console.error(`${LOG_PREFIX_SERVER} Fehler beim Bannen:`, err);
         res.status(500).json({ error: "Serverfehler." });
     }
 });
