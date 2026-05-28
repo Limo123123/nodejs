@@ -141,133 +141,7 @@ app.use((req, res, next) => {
     next();
 });
 
-// ================================================
-// === ZEITGESTEUERTE IP-SPERRE MIT DOMAIN-IP ====
-// ================================================
-
-// Domain die geprüft werden soll
-const DOMAIN_TO_BLOCK = "example.com";
-
-// Zeiten
-const BLOCK_START_HOUR = 8;
-const BLOCK_END_HOUR = 13;
-
-// Cache für die Domain-IP
-let cachedDomainIP = null;
-let lastLookup = 0;
-
-// Domain-IP holen
-async function getDomainIP() {
-    const now = Date.now();
-
-    // Nur alle 10 Minuten neu auflösen
-    if (!cachedDomainIP || now - lastLookup > 10 * 60 * 1000) {
-        try {
-            const result = await dns.lookup(DOMAIN_TO_BLOCK);
-            cachedDomainIP = result.address;
-            lastLookup = now;
-
-            console.log("Aktuelle Domain-IP:", cachedDomainIP);
-        } catch (err) {
-            console.error("Fehler beim Auflösen der Domain:", err);
-        }
-    }
-
-    return cachedDomainIP;
-}
-
-async function timeBasedIpBlock(req, res, next) {
-
-    // IP des Besuchers holen
-    const clientIp =
-        req.headers['x-forwarded-for']?.split(',')[0] ||
-        req.socket.remoteAddress;
-
-    // Domain-IP holen
-    const blockedIP = await getDomainIP();
-
-    // Prüfen ob aktuelle Uhrzeit in Sperrzeit liegt
-    const currentHour = new Date().getHours();
-
-    let isBlockedTime = false;
-
-    // Für Zeiten über Mitternacht
-    if (BLOCK_START_HOUR > BLOCK_END_HOUR) {
-
-        if (
-            currentHour >= BLOCK_START_HOUR ||
-            currentHour < BLOCK_END_HOUR
-        ) {
-            isBlockedTime = true;
-        }
-
-    } else {
-
-        // Normale Zeiten (z.B. 8 bis 13 Uhr)
-        if (
-            currentHour >= BLOCK_START_HOUR &&
-            currentHour < BLOCK_END_HOUR
-        ) {
-            isBlockedTime = true;
-        }
-    }
-
-    // Prüfen ob User die Domain-IP benutzt
-    if (clientIp === blockedIP && isBlockedTime) {
-
-        // =========================================
-        // === WHITELIST / ADMIN CHECK ============
-  		// =========================================
-
-        if (req.session && req.session.userId) {
-
-            try {
-
-                const user = await usersCollection.findOne({
-            		_id: new ObjectId(req.session.userId)
-        		});
-
-                // Admin darf immer rein
-                if (user?.isAdmin === true) {
-                    return next();
-                }
-
-                const userRole = user.role || 'User';
-
-                const rolePerms =
-                    PREDEFINED_ROLES[userRole]?.permissions || [];
-
-                const customPerms =
-                    user.permissions || [];
-
-                // Whitelist-Rechte prüfen
-                if (
-                    rolePerms.includes('ALL') ||
-                    rolePerms.includes('whitelist') ||
-                    customPerms.includes('whitelist')
-                ) {
-                    return next();
-                }
-
-            } catch (e) {
-                console.error("Whitelist-Fehler:", e);
-            }
-        }
-
-        // =========================================
-        // === BLOCKIEREN ==========================
-        // =========================================
-
-        return res.status(403).json({
-            error:
-                "Sperrstunde! Zugriff momentan blockiert."
-        });
-    }
-
-    // Alles okay
-    next();
-}
-app.use('/api/', globalApiRateLimit, timeBasedIpBlock);
+app.use('/api/', globalApiRateLimit);
 
 // =========================================================
 // === STREIK-SYSTEM: BLOCKIERTE ROUTEN ===
@@ -1109,8 +983,7 @@ const AVAILABLE_PERMISSIONS = {
     'super_admin': { name: 'Super Admin (Engine)', desc: 'GEFÄHRLICH: Voller, ungefilterter Zugriff auf die MongoDB-Engine.' },
 	'manage_requests': { name: 'Support-Anträge', desc: 'Erlaubt das Einsehen und Bearbeiten von User-Formularen (Geld, Account etc.).' },
 	'manage_pets': { name: 'Tier-Gott', desc: 'Tiere vom Friedhof wiederbeleben (Sensenmann austricksen).' },
-    'manage_gangs': { name: 'Kartell-Boss', desc: 'Voller Zugriff auf Gangs und Zonen-Reset.' },
-    'whitelist': { name: 'Florian\'s Haustürschlüssel', desc: 'Rechte zur Umgehung der Sperre.' },
+    'manage_gangs': { name: 'Kartell-Boss', desc: 'Voller Zugriff auf Gangs und Zonen-Reset.' }
 };
 
 // 2. MAPPING: WELCHER ENDPOINT BRAUCHT WELCHES RECHT
@@ -1136,7 +1009,6 @@ const ENDPOINT_PERMISSIONS = {
     'POST /api/admin/banUser': 'manage_users_critical', 
     'GET /api/admin/roles': 'manage_users_critical',
     'GET /api/admin/permissions': 'manage_users_critical',
-    'GET /api/admin/whitelist': 'whitelist',
 
     // --- LNN News ---
     'POST /api/admin/news': 'manage_news',
@@ -1224,8 +1096,7 @@ const PREDEFINED_ROLES = {
             'manage_users', 
             'manage_news', 
             'manage_ideas',
-			'manage_requests',
-            'whitelist'
+			'manage_requests'
         ]
     },
     'shop_manager': {
@@ -1238,13 +1109,6 @@ const PREDEFINED_ROLES = {
             'manage_limea',
             'manage_cdn'
         ]
-    },
-    'whitelisted_user': {
-        name: 'Whitelisted User',
-        desc: 'Benutzer mit rechten zur umgehung der Sperre.',
-        permissions: [
-            'whitelist'
-        ] // Hat Zugriff auf keinen einzigen Admin-Endpoint
     },
     'user': {
         name: 'Standard User',
