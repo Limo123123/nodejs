@@ -1318,26 +1318,41 @@ function isEnvWhitelisted(req, res, next) {
 }
 
 async function checkDeviceBan(req, res, next) {
+    // 1. AUSNAHME FÜR LOGIN:
+    // Der Login kümmert sich selbst um den Ban-Check, da wir erst dort
+    // nach dem DB-Abgleich wissen, ob der User ein Admin ist.
+    if (req.path === '/auth/login' || req.path === '/auth/temp-login') {
+        return next();
+    }
+
+    // 2. ADMIN-BYPASS:
+    // Wenn der User bereits eine gültige Session hat und Admin ist,
+    // ignorieren wir alle Geräte-Sperren.
+    if (req.session && req.session.isAdmin === true) {
+        return next();
+    }
+
+    // 3. NORMALER BAN-CHECK FÜR ALLE ANDEREN:
     const fingerprint = req.headers['x-device-fingerprint'];
+    
+    // IP wird hier absichtlich NICHT für den Bann genutzt (wegen CGNAT),
+    // aber wir loggen sie, falls das Gerät blockiert wird.
     const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
 
-    // Baue ein Array mit allen vorhandenen Erkennungsmerkmalen
     const queryConditions = [];
     if (req.deviceId) queryConditions.push({ deviceId: req.deviceId });
     if (fingerprint) queryConditions.push({ fingerprint: fingerprint });
-    if (ip) queryConditions.push({ ip: ip });
 
     if (queryConditions.length > 0) {
-        // Wenn auch nur EINES dieser Merkmale gebannt ist, fliegt der User raus
         const isBanned = await db.collection('banned_devices').findOne({ $or: queryConditions });
         
         if (isBanned) {
-            console.warn(`${LOG_PREFIX_SERVER} ⛔ Gebanntes Gerät blockiert! IP: ${ip} | Fingerprint: ${fingerprint || 'N/A'}`);
+            console.warn(`${LOG_PREFIX_SERVER} ⛔ Gebanntes Gerät blockiert! Path: ${req.path} | IP: ${ip} | Fingerprint: ${fingerprint || 'N/A'}`);
             return res.status(403).json({ error: "Dieses Gerät wurde vom Server dauerhaft gesperrt." });
         }
     }
     
-    // Den Fingerprint für spätere Routen im Request-Objekt speichern
+    // Fingerprint für spätere Routen im Request speichern
     req.fingerprintId = fingerprint;
     next();
 }
@@ -1885,18 +1900,16 @@ async function getStateTreasuryBalance() {
 
 // AUTH
 app.post('/api/auth/register', async (req, res) => {
-    // 1. Alle Security-Merkmale sammeln
     const clientIp = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
     const fingerprint = req.headers['x-device-fingerprint'] || null;
     const deviceId = req.deviceId || null;
 
     console.log(`${LOG_PREFIX_SERVER} Registrierungsversuch. IP: ${clientIp} | Fingerprint: ${fingerprint || 'N/A'}`);
 
-    // 2. Harter Ban-Check direkt in der Route
+    // 2. Harter Ban-Check (NUR DeviceID & Fingerprint)
     const queryConditions = [];
     if (deviceId) queryConditions.push({ deviceId: deviceId });
     if (fingerprint) queryConditions.push({ fingerprint: fingerprint });
-    if (clientIp) queryConditions.push({ ip: clientIp });
 
     if (queryConditions.length > 0) {
         const isBanned = await db.collection('banned_devices').findOne({ $or: queryConditions });
@@ -2014,38 +2027,43 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
             if (req.loginRateLimitKey && global.redisPub) {
                 global.redisPub.del(req.loginRateLimitKey).catch(e => console.error("Redis Del Error", e));
             }
-			await logActivity(req, "USER_LOGIN", { status: "success" });
+            await logActivity(req, "USER_LOGIN", { status: "success" });
 
-			// 1. Hole die Device-ID aus dem Request (wird durch deine Middleware gesetzt)
-			const deviceId = req.deviceId;
+            // 1. Hole Cookie und Fingerprint aus dem Request
+            const deviceId = req.deviceId || null;
+            const fingerprint = req.headers['x-device-fingerprint'] || null;
 
-			// 2. Prüfen, ob das Gerät gesperrt ist (Nur wenn überhaupt eine DeviceID vorliegt)
-			const isDeviceBanned = deviceId ? await db.collection('banned_devices').findOne({ deviceId: deviceId }) : null;
+            // 2. Ban-Check (IP-frei!)
+            let isDeviceBanned = null;
+            const queryConditions = [];
+            if (deviceId) queryConditions.push({ deviceId: deviceId });
+            if (fingerprint) queryConditions.push({ fingerprint: fingerprint });
 
-			if (isDeviceBanned) {
-			    // Wenn das Gerät gebannt ist, prüfen wir: Ist es trotzdem ein Admin?
-    			if (user.isAdmin) {
-        			console.log(`${LOG_PREFIX_SERVER} ⚠️ ADMIN BYPASS: Gebanntes Gerät ${deviceId} loggt sich als Admin ${user.username} ein.`);
-    			} else {
-        			console.warn(`${LOG_PREFIX_SERVER} ⛔ ZUGRIFF VERWEIGERT: Gebanntes Gerät ${deviceId} versuchte Login als ${user.username}.`);
-        			return res.status(403).json({ error: 'Dieser Account oder dieses Gerät ist gesperrt.' });
-    			}
-			}
+            if (queryConditions.length > 0) {
+                isDeviceBanned = await db.collection('banned_devices').findOne({ $or: queryConditions });
+            }
 
-			// 3. Wenn alles passt, IP (oder DeviceID) im User-Dokument speichern
-			const fingerprint = req.headers['x-device-fingerprint'];
+            if (isDeviceBanned) {
+                // Wenn das Gerät gebannt ist, prüfen wir: Ist es trotzdem ein Admin?
+                if (user.isAdmin) {
+                    console.log(`${LOG_PREFIX_SERVER} ⚠️ ADMIN BYPASS: Gebanntes Gerät loggt sich als Admin ${user.username} ein.`);
+                } else {
+                    console.warn(`${LOG_PREFIX_SERVER} ⛔ ZUGRIFF VERWEIGERT: Gebanntes Gerät versuchte Login als ${user.username}.`);
+                    return res.status(403).json({ error: 'Dieser Account oder dieses Gerät ist gesperrt.' });
+                }
+            }
 
-			// 3. Wenn alles passt, IP (oder DeviceID) im User-Dokument speichern
-			await usersCollection.updateOne(
-   				{ _id: user._id },
-    			{ $set: { 
-			        lastDeviceId: deviceId, 
-        			lastFingerprint: fingerprint, // NEU
-			        lastIp: clientIp, 
-			        lastLogin: new Date() 
-    			} }
-			);
-			
+            // 3. Spuren für zukünftige Bans abspeichern (inklusive lastFingerprint!)
+            await usersCollection.updateOne(
+                { _id: user._id },
+                { $set: { 
+                    lastDeviceId: deviceId, 
+                    lastFingerprint: fingerprint,
+                    lastIp: clientIp, 
+                    lastLogin: new Date() 
+                } }
+            );
+
             req.session.userId = user._id.toString();
             req.session.username = user.username;
             req.session.isAdmin = user.isAdmin || false;
@@ -5688,33 +5706,38 @@ app.post('/api/admin/banUser', isAuthenticated, isAdmin, async (req, res) => {
 
         if (targetUser.isAdmin) return res.status(403).json({ error: "Admins können nicht gebannt werden." });
 
-        // BAN: Wir speichern ALLE Erkennungsmerkmale in einem Rutsch
+        // BAN: Nur noch Cookie und Fingerprint abspeichern
         const banData = {
             bannedAt: new Date(),
             bannedBy: req.session.username,
             reason: "Account vernichtet & Gerät gesperrt"
         };
 
-        if (targetUser.lastDeviceId) banData.deviceId = targetUser.lastDeviceId;
-        if (targetUser.lastFingerprint) banData.fingerprint = targetUser.lastFingerprint;
-        if (targetUser.lastIp) banData.ip = targetUser.lastIp;
+        const queryConditions = [];
 
-        // In die Blacklist eintragen (upsert, falls der User schonmal gebannt wurde)
-        await db.collection('banned_devices').updateOne(
-            { $or: [
-                { deviceId: targetUser.lastDeviceId },
-                { fingerprint: targetUser.lastFingerprint },
-                { ip: targetUser.lastIp }
-            ]},
-            { $set: banData },
-            { upsert: true }
-        );
+        if (targetUser.lastDeviceId) {
+            banData.deviceId = targetUser.lastDeviceId;
+            queryConditions.push({ deviceId: targetUser.lastDeviceId });
+        }
+        if (targetUser.lastFingerprint) {
+            banData.fingerprint = targetUser.lastFingerprint;
+            queryConditions.push({ fingerprint: targetUser.lastFingerprint });
+        }
 
-        // User restlos vernichten (nutze deine bestehende Cleanup-Funktion)
+        // Nur bannen, wenn wir mindestens ein Merkmal haben
+        if (queryConditions.length > 0) {
+            await db.collection('banned_devices').updateOne(
+                { $or: queryConditions },
+                { $set: banData },
+                { upsert: true }
+            );
+        }
+
+        // User restlos vernichten
         await deleteUserAndCleanup(targetUserId);
         await logActivity(req, "ADMIN_BAN_DEVICE", { targetUsername: targetUser.username });
         
-        res.json({ success: true, message: "User vernichtet und Gerät gebannt." });
+        res.json({ success: true, message: "User vernichtet und Gerät (ohne IP) gebannt." });
     } catch (err) {
         console.error("Ban Error:", err);
         res.status(500).json({ error: "Serverfehler beim Bannen." });
