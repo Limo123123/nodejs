@@ -145,7 +145,7 @@ app.use((req, res, next) => {
 // ================================================
 
 // Domain die geprüft werden soll
-const DOMAIN_TO_BLOCK = "ah-afr.de";
+const DOMAIN_TO_BLOCK = "example.com";
 
 // Zeiten
 const BLOCK_START_HOUR = 8;
