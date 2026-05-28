@@ -98,7 +98,6 @@ console.log(`${LOG_PREFIX_SERVER} Erlaubte CORS Origins:`, allowedOrigins);
 
 app.use(cors({
     origin: function (origin, callback) {
-        // origin === 'null' fängt die OAuth-Redirects ab
         const isAllowed = !origin || 
             origin === 'null' || 
             allowedOrigins.includes(origin) ||
@@ -111,8 +110,10 @@ app.use(cors({
             callback(new Error(`Origin ${origin} nicht durch CORS erlaubt`));
         }
     },
-    credentials: true
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-device-fingerprint', 'x-bot-bypass']
 }));
+
 app.use(express.json({ limit: "5mb" }));
 app.use(express.urlencoded({ limit: "5mb", extended: true, parameterLimit: 50000 }));
 app.use(session({
