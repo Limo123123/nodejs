@@ -1317,16 +1317,27 @@ function isEnvWhitelisted(req, res, next) {
 }
 
 async function checkDeviceBan(req, res, next) {
-    // Admin-Bypass: Wenn du dich mit Admin-Token oder Admin-Status identifizierst,
-    // könnten wir hier eine Ausnahme machen, aber Vorsicht!
-    // Am besten lassen wir Admins normal gebannt werden, damit man sich nicht "ausversehen" selbst bannt.
-    
-    const isBanned = await db.collection('banned_devices').findOne({ deviceId: req.deviceId });
-    
-    if (isBanned) {
-        console.warn(`[Security] Gebanntes Gerät versucht Zugriff: ${req.deviceId} auf ${req.originalUrl}`);
-        return res.status(403).json({ error: "Dieses Gerät wurde vom Server gesperrt." });
+    const fingerprint = req.headers['x-device-fingerprint'];
+    const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
+
+    // Baue ein Array mit allen vorhandenen Erkennungsmerkmalen
+    const queryConditions = [];
+    if (req.deviceId) queryConditions.push({ deviceId: req.deviceId });
+    if (fingerprint) queryConditions.push({ fingerprint: fingerprint });
+    if (ip) queryConditions.push({ ip: ip });
+
+    if (queryConditions.length > 0) {
+        // Wenn auch nur EINES dieser Merkmale gebannt ist, fliegt der User raus
+        const isBanned = await db.collection('banned_devices').findOne({ $or: queryConditions });
+        
+        if (isBanned) {
+            console.warn(`${LOG_PREFIX_SERVER} ⛔ Gebanntes Gerät blockiert! IP: ${ip} | Fingerprint: ${fingerprint || 'N/A'}`);
+            return res.status(403).json({ error: "Dieses Gerät wurde vom Server dauerhaft gesperrt." });
+        }
     }
+    
+    // Den Fingerprint für spätere Routen im Request-Objekt speichern
+    req.fingerprintId = fingerprint;
     next();
 }
 
@@ -1873,17 +1884,28 @@ async function getStateTreasuryBalance() {
 
 // AUTH
 app.post('/api/auth/register', async (req, res) => {
-    // IP ermitteln (wichtig hinter Proxies/Nginx)
+    // 1. Alle Security-Merkmale sammeln
     const clientIp = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
+    const fingerprint = req.headers['x-device-fingerprint'] || null;
+    const deviceId = req.deviceId || null;
 
-    // Prüfen ob IP gebannt ist
-    // Beispiel für den Check in /api/auth/register
-	const isBanned = await db.collection('banned_devices').findOne({ deviceId: req.deviceId });
-	if (isBanned) {
-	    return res.status(403).json({ error: "Dieses Gerät wurde vom Server gesperrt." });
-	}
+    console.log(`${LOG_PREFIX_SERVER} Registrierungsversuch. IP: ${clientIp} | Fingerprint: ${fingerprint || 'N/A'}`);
+
+    // 2. Harter Ban-Check direkt in der Route
+    const queryConditions = [];
+    if (deviceId) queryConditions.push({ deviceId: deviceId });
+    if (fingerprint) queryConditions.push({ fingerprint: fingerprint });
+    if (clientIp) queryConditions.push({ ip: clientIp });
+
+    if (queryConditions.length > 0) {
+        const isBanned = await db.collection('banned_devices').findOne({ $or: queryConditions });
+        if (isBanned) {
+            console.warn(`${LOG_PREFIX_SERVER} ⛔ Gebanntes Gerät blockiert bei Registrierung!`);
+            return res.status(403).json({ error: "Dieses Gerät wurde vom Server gesperrt." });
+        }
+    }
+
     const { username, password } = req.body;
-    console.log(`${LOG_PREFIX_SERVER} Registrierungsversuch für User: ${username ? username.substring(0, 3) + "***" : "LEER"}`);
     
     if (!username || !password || typeof username !== 'string' || typeof password !== 'string' || username.length < 3 || username.length > 30 || password.length < 6) {
         return res.status(400).json({ error: 'Benutzername (3-30 Zeichen) und Passwort (min 6 Zeichen) erforderlich.' });
@@ -1901,17 +1923,33 @@ app.post('/api/auth/register', async (req, res) => {
     try {
         const existingUser = await usersCollection.findOne({ username: username.toLowerCase() });
         if (existingUser) {
-            console.warn(`${LOG_PREFIX_SERVER} Registrierung fehlgeschlagen: Benutzername ${username.toLowerCase()} bereits vergeben.`);
             return res.status(409).json({ error: 'Benutzername bereits vergeben.' });
         }
+
         const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
+        
         const newUser = {
-            username: username.toLowerCase(), password: hashedPassword, balance: 5000.00, tokens: DEFAULT_STARTING_TOKENS,
-            isAdmin: false, infinityMoney: false, unlockedInfinityMoney: false, createdAt: new Date(), productSellCooldowns: {}, schufaScore: 500, activeLoan: null
+            username: username.toLowerCase(), 
+            password: hashedPassword, 
+            balance: 5000.00, 
+            tokens: DEFAULT_STARTING_TOKENS,
+            isAdmin: false, 
+            infinityMoney: false, 
+            unlockedInfinityMoney: false, 
+            createdAt: new Date(), 
+            productSellCooldowns: {}, 
+            schufaScore: 500, 
+            activeLoan: null,
+            lastDeviceId: deviceId,
+            lastFingerprint: fingerprint,
+            lastIp: clientIp
         };
+        
         await usersCollection.insertOne(newUser);
-        console.log(`${LOG_PREFIX_SERVER} User ${username.toLowerCase()} erfolgreich registriert mit ${DEFAULT_STARTING_TOKENS} Tokens.`);
+        
+        console.log(`${LOG_PREFIX_SERVER} User ${username.toLowerCase()} erfolgreich registriert.`);
         res.status(201).json({ message: 'Registrierung erfolgreich!' });
+        
     } catch (err) {
         console.error(`${LOG_PREFIX_SERVER} Fehler bei Registrierung für User ${username}:`, err);
         res.status(500).json({ error: 'Fehler bei der Registrierung auf dem Server.' });
@@ -1994,11 +2032,19 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
 			}
 
 			// 3. Wenn alles passt, IP (oder DeviceID) im User-Dokument speichern
-			await usersCollection.updateOne(
-    			{ _id: user._id },
-    			{ $set: { lastDeviceId: deviceId, lastIp: clientIp, lastLogin: new Date() } }
-			);
+			const fingerprint = req.headers['x-device-fingerprint'];
 
+			// 3. Wenn alles passt, IP (oder DeviceID) im User-Dokument speichern
+			await usersCollection.updateOne(
+   				{ _id: user._id },
+    			{ $set: { 
+			        lastDeviceId: deviceId, 
+        			lastFingerprint: fingerprint, // NEU
+			        lastIp: clientIp, 
+			        lastLogin: new Date() 
+    			} }
+			);
+			
             req.session.userId = user._id.toString();
             req.session.username = user.username;
             req.session.isAdmin = user.isAdmin || false;
@@ -5631,9 +5677,7 @@ app.post('/api/admin/system/normalize', isAuthenticated, isAdmin, async (req, re
 });
 
 // POST /api/admin/banUser
-app.post('/api/admin/banUser', async (req, res) => {
-    if (!req.session.userId || !req.session.isAdmin) return res.status(403).json({ error: "Keine Rechte." });
-
+app.post('/api/admin/banUser', isAuthenticated, isAdmin, async (req, res) => {
     const { targetUserId } = req.body;
     if (!targetUserId) return res.status(400).json({ error: "User ID fehlt." });
 
@@ -5643,30 +5687,36 @@ app.post('/api/admin/banUser', async (req, res) => {
 
         if (targetUser.isAdmin) return res.status(403).json({ error: "Admins können nicht gebannt werden." });
 
-        // BAN: Wir speichern die Device-ID (falls er sie jemals hinterlassen hat)
-        // Du solltest in deinem User-Objekt idealerweise die 'lastDeviceId' speichern, 
-        // wenn er sich einloggt.
-        if (targetUser.lastDeviceId) {
-            await db.collection('banned_devices').updateOne(
-                { deviceId: targetUser.lastDeviceId },
-                {
-                    $set: {
-                        deviceId: targetUser.lastDeviceId,
-                        bannedAt: new Date(),
-                        bannedBy: req.session.username,
-                        reason: "Account gelöscht & Gerät gebannt"
-                    }
-                },
-                { upsert: true }
-            );
-        }
+        // BAN: Wir speichern ALLE Erkennungsmerkmale in einem Rutsch
+        const banData = {
+            bannedAt: new Date(),
+            bannedBy: req.session.username,
+            reason: "Account vernichtet & Gerät gesperrt"
+        };
 
-        await usersCollection.deleteOne({ _id: new ObjectId(targetUserId) });
+        if (targetUser.lastDeviceId) banData.deviceId = targetUser.lastDeviceId;
+        if (targetUser.lastFingerprint) banData.fingerprint = targetUser.lastFingerprint;
+        if (targetUser.lastIp) banData.ip = targetUser.lastIp;
+
+        // In die Blacklist eintragen (upsert, falls der User schonmal gebannt wurde)
+        await db.collection('banned_devices').updateOne(
+            { $or: [
+                { deviceId: targetUser.lastDeviceId },
+                { fingerprint: targetUser.lastFingerprint },
+                { ip: targetUser.lastIp }
+            ]},
+            { $set: banData },
+            { upsert: true }
+        );
+
+        // User restlos vernichten (nutze deine bestehende Cleanup-Funktion)
+        await deleteUserAndCleanup(targetUserId);
         await logActivity(req, "ADMIN_BAN_DEVICE", { targetUsername: targetUser.username });
         
         res.json({ success: true, message: "User vernichtet und Gerät gebannt." });
     } catch (err) {
-        res.status(500).json({ error: "Serverfehler." });
+        console.error("Ban Error:", err);
+        res.status(500).json({ error: "Serverfehler beim Bannen." });
     }
 });
 
