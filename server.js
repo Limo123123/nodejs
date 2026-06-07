@@ -13245,7 +13245,8 @@ const PET_CATALOG = [
     { id: 'alpaca', name: 'Alpaka', icon: '🦙', enclosure: 'Anden-Wiese 🏔️', price: 3000, starvationTimeHours: 48 },
     { id: 'skeleton_horse', name: 'Skelettpferd', icon: '🐎💀', enclosure: 'Friedhof 🪦', price: 25000, starvationTimeHours: 999 },
     { id: 'dalmatian', name: 'Dalmatiner', icon: '🐕', enclosure: 'Hundehütte 🛖', price: 800, starvationTimeHours: 24 },
-    { id: 'cerberus', name: 'Dreiköpfiger Hund', icon: '🐕‍🦺', enclosure: 'Unterwelt 🌋', price: 75000, starvationTimeHours: 48 }
+    { id: 'cerberus', name: 'Dreiköpfiger Hund', icon: '🐕‍🦺', enclosure: 'Unterwelt 🌋', price: 75000, starvationTimeHours: 48 },
+	{ id: 'human', name: 'Mensch', icon: '🧑', enclosure: 'Haus 🏠', price: 100000, starvationTimeHours: 48 }
 ];
 
 const FEED_COST = 15; // $15 pro Fütterung
