@@ -16632,6 +16632,7 @@ app.get('/api/cartel/status', isAuthenticated, async (req, res) => {
 
         res.json({
             isDealer: user.isDealer || false,
+            isAdmin: user.isAdmin || false,
             strikes: user.cartelStrikes || 0,
             isUnderArrest: isUnderArrest,
             snitchAttemptsLeft: snitchAttemptsLeft
