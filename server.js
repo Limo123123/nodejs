@@ -199,6 +199,7 @@ let reviewsCollection;
 let requestsCollection;
 let classifiedAdsCollection;
 let orphanageCollection;
+let cartelApplicationsCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -1279,6 +1280,7 @@ MongoClient.connect(mongoUri)
 		orphanageCollection = db.collection('orphanage');
 
         bankTransactionsCollection = db.collection('bankTransactions');
+		cartelApplicationsCollection = db.collection('cartelApplications');
         console.log(`${LOG_PREFIX_SERVER} ✅ MongoDB verbunden & alle Collections initialisiert.`);
         // --- 2. Indizes & Reparaturen ---
         try {
@@ -1603,6 +1605,127 @@ MongoClient.connect(mongoUri)
         console.error(`${LOG_PREFIX_SERVER} ❌ Kritischer Fehler: MongoDB-Verbindung fehlgeschlagen:`, err);
         process.exit(1);
     });
+
+// =========================================================
+// === 💊 KARTELL & DARKNET (BOSS PANEL) ===
+// =========================================================
+const LOG_PREFIX_CARTEL = "[Cartel API]";
+
+// 1. Dashboard: Übersicht über alles
+app.get('/api/admin/cartel/dashboard', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        // A) Alle aktiven Dealer laden
+        const activeDealers = await usersCollection.find(
+            { isDealer: true },
+            { projection: { username: 1, balance: 1, _id: 1 } }
+        ).toArray();
+
+        // B) Offene Bewerbungen laden
+        const pendingApplications = await cartelApplicationsCollection.find(
+            { status: 'pending' }
+        ).sort({ createdAt: -1 }).toArray();
+
+        // C) Globale Drogen-Menge zählen (Wie viel ist im Umlauf?)
+        // Wir suchen im Inventar nach dem Drogen-Item (z.B. ID 'limo_crystals')
+        const drugsInCirculation = await inventoriesCollection.aggregate([
+            { $match: { productId: 'limo_crystals' } },
+            { $group: { _id: null, totalAmount: { $sum: "$quantityOwned" } } }
+        ]).toArray();
+
+        const totalDrugs = drugsInCirculation.length > 0 ? drugsInCirculation[0].totalAmount : 0;
+
+        res.json({
+            dealers: activeDealers,
+            applications: pendingApplications,
+            marketStats: {
+                totalDrugsInCirculation: totalDrugs,
+                dealerCount: activeDealers.length
+            }
+        });
+    } catch (e) {
+        console.error(`${LOG_PREFIX_CARTEL} Fehler beim Laden des Dashboards:`, e);
+        res.status(500).json({ error: "Fehler beim Laden der Kartell-Akten." });
+    }
+});
+
+// 2. Bewerbung bearbeiten (Aufnehmen oder Ablehnen)
+app.post('/api/admin/cartel/applications/:id/process', isAuthenticated, isAdmin, async (req, res) => {
+    const { action } = req.body; // 'approve' oder 'reject'
+    const applicationId = new ObjectId(req.params.id);
+
+    try {
+        const application = await cartelApplicationsCollection.findOne({ _id: applicationId });
+        if (!application || application.status !== 'pending') {
+            return res.status(404).json({ error: "Bewerbung nicht gefunden oder schon bearbeitet." });
+        }
+
+        if (action === 'approve') {
+            // User zum Dealer machen
+            await usersCollection.updateOne(
+                { _id: application.userId },
+                { $set: { isDealer: true } }
+            );
+            await cartelApplicationsCollection.updateOne(
+                { _id: applicationId },
+                { $set: { status: 'approved', processedAt: new Date() } }
+            );
+            res.json({ message: `${application.username} ist jetzt offiziell ein Dealer der Familie.` });
+            
+        } else if (action === 'reject') {
+            // Bewerbung abweisen
+            await cartelApplicationsCollection.updateOne(
+                { _id: applicationId },
+                { $set: { status: 'rejected', processedAt: new Date() } }
+            );
+            res.json({ message: "Bewerbung eiskalt abgelehnt." });
+        } else {
+            res.status(400).json({ error: "Ungültige Aktion." });
+        }
+    } catch (e) {
+        console.error(`${LOG_PREFIX_CARTEL} Fehler bei der Bewerbungs-Verarbeitung:`, e);
+        res.status(500).json({ error: "Serverfehler." });
+    }
+});
+
+// 3. Razzia-Knopf: Einen Dealer sofort feuern und alles konfiszieren
+app.delete('/api/admin/cartel/dealers/:id/fire', isAuthenticated, isAdmin, async (req, res) => {
+    const targetUserId = new ObjectId(req.params.id);
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const dealer = await usersCollection.findOne({ _id: targetUserId }, { session });
+            if (!dealer || !dealer.isDealer) throw new Error("Dieser User ist kein aktiver Dealer.");
+
+            // 1. Dealer-Status entfernen
+            await usersCollection.updateOne(
+                { _id: targetUserId },
+                { $set: { isDealer: false } },
+                { session }
+            );
+
+            // 2. Drogen aus seinem Inventar restlos vernichten
+            await inventoriesCollection.deleteOne(
+                { userId: targetUserId, productId: 'limo_crystals' },
+                { session }
+            );
+
+            // 3. Laufende Darknet-Anzeigen dieses Dealers löschen
+            await classifiedAdsCollection.updateMany(
+                { sellerId: targetUserId, type: 'darknet', status: 'active' },
+                { $set: { status: 'deleted', deletedBy: 'admin_raid' } },
+                { session }
+            );
+        });
+
+        res.json({ message: `Razzia erfolgreich! ${targetUserId} wurde aus dem Kartell geworfen und alle Drogen wurden vernichtet.` });
+    } catch (e) {
+        console.error(`${LOG_PREFIX_CARTEL} Fehler beim Feuern eines Dealers:`, e);
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
 
 // POST: Manuelle Steuereintreibung (Admin Only)
 app.post('/api/admin/system/force-tax', isAuthenticated, isAdmin, async (req, res) => {
@@ -15023,7 +15146,7 @@ app.post('/api/classifieds', isAuthenticated, async (req, res) => {
     const { title, description, price, type, productId, quantity, imageUrl } = req.body;
     const sellerId = new ObjectId(req.session.userId);
 
-    if (!title || !description || !price || price <= 0 || !['limazon', 'real'].includes(type)) {
+    if (!title || !description || !price || price <= 0 || !['limazon', 'real', 'darknet'].includes(type)) {
         return res.status(400).json({ error: 'Ungültige Daten für Kleinanzeige.' });
     }
     if (containsForbiddenWords(title) || containsForbiddenWords(description)) {
@@ -15031,7 +15154,7 @@ app.post('/api/classifieds', isAuthenticated, async (req, res) => {
     }
 
     let finalProductId = null;
-    if (type === 'limazon') {
+    if (type === 'limazon' || type === 'darknet') {
         const parsedId = Number(productId);
         finalProductId = isNaN(parsedId) ? productId : parsedId;
     }
@@ -15039,7 +15162,7 @@ app.post('/api/classifieds', isAuthenticated, async (req, res) => {
     const session = client.startSession();
     try {
         await session.withTransaction(async () => {
-            if (type === 'limazon') {
+            if (type === 'limazon' || type === 'darknet') {
                 if (!finalProductId || !quantity || quantity < 1) throw new Error('Produkt-ID und Menge fehlen.');
                 
                 const inventoryItem = await inventoriesCollection.findOne({ userId: sellerId, productId: finalProductId }, { session });
@@ -15062,7 +15185,7 @@ app.post('/api/classifieds', isAuthenticated, async (req, res) => {
                 price: parseFloat(price),
                 type,
                 productId: finalProductId, // Hier die gefixte ID nutzen!
-                quantity: type === 'limazon' ? parseInt(quantity) : 1,
+                quantity: (type === 'limazon' || type === 'darknet') ? parseInt(quantity) : 1,
                 imageUrl: imageUrl || null,
                 status: 'active',
                 createdAt: new Date()
@@ -16333,6 +16456,414 @@ app.get('/api/ads/random', async (req, res) => {
     // 2. Normalen Usern (oder Gästen) eine Werbung ins Gesicht drücken
     const randomAd = LIMO_ADS[Math.floor(Math.random() * LIMO_ADS.length)];
     res.json({ ad: randomAd, isAdFree: false });
+});
+
+// =========================================================
+// === 💊 KARTELL
+// =========================================================
+
+// 1. User: Bewerbung beim Kartell einreichen
+app.post('/api/cartel/apply', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    const username = req.session.username;
+    const { motivation } = req.body; 
+
+    if (!motivation || motivation.trim().length < 10) {
+        return res.status(400).json({ error: "Du musst dem Boss schon einen guten Grund (min. 10 Zeichen) nennen, warum du auf der Straße nützlich bist." });
+    }
+
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        
+        if (user.isDealer) {
+            return res.status(400).json({ error: "Du gehörst bereits zur Familie. Geh arbeiten!" });
+        }
+
+        const existingApp = await cartelApplicationsCollection.findOne({ userId: userId, status: 'pending' });
+        if (existingApp) {
+            return res.status(400).json({ error: "Deine Akte liegt dem Boss bereits vor. Geduld ist eine Tugend im Geschäft." });
+        }
+
+        await cartelApplicationsCollection.insertOne({
+            userId,
+            username,
+            motivation: motivation.trim().substring(0, 500), // Max 500 Zeichen
+            status: 'pending',
+            createdAt: new Date()
+        });
+
+        console.log(`${LOG_PREFIX_CARTEL} Neue Bewerbung von ${username}.`);
+        res.status(201).json({ message: "Bewerbung abgeschickt. Pass ab jetzt auf deinen Rücken auf." });
+
+    } catch (e) {
+        console.error(`${LOG_PREFIX_CARTEL} Fehler bei der Kartell-Bewerbung:`, e);
+        res.status(500).json({ error: "Die Verbindung zum Untergrund ist abgebrochen." });
+    }
+});
+
+// 2. Automatischer Supply Drop (Nur auf dem Master-Kern!)
+if (cluster.isPrimary) {
+    // Läuft alle 24 Stunden (kannst du zum Testen auf z.B. 60000 = 1 Minute stellen)
+    const CARTEL_DROP_INTERVAL = 24 * 60 * 60 * 1000; 
+
+    setInterval(async () => {
+        console.log(`${LOG_PREFIX_CARTEL} 🚁 Supply Drop startet... Die Ware wird auf den Straßen verteilt.`);
+        
+        try {
+            // 1. Produkt in der DB sicherstellen, damit es im Inventar/Darknet richtig angezeigt wird
+            await productsCollection.updateOne(
+                { id: 'limo_crystals' },
+                { $setOnInsert: { 
+                    id: 'limo_crystals', 
+                    name: 'Limo-Kristalle 💠', 
+                    price: '$0.00', // Darf nicht normal gekauft werden
+                    description: 'Reiner Fokus. Hochgradig illegal. Steigert deine Fähigkeiten drastisch.', 
+                    stock: 0, 
+                    isTokenCard: false, 
+                    image_url: 'https://placehold.co/150/111/0ff?text=CRYSTALS' 
+                } },
+                { upsert: true }
+            );
+
+            // 2. Alle aktiven Dealer suchen
+            const dealers = await usersCollection.find({ isDealer: true }).toArray();
+            if (dealers.length === 0) {
+                console.log(`${LOG_PREFIX_CARTEL} Keine Dealer aktiv. Drop abgebrochen.`);
+                return;
+            }
+
+            const DROP_COST = 25000; // Kosten für den Dealer pro Lieferung
+            const DROP_AMOUNT = 50;  // Menge der Ware pro Lieferung
+            let totalCartelProfit = 0;
+
+            for (const dealer of dealers) {
+                if (dealer.balance >= DROP_COST) {
+                    // A) Dealer bezahlen lassen
+                    await usersCollection.updateOne(
+                        { _id: dealer._id }, 
+                        { $inc: { balance: -DROP_COST }, $set: { cartelStrikes: 0 } } // Reset Strikes bei Erfolg
+                    );
+                    totalCartelProfit += DROP_COST;
+
+                    // B) Ware ins Inventar packen
+                    await inventoriesCollection.updateOne(
+                        { userId: dealer._id, productId: 'limo_crystals' },
+                        { $inc: { quantityOwned: DROP_AMOUNT } },
+                        { upsert: true }
+                    );
+
+                    // C) Geheime Nachricht an den Dealer senden
+                    await mailsCollection.insertOne({
+                        userId: dealer._id,
+                        sender: "Der Boss",
+                        subject: "Lieferung eingetroffen 📦",
+                        content: `Die Lieferung (${DROP_AMOUNT}x Limo-Kristalle) wurde sicher an deinem toten Briefkasten deponiert. Dein Anteil von $${DROP_COST.toLocaleString()} wurde eingezogen. Mach keinen Fehler beim Weiterverkauf.`,
+                        isRead: false, 
+                        isClaimed: false, 
+                        createdAt: new Date()
+                    });
+
+                } else {
+                    // A) Dealer ist pleite -> Verwarnung (Strike)
+                    const strikes = (dealer.cartelStrikes || 0) + 1;
+                    
+                    if (strikes >= 3) {
+                        // Rauswurf beim 3. Strike
+                        await usersCollection.updateOne(
+                            { _id: dealer._id }, 
+                            { $set: { isDealer: false }, $unset: { cartelStrikes: "" } }
+                        );
+                        
+                        await mailsCollection.insertOne({
+                            userId: dealer._id, 
+                            sender: "Der Boss", 
+                            subject: "DU BIST RAUS!",
+                            content: `Du konntest die Lieferung zum dritten Mal in Folge nicht bezahlen. Das Kartell toleriert keine Inkompetenz. Du bist raus. Betrete nie wieder unsere Straßen.`,
+                            isRead: false, 
+                            isClaimed: false, 
+                            createdAt: new Date()
+                        });
+                        console.log(`${LOG_PREFIX_CARTEL} Dealer ${dealer.username} wurde gefeuert (Pleite).`);
+                        
+                    } else {
+                        // Nur ein Strike
+                        await usersCollection.updateOne({ _id: dealer._id }, { $set: { cartelStrikes: strikes } });
+                        await mailsCollection.insertOne({
+                            userId: dealer._id, 
+                            sender: "Der Boss", 
+                            subject: "Lieferung fehlgeschlagen ⚠️",
+                            content: `Du hattest keine $${DROP_COST.toLocaleString()} auf dem Konto! Wir arbeiten nicht auf Pump. Das war Warnung ${strikes}/3. Beim dritten Mal bist du deinen Job los.`,
+                            isRead: false, 
+                            isClaimed: false, 
+                            createdAt: new Date()
+                        });
+                    }
+                }
+            }
+
+            // 3. Den Gesamtprofit in den "Kartell-Fonds" (Geld deiner Freundin) schieben
+            if (totalCartelProfit > 0) {
+                // Hier kannst du das Geld entweder in die SystemSettings schieben oder direkt auf das Konto deiner Freundin!
+                // Aktuell speichern wir es in einem versteckten Fonds, auf den das Boss-Panel zugreifen kann.
+                await systemSettingsCollection.updateOne(
+                    { id: 'cartel_fund' },
+                    { $inc: { balance: totalCartelProfit } },
+                    { upsert: true }
+                );
+                console.log(`${LOG_PREFIX_CARTEL} 💰 Drop beendet. Das Kartell hat $${totalCartelProfit.toLocaleString()} eingenommen.`);
+            }
+
+        } catch (e) {
+            console.error(`${LOG_PREFIX_CARTEL} Kritischer Fehler beim Supply Drop:`, e);
+        }
+    }, CARTEL_DROP_INTERVAL);
+}
+
+// 1. Frontend-Status (Bin ich Dealer? Bin ich in einer Razzia?)
+app.get('/api/cartel/status', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        
+        // Prüfen, ob der User gerade verhört wird
+        const isUnderArrest = user.needsToSnitch === true;
+        const snitchAttemptsLeft = user.snitchAttemptsLeft !== undefined ? user.snitchAttemptsLeft : 3;
+
+        res.json({
+            isDealer: user.isDealer || false,
+            strikes: user.cartelStrikes || 0,
+            isUnderArrest: isUnderArrest,
+            snitchAttemptsLeft: snitchAttemptsLeft
+        });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden des Untergrund-Status." });
+    }
+});
+
+// 2. Drogen konsumieren (Die Würfel fallen!)
+app.post('/api/drugs/use', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    const DRUG_ID = 'limo_crystals';
+
+    const session = client.startSession();
+    try {
+        let resultMessage = "";
+        let eventType = "buff"; // 'buff', 'overdose', 'raid'
+
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            
+            // Verhör-Check: Wer in Handschellen sitzt, kann keine Drogen nehmen
+            if (user.needsToSnitch) throw new Error("Du hast gerade ganz andere Probleme. Das SEK steht in deinem Wohnzimmer!");
+
+            const inventoryItem = await inventoriesCollection.findOne({ userId, productId: DRUG_ID }, { session });
+            if (!inventoryItem || inventoryItem.quantityOwned < 1) {
+                throw new Error("Du hast keine Limo-Kristalle im Inventar.");
+            }
+
+            // 1. Droge abziehen
+            await inventoriesCollection.updateOne(
+                { _id: inventoryItem._id },
+                { $inc: { quantityOwned: -1 } },
+                { session }
+            );
+
+            // 2. Würfeln (85% Buff, 10% Überdosis, 5% Razzia)
+            const roll = Math.random();
+
+            if (roll < 0.85) {
+                // ERFOLG: Mega-Buff (Reset aller Cooldowns & Energie voll)
+                await usersCollection.updateOne(
+                    { _id: userId },
+                    { 
+                        $set: { 
+                            lastWorkedAt: 0, 
+                            lastRobberyAt: 0, 
+                            lastHeistAt: 0 
+                        } 
+                    },
+                    { session }
+                );
+                resultMessage = "Der Fokus kickt rein! Du fühlst dich unbesiegbar. Alle deine Arbeits- und Crime-Cooldowns wurden sofort zurückgesetzt.";
+                
+            } else if (roll < 0.95) {
+                // ÜBERDOSIS (10%)
+                eventType = "overdose";
+                const hospitalBill = 15000;
+                await usersCollection.updateOne(
+                    { _id: userId },
+                    { $inc: { balance: -hospitalBill } },
+                    { session }
+                );
+                // Geld geht an die Staatskasse
+                await systemSettingsCollection.updateOne({ id: 'state_treasury' }, { $inc: { balance: hospitalBill } }, { upsert: true, session });
+                resultMessage = `ÜBERDOSIS! Du wachst im Krankenhaus auf. Die Magenpump-Behandlung hat dich $${hospitalBill.toLocaleString()} gekostet.`;
+
+            } else {
+                // RAZZIA (5%)
+                eventType = "raid";
+                
+                // User wird "eingefroren" und muss einen Namen nennen
+                await usersCollection.updateOne(
+                    { _id: userId },
+                    { 
+                        $set: { 
+                            needsToSnitch: true, 
+                            snitchAttemptsLeft: 3 
+                        } 
+                    },
+                    { session }
+                );
+
+                // Komplettes restliches Drogen-Inventar wird beschlagnahmt
+                await inventoriesCollection.deleteOne({ userId, productId: DRUG_ID }, { session });
+                
+                resultMessage = "RAZZIA! Die Tür fliegt auf, das SEK stürmt rein. Du bist verhaftet. Nenne deinen Dealer oder wandere lebenslang in den Knast!";
+            }
+        });
+
+        res.json({ success: true, event: eventType, message: resultMessage });
+
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// 3. Verhörzimmer (Einen Dealer verpfeifen)
+app.post('/api/cartel/snitch', isAuthenticated, async (req, res) => {
+    const { dealerName } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (!dealerName || dealerName.trim() === "") {
+        return res.status(400).json({ error: "Du musst schon einen Namen nennen." });
+    }
+
+    const session = client.startSession();
+    try {
+        let responseMessage = "";
+
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (!user.needsToSnitch) throw new Error("Du bist gar nicht verhaftet.");
+
+            const attempts = user.snitchAttemptsLeft || 0;
+            if (attempts <= 0) throw new Error("Du hattest deine Chance.");
+
+            // Dealer suchen (Regex für Case-Insensitive, z.B. "kEvIn" = "Kevin")
+            const dealer = await usersCollection.findOne({ 
+                username: { $regex: new RegExp(`^${dealerName.trim()}$`, 'i') },
+                isDealer: true 
+            }, { session });
+
+            if (dealer) {
+                // DEALER IST KORREKT ERKANNT!
+                // 1. User freilassen mit kleiner Strafe
+                const smallFine = 2500;
+                await usersCollection.updateOne(
+                    { _id: userId },
+                    { 
+                        $inc: { balance: -smallFine },
+                        $unset: { needsToSnitch: "", snitchAttemptsLeft: "" }
+                    },
+                    { session }
+                );
+
+                // 2. Dealer vernichten (Drogen weg, Strafe)
+                const dealerFine = 50000;
+                await usersCollection.updateOne(
+                    { _id: dealer._id },
+                    { $inc: { balance: -dealerFine } }, // Geht ggf. ins Minus
+                    { session }
+                );
+                await inventoriesCollection.deleteOne({ userId: dealer._id, productId: 'limo_crystals' }, { session });
+
+                // 3. LNN News für maximales Drama
+                await newsCollection.insertOne({
+                    headline: "VERRAT IM UNTERGRUND! 🚨",
+                    content: `Das SEK hat die Bude von ${dealer.username} gestürmt! Zehntausende Limo-Kristalle wurden beschlagnahmt. Ein kleiner Fisch hat gesungen!`,
+                    author: "LNN Justiz",
+                    category: "Verbrechen",
+                    createdAt: new Date(),
+                    likes: 0
+                }, { session });
+                updateDataVersion('news'); // Frontend-Trigger
+				
+				await logActivity(req, "USER_SNITCHED", { 
+                    dealerName: dealer.username, 
+                    snitcher: req.session.username 
+                });
+
+                responseMessage = `Deal akzeptiert! Du wurdest mit einer kleinen Strafe ($${smallFine}) freigelassen. ${dealer.username} kriegt gerade Besuch vom SEK. Pass auf dich auf!`;
+
+            } else {
+                // FALSCHER NAME (Versuch abziehen)
+                const newAttempts = attempts - 1;
+                
+                if (newAttempts > 0) {
+                    await usersCollection.updateOne(
+                        { _id: userId },
+                        { $set: { snitchAttemptsLeft: newAttempts } },
+                        { session }
+                    );
+                    throw new Error(`Wir konnten diesen Dealer nicht finden. Verarsch uns nicht! Du hast noch ${newAttempts} Versuche.`);
+                } else {
+                    // MAXIMALE VERSUCHE ERREICHT -> HARTE STRAFE
+                    const brutalFine = Math.floor(user.balance * 0.5); // 50% vom Geld weg
+                    await usersCollection.updateOne(
+                        { _id: userId },
+                        { 
+                            $inc: { balance: -brutalFine },
+                            $set: { schufaScore: 0 },
+                            $unset: { needsToSnitch: "", snitchAttemptsLeft: "" }
+                        },
+                        { session }
+                    );
+
+                    responseMessage = `Zeit abgelaufen! Da du nicht kooperieren willst, sperren wir dich weg. Dein Konto wurde um 50% ($${brutalFine.toLocaleString()}) gepfändet und deine Schufa ist auf 0 gefallen.`;
+                }
+            }
+        });
+
+        res.json({ message: responseMessage });
+
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// 4. Admin (Boss): Verräter-Akte einsehen
+app.post('/api/cartel/boss/hack-files', isAuthenticated, isAdmin, async (req, res) => {
+    // Nur der Boss soll das können (oder wer immer Admin ist)
+    const { dealerUsername } = req.body;
+    const HACK_COST = 500000; // 500k Gebühr für die Info
+
+    try {
+        const admin = await usersCollection.findOne({ _id: new ObjectId(req.session.userId) });
+        if (admin.balance < HACK_COST) return res.status(400).json({ error: "Diese Information kostet $500.000!" });
+
+        // Wir suchen in den activityLogs nach dem "Verrat-Event"
+        // Hinweis: Damit das klappt, müsste die Snitch-Route (siehe unten) das Ereignis loggen.
+        const logs = await db.collection('activityLogs')
+            .find({ 
+                action: "USER_SNITCHED", 
+                "details.dealerName": { $regex: new RegExp(`^${dealerUsername}$`, 'i') } 
+            })
+            .sort({ timestamp: -1 })
+            .limit(5)
+            .toArray();
+
+        if (logs.length === 0) return res.json({ message: "Keine Verrats-Spuren für diesen Dealer gefunden." });
+
+        res.json({ success: true, betrayalLogs: logs });
+
+    } catch (e) {
+        res.status(500).json({ error: "Das System ist verschlüsselt." });
+    }
 });
 
 app.use((req, res) => {
