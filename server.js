@@ -5363,7 +5363,8 @@ app.put('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
             
             if (role !== undefined) {
                 updateData.role = role;
-                updateData.isAdmin = (role === 'admin'); 
+                // Prüft nur auf echte Rollen, die das Flag bekommen sollen
+                updateData.isAdmin = ['admin', 'owner'].includes(role); 
             }
             if (permissions !== undefined) {
                 updateData.permissions = permissions;
