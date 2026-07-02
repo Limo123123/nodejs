@@ -7035,6 +7035,107 @@ app.post('/api/casino/flip', isAuthenticated, async (req, res) => {
     }
 });
 
+// 3. Slot-Maschine spielen (POST)
+app.post('/api/casino/slots', isAuthenticated, async (req, res) => {
+    const { betAmount } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (!betAmount || typeof betAmount !== 'number' || betAmount <= 0) {
+        return res.status(400).json({ error: "Ungültiger Einsatz." });
+    }
+
+    const session = client.startSession();
+    try {
+        let resultData = {};
+
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (!user) throw new Error("User nicht gefunden.");
+
+            if (user.balance < betAmount) {
+                throw new Error(`Nicht genügend Guthaben. Du hast nur $${user.balance.toFixed(2)}.`);
+            }
+
+            // --- DIE WALZEN ---
+            const symbols = ['🍒', '🍋', '🍇', '🔔', '💎', '7️⃣'];
+            const roll = [
+                symbols[Math.floor(Math.random() * symbols.length)],
+                symbols[Math.floor(Math.random() * symbols.length)],
+                symbols[Math.floor(Math.random() * symbols.length)]
+            ];
+
+            let multiplier = 0;
+            let message = "";
+
+            // Gewinnlogik auswerten
+            if (roll[0] === roll[1] && roll[1] === roll[2]) {
+                // 3 Gleiche! Jackpot!
+                if (roll[0] === '7️⃣') multiplier = 50;
+                else if (roll[0] === '💎') multiplier = 25;
+                else multiplier = 10;
+                message = `JACKPOT! 3x ${roll[0]}! Du gewinnst das ${multiplier}-fache!`;
+            } else if (roll[0] === roll[1] || roll[1] === roll[2] || roll[0] === roll[2]) {
+                // 2 Gleiche (Kleiner Trostpreis)
+                multiplier = 1.5;
+                message = `Immerhin 2 Gleiche! Du hast deinen Einsatz vermehrt.`;
+            } else {
+                // Niete
+                multiplier = 0;
+                message = "Niete! Keine Übereinstimmungen. Viel Glück beim nächsten Mal!";
+            }
+
+            const winAmount = betAmount * multiplier;
+            const balanceChange = winAmount - betAmount; // Netto-Gewinn/Verlust
+            const userWon = winAmount > 0;
+
+            const updateFields = {
+                $inc: {
+                    balance: balanceChange,
+                    "casinoStats.totalWagered": betAmount,
+                    "casinoStats.netProfit": balanceChange
+                }
+            };
+
+            if (userWon) {
+                updateFields.$inc["casinoStats.wins"] = 1;
+            } else {
+                updateFields.$inc["casinoStats.losses"] = 1;
+                // Verlorenes Geld in den Lotto-Topf werfen
+                await systemSettingsCollection.updateOne(
+                    { id: 'lottery_state' },
+                    { $inc: { pot: betAmount } },
+                    { upsert: true, session }
+                );
+            }
+
+            await usersCollection.updateOne({ _id: userId }, updateFields, { session });
+
+            resultData = {
+                won: userWon,
+                slots: roll,
+                payout: winAmount,
+                balanceChange: balanceChange,
+                message: message
+            };
+        });
+
+        const updatedUser = await usersCollection.findOne({ _id: userId }, { projection: { balance: 1, casinoStats: 1 } });
+        
+        console.log(`${LOG_PREFIX_SERVER} 🎰 User ${req.session.username} Slots: Setzt ${betAmount} -> ${resultData.slots.join('|')} (${resultData.won ? "WIN" : "LOSE"})`);
+
+        res.json({
+            ...resultData,
+            newBalance: updatedUser.balance,
+            stats: updatedUser.casinoStats
+        });
+
+    } catch (err) {
+        res.status(400).json({ error: err.message || "Der Hebel der Slot-Maschine klemmt." });
+    } finally {
+        await session.endSession();
+    }
+});
+
 // =========================================================
 // === JOB CENTER SYSTEM (API) ===
 // =========================================================
@@ -13288,8 +13389,39 @@ app.get('/api/limea/visit/:houseId', isAuthenticated, async (req, res) => {
 app.get('/api/limea/layouts', isAuthenticated, async (req, res) => {
     try {
         const layouts = await limeaLayoutsCollection.find({}).sort({ createdAt: -1 }).limit(50).toArray();
-        res.json({ layouts });
+
+        // Layouts mit benötigten Möbeln (Stückzahl & Preis) anreichern
+        const enrichedLayouts = layouts.map(layoutDoc => {
+            const requirements = {};
+            let totalCost = 0;
+
+            if (layoutDoc.layout && Array.isArray(layoutDoc.layout)) {
+                layoutDoc.layout.forEach(item => {
+                    if (!requirements[item.id]) {
+                        const catalogItem = LIMEA_CATALOG.find(c => c.id === item.id);
+                        requirements[item.id] = {
+                            id: item.id,
+                            name: catalogItem ? catalogItem.name : 'Unbekanntes Möbelstück',
+                            icon: catalogItem ? catalogItem.icon : '📦',
+                            price: catalogItem ? catalogItem.price : 0,
+                            count: 0
+                        };
+                    }
+                    requirements[item.id].count += 1;
+                    totalCost += requirements[item.id].price;
+                });
+            }
+
+            return {
+                ...layoutDoc,
+                requiredItems: Object.values(requirements), // Macht aus dem Objekt ein flaches Array fürs Frontend
+                totalCost: totalCost
+            };
+        });
+
+        res.json({ layouts: enrichedLayouts });
     } catch (e) {
+        console.error("Fehler bei Limea Layouts:", e);
         res.status(500).json({ error: "Fehler beim Laden des Layout-Stores." });
     }
 });
@@ -14316,31 +14448,48 @@ app.post('/api/standesamt/divorce', isAuthenticated, async (req, res) => {
             const user = await usersCollection.findOne({ _id: userId }, { session });
             if (user.balance < DIVORCE_COST) throw new Error(`Du brauchst $${DIVORCE_COST.toLocaleString()} für den Anwalt.`);
 
-            const targetObjId = new ObjectId(targetId);
-            
-            // Checken ob sie wirklich verheiratet sind
-            if (!user.spouses || !user.spouses.some(s => s.id.equals(targetObjId))) {
+            // Sicherstellen, dass die Ziel-ID als String für den Vergleich vorliegt
+            const targetIdString = targetId.toString();
+
+            // Checken, ob sie wirklich verheiratet sind (robuster String-Vergleich)
+            if (!user.spouses || !user.spouses.some(s => s.id && s.id.toString() === targetIdString)) {
                 throw new Error("Ihr seid nicht verheiratet.");
             }
 
-            const exSpouse = await usersCollection.findOne({ _id: targetObjId }, { session });
+            // Ex-Partner in der DB suchen (könnte null sein, wenn Account gelöscht wurde!)
+            let targetObjId;
+            try {
+                targetObjId = new ObjectId(targetIdString);
+            } catch(e) {
+                targetObjId = null; // Fallback, falls die ID komplett korrupt ist
+            }
+            
+            const exSpouse = targetObjId ? await usersCollection.findOne({ _id: targetObjId }, { session }) : null;
+            const exName = exSpouse ? exSpouse.username : "Unbekannt (Gelöschter Account)";
 
-            // Geld abziehen
+            // 1. Geld abziehen
             await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -DIVORCE_COST } }, { session });
 
-            // Aus den Arrays löschen
-            await usersCollection.updateOne({ _id: userId }, { $pull: { spouses: { id: targetObjId } } }, { session });
-            await usersCollection.updateOne({ _id: targetObjId }, { $pull: { spouses: { id: userId } } }, { session });
+            // 2. Aus dem EIGENEN Array löschen (Javascript-Filter ist sicherer als MongoDB $pull bei korrupten IDs)
+            const myNewSpouses = user.spouses.filter(s => s.id && s.id.toString() !== targetIdString);
+            await usersCollection.updateOne({ _id: userId }, { $set: { spouses: myNewSpouses } }, { session });
 
-            // LNN News Drama!
+            // 3. Aus dem fremden Array löschen (NUR, wenn der Ex-Partner noch in der DB existiert)
+            if (exSpouse) {
+                const exNewSpouses = (exSpouse.spouses || []).filter(s => s.id && s.id.toString() !== userId.toString());
+                await usersCollection.updateOne({ _id: targetObjId }, { $set: { spouses: exNewSpouses } }, { session });
+            }
+
+            // 4. LNN News Drama!
             await newsCollection.insertOne({
                 headline: `BITTERE SCHEIDUNG! 💔`,
-                content: `Das Märchen ist vorbei! ${userName} hat die Scheidung von ${exSpouse.username} eingereicht. Die Anwälte reiben sich die Hände.`,
+                content: `Das Märchen ist vorbei! ${userName} hat die Scheidung von ${exName} eingereicht. Die Anwälte reiben sich die Hände.`,
                 author: "LNN Klatsch & Tratsch",
                 category: "Community",
                 createdAt: new Date(),
                 likes: 0
             }, { session });
+            
             updateDataVersion('news');
         });
 
