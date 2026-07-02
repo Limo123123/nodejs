@@ -7067,21 +7067,21 @@ app.post('/api/casino/slots', isAuthenticated, async (req, res) => {
             let multiplier = 0;
             let message = "";
 
-            // Gewinnlogik auswerten
+            // --- GEWINNLOGIK ---
             if (roll[0] === roll[1] && roll[1] === roll[2]) {
                 // 3 Gleiche! Jackpot!
                 if (roll[0] === '7️⃣') multiplier = 50;
                 else if (roll[0] === '💎') multiplier = 25;
                 else multiplier = 10;
-                message = `JACKPOT! 3x ${roll[0]}! Du gewinnst das ${multiplier}-fache!`;
-            } else if (roll[0] === roll[1] || roll[1] === roll[2] || roll[0] === roll[2]) {
-                // 2 Gleiche (Kleiner Trostpreis)
-                multiplier = 1.5;
-                message = `Immerhin 2 Gleiche! Du hast deinen Einsatz vermehrt.`;
+                message = `JACKPOT! 3x ${roll[0]}! ${multiplier}x Einsatz!`;
+            } else if (roll[0] === roll[1]) {
+                // Nur die ersten zwei gleich (von links nach rechts)
+                multiplier = 1.2;
+                message = `2 in einer Reihe! Ein kleiner Trostpreis (${multiplier}x).`;
             } else {
-                // Niete
+                // Niete! Das Haus freut sich.
                 multiplier = 0;
-                message = "Niete! Keine Übereinstimmungen. Viel Glück beim nächsten Mal!";
+                message = "Niete! Dein Geld gehört jetzt dem Casino.";
             }
 
             const winAmount = betAmount * multiplier;
@@ -7100,7 +7100,7 @@ app.post('/api/casino/slots', isAuthenticated, async (req, res) => {
                 updateFields.$inc["casinoStats.wins"] = 1;
             } else {
                 updateFields.$inc["casinoStats.losses"] = 1;
-                // Verlorenes Geld in den Lotto-Topf werfen
+                // Alles verlorene Geld fließt direkt in den Lotto-Jackpot!
                 await systemSettingsCollection.updateOne(
                     { id: 'lottery_state' },
                     { $inc: { pot: betAmount } },
