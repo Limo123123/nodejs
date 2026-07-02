@@ -1,4 +1,4 @@
-version: 47
+version: 52
 jobs:
 - name: Generate NPM Package
   steps:
@@ -15,7 +15,7 @@ jobs:
     runInContainer: true
     image: node:20
     interpreter:
-      type: ShellInterpreter
+      type: PosixInterpreter
       shell: bash
       commands: "wget http://ftp.de.debian.org/debian/pool/main/z/zip/zip_3.0-13_arm64.deb\n\ndpkg -i zip_3.0-13_arm64.deb \n\nnpm install\nnpm install cors\nnpm install express\nnpm run build\nls\nrm -rf .git\nzip -r latest.zip .\n"
     runAs: 0:0
@@ -54,7 +54,8 @@ jobs:
     runInContainer: true
     image: curlimages/curl:latest
     interpreter:
-      type: DefaultInterpreter
+      type: PosixInterpreter
+      shell: sh
       commands: |
         curl -X POST http://192.168.178.183:9005@secret:update@
     runAs: 0:0
@@ -65,6 +66,41 @@ jobs:
   - type: BranchUpdateTrigger
     userMatch: anyone
     projects: limazon/nodejs
+  retryCondition: never
+  maxRetries: 3
+  retryDelay: 30
+  timeout: 14400
+- name: Git Pull
+  steps:
+  - type: CheckoutStep
+    name: Get Code
+    cloneCredential:
+      type: DefaultCredential
+    withLfs: false
+    withSubmodules: false
+    condition: SUCCESSFUL
+    optional: false
+  - type: PullRepository
+    name: Pull
+    remoteUrl: https://github.com/Limo123123/nodejs.git
+    refs: refs/heads/* refs/tags/*
+    withLfs: false
+    force: false
+    condition: SUCCESSFUL
+    optional: false
+  - type: CommandStep
+    name: Update Server
+    runInContainer: true
+    image: curlimages/curl:latest
+    interpreter:
+      type: PosixInterpreter
+      shell: sh
+      commands: |
+        curl -X POST http://192.168.178.183:9005@secret:update@
+    runAs: 0:0
+    useTTY: true
+    condition: SUCCESSFUL
+    optional: false
   retryCondition: never
   maxRetries: 3
   retryDelay: 30
