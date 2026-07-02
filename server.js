@@ -12573,7 +12573,7 @@ app.post('/api/lottery/buy', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
     
     // Sicherheit: Minimum 1, Maximum 100 Lose pro Kauf (um Spam zu vermeiden)
-    const amount = Math.min(Math.max(parseInt(count) || 1, 1), 100); 
+    const amount = Math.min(Math.max(parseInt(count) || 1, 1), 10000); 
     const totalCost = amount * TICKET_PRICE;
 
     try {
