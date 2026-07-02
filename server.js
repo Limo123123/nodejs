@@ -5,7 +5,6 @@ const dotenv = require('dotenv');
 const os = require('os');
 const helmet = require('helmet');
 const multer = require('multer');
-const dns = require("dns").promises;
 const sharp = require('sharp');
 sharp.concurrency(1);
 const { createProxyMiddleware } = require('http-proxy-middleware');
