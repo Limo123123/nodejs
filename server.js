@@ -17056,11 +17056,14 @@ app.post('/api/casino/blackjack/start', isAuthenticated, async (req, res) => {
             const user = await usersCollection.findOne({ _id: userId }, { session });
             if (user.balance < betAmount) throw new Error("Nicht genug Geld.");
             
-            // FIX: Wenn noch ein altes Spiel im Speicher hängt, wird es als Verlust abgerechnet
+            // FIX: Wenn noch ein altes Spiel im Speicher hängt, wird es als Verlust abgerechnet und GESTRICHEN!
             if (user.activeBlackjack) {
                 await usersCollection.updateOne(
                     { _id: userId },
-                    { $inc: { "casinoStats.losses": 1, "casinoStats.netProfit": -user.activeBlackjack.bet } }, 
+                    { 
+                        $inc: { "casinoStats.losses": 1, "casinoStats.netProfit": -user.activeBlackjack.bet },
+                        $unset: { activeBlackjack: "" } // <-- DAS HAT GEFEHLT! Tötet das Geisterspiel.
+                    }, 
                     { session }
                 );
                 // Das Geld vom abgebrochenen Spiel wandert in den Lotto-Pot
@@ -17089,7 +17092,7 @@ app.post('/api/casino/blackjack/start', isAuthenticated, async (req, res) => {
                     { _id: userId }, 
                     { 
                         $inc: { balance: winAmount, "casinoStats.wins": 1, "casinoStats.netProfit": (winAmount - betAmount) },
-                        $set: { activeBlackjack: null }
+                        $unset: { activeBlackjack: "" } // Auch hier sauber unsetten!
                     }, { session }
                 );
                 gameState.payout = winAmount;
