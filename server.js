@@ -13501,7 +13501,11 @@ const PET_CATALOG = [
     { id: 'skeleton_horse', name: 'Skelettpferd', icon: '🐎💀', enclosure: 'Friedhof 🪦', price: 25000, starvationTimeHours: 999 },
     { id: 'dalmatian', name: 'Dalmatiner', icon: '🐕', enclosure: 'Hundehütte 🛖', price: 800, starvationTimeHours: 24 },
     { id: 'cerberus', name: 'Dreiköpfiger Hund', icon: '🐕‍🦺', enclosure: 'Unterwelt 🌋', price: 75000, starvationTimeHours: 48 },
-	{ id: 'human', name: 'Mensch', icon: '🧑', enclosure: 'Haus 🏠', price: 100000, starvationTimeHours: 48 }
+	{ id: 'human', name: 'Mensch', icon: '🧑', enclosure: 'Haus 🏠', price: 100000, starvationTimeHours: 48 },
+    { id: 'monkey', name: 'Affe', icon: '🐒', enclosure: 'Dschungelbaum 🌴', price: 2500, starvationTimeHours: 24 },
+    { id: 'capybara', name: 'Capybara', icon: '🦦', enclosure: 'Heiße Quelle ♨️', price: 4000, starvationTimeHours: 48 },
+    { id: 'golden_retriever', name: 'Golden Retriever', icon: '🦮', enclosure: 'Hundehütte 🛖', price: 1000, starvationTimeHours: 24 },
+    { id: 'dino', name: 'Dinosaurier', icon: '🦖', enclosure: 'Jurassic Park 🌋', price: 500000, starvationTimeHours: 120 },
 ];
 
 const FEED_COST = 15; // $15 pro Fütterung
@@ -17012,6 +17016,406 @@ app.post('/api/cartel/boss/hack-files', isAuthenticated, isAdmin, async (req, re
 
     } catch (e) {
         res.status(500).json({ error: "Das System ist verschlüsselt." });
+    }
+});
+
+// =========================================================
+// === CASINO: BLACKJACK (PvE) ===
+// =========================================================
+
+// Hilfsfunktionen für Blackjack
+function drawCard() {
+    const cards = ['2','3','4','5','6','7','8','9','10','J','Q','K','A'];
+    const suits = ['♠️','♥️','♦️','♣️'];
+    const val = cards[Math.floor(Math.random() * cards.length)];
+    const suit = suits[Math.floor(Math.random() * suits.length)];
+    let points = parseInt(val);
+    if (['J','Q','K'].includes(val)) points = 10;
+    if (val === 'A') points = 11;
+    return { card: val + suit, points, val };
+}
+
+function calculateHand(hand) {
+    let sum = 0; let aces = 0;
+    for (let c of hand) { sum += c.points; if (c.val === 'A') aces++; }
+    while (sum > 21 && aces > 0) { sum -= 10; aces--; } // Ass wird von 11 zu 1
+    return sum;
+}
+
+// 1. Spiel starten (Einsatz abziehen & erste Karten austeilen)
+app.post('/api/casino/blackjack/start', isAuthenticated, async (req, res) => {
+    const { betAmount } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (!betAmount || betAmount <= 0) return res.status(400).json({ error: "Ungültiger Einsatz." });
+
+    const session = client.startSession();
+    try {
+        let gameState = {};
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (user.balance < betAmount) throw new Error("Nicht genug Geld.");
+            if (user.activeBlackjack) throw new Error("Du hast noch ein laufendes Spiel!");
+
+            // Einsatz abziehen
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -betAmount } }, { session });
+
+            // Karten austeilen
+            const playerHand = [drawCard(), drawCard()];
+            const dealerHand = [drawCard()]; // Dealer bekommt erstmal nur eine offene
+
+            gameState = {
+                bet: betAmount,
+                playerHand,
+                dealerHand,
+                status: 'playing' // 'playing', 'won', 'lost', 'push'
+            };
+
+            // Prüfen auf sofortigen Blackjack (21 mit 2 Karten)
+            if (calculateHand(playerHand) === 21) {
+                gameState.status = 'won';
+                const winAmount = betAmount * 2.5; // Blackjack zahlt 3:2!
+                await usersCollection.updateOne(
+                    { _id: userId }, 
+                    { 
+                        $inc: { balance: winAmount, "casinoStats.wins": 1, "casinoStats.netProfit": (winAmount - betAmount) },
+                        $set: { activeBlackjack: null }
+                    }, { session }
+                );
+                gameState.payout = winAmount;
+                gameState.message = "BLACKJACK! Du hast sofort gewonnen!";
+            } else {
+                // Spiel läuft weiter
+                await usersCollection.updateOne({ _id: userId }, { $set: { activeBlackjack: gameState } }, { session });
+            }
+        });
+
+        res.json(gameState);
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// 2. Aktion ausführen (Hit, Stand, Double)
+app.post('/api/casino/blackjack/action', isAuthenticated, async (req, res) => {
+    const { action } = req.body; // 'hit', 'stand', 'double'
+    const userId = new ObjectId(req.session.userId);
+
+    const session = client.startSession();
+    try {
+        let finalState = {};
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            let game = user.activeBlackjack;
+            
+            if (!game || game.status !== 'playing') throw new Error("Kein aktives Spiel gefunden.");
+
+            // DOUBLE DOWN Logik
+            if (action === 'double') {
+                if (game.playerHand.length > 2) throw new Error("Double Down nur bei den ersten 2 Karten möglich.");
+                if (user.balance < game.bet) throw new Error("Nicht genug Geld zum Verdoppeln!");
+                
+                // Weiteren Einsatz abziehen
+                await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -game.bet } }, { session });
+                game.bet *= 2;
+                
+                // Bekommt exakt noch EINE Karte
+                game.playerHand.push(drawCard());
+            } 
+            // NORMALE HIT Logik
+            else if (action === 'hit') {
+                game.playerHand.push(drawCard());
+            }
+
+            let playerTotal = calculateHand(game.playerHand);
+
+            // BUST CHECK (Über 21)
+            if (playerTotal > 21) {
+                game.status = 'lost';
+                game.message = "BUST! Über 21. Du verlierst.";
+                await usersCollection.updateOne(
+                    { _id: userId }, 
+                    { 
+                        $set: { activeBlackjack: null },
+                        $inc: { "casinoStats.losses": 1, "casinoStats.netProfit": -game.bet }
+                    }, { session }
+                );
+                await systemSettingsCollection.updateOne({ id: 'lottery_state' }, { $inc: { pot: game.bet } }, { upsert: true, session });
+                finalState = game;
+                return;
+            }
+
+            // STAND ODER DOUBLE (Dealer zieht)
+            if (action === 'stand' || action === 'double') {
+                // Dealer zieht bis mindestens 17
+                let dealerTotal = calculateHand(game.dealerHand);
+                while (dealerTotal < 17) {
+                    game.dealerHand.push(drawCard());
+                    dealerTotal = calculateHand(game.dealerHand);
+                }
+
+                // Auswertung
+                if (dealerTotal > 21 || playerTotal > dealerTotal) {
+                    game.status = 'won';
+                    const winAmount = game.bet * 2;
+                    game.payout = winAmount;
+                    game.message = `Gewonnen! Dealer hat ${dealerTotal}, du hast ${playerTotal}.`;
+                    await usersCollection.updateOne(
+                        { _id: userId }, 
+                        { 
+                            $inc: { balance: winAmount, "casinoStats.wins": 1, "casinoStats.netProfit": (winAmount - game.bet) },
+                            $set: { activeBlackjack: null }
+                        }, { session }
+                    );
+                } else if (playerTotal < dealerTotal) {
+                    game.status = 'lost';
+                    game.message = `Verloren! Dealer hat ${dealerTotal}, du hast ${playerTotal}.`;
+                    await usersCollection.updateOne(
+                        { _id: userId }, 
+                        { 
+                            $set: { activeBlackjack: null },
+                            $inc: { "casinoStats.losses": 1, "casinoStats.netProfit": -game.bet }
+                        }, { session }
+                    );
+                    await systemSettingsCollection.updateOne({ id: 'lottery_state' }, { $inc: { pot: game.bet } }, { upsert: true, session });
+                } else {
+                    game.status = 'push';
+                    game.message = "PUSH! Unentschieden. Einsatz zurück.";
+                    await usersCollection.updateOne(
+                        { _id: userId }, 
+                        { 
+                            $inc: { balance: game.bet }, // Einsatz zurück
+                            $set: { activeBlackjack: null }
+                        }, { session }
+                    );
+                }
+            } else {
+                // Bei "Hit" und < 21 einfach Zustand updaten
+                await usersCollection.updateOne({ _id: userId }, { $set: { activeBlackjack: game } }, { session });
+            }
+
+            finalState = game;
+        });
+
+        res.json(finalState);
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// =========================================================
+// === 🃏 CASINO: MULTIPLAYER BLACKJACK (P2P / WEBRTC) ===
+// =========================================================
+
+// 1. Tisch eröffnen (Host)
+app.post('/api/casino/p2p/host', isAuthenticated, async (req, res) => {
+    const hostId = req.session.userId;
+    let roomCode = generateRoomCode(); // Nutzt deine bestehende Funktion von Among Us
+    
+    while (await global.redisPub.exists(`casino_room:${roomCode}`)) {
+        roomCode = generateRoomCode();
+    }
+
+    const roomData = {
+        hostId: hostId,
+        hostName: req.session.username,
+        guests: [], 
+        signals: [], 
+        lockedBets: {}, // Hier speichern wir das Geld, solange die Runde läuft
+        createdAt: Date.now()
+    };
+
+    // Tisch bleibt 2 Stunden aktiv
+    await global.redisPub.setEx(`casino_room:${roomCode}`, 7200, JSON.stringify(roomData)); 
+    console.log(`${LOG_PREFIX_SERVER} [Casino P2P] Tisch ${roomCode} von ${req.session.username} eröffnet.`);
+    res.json({ roomCode, playerId: hostId, isHost: true });
+});
+
+// 2. An den Tisch setzen (Join)
+app.post('/api/casino/p2p/join', isAuthenticated, async (req, res) => {
+    const { roomCode } = req.body;
+    const guestId = req.session.userId;
+    const redisKey = `casino_room:${roomCode.toUpperCase()}`;
+
+    const roomRaw = await global.redisPub.get(redisKey);
+    if (!roomRaw) return res.status(404).json({ error: "Dieser Tisch existiert nicht oder wurde geschlossen." });
+    
+    const room = JSON.parse(roomRaw);
+    
+    const isAlreadyIn = room.guests.some(g => g.id === guestId);
+    if (!isAlreadyIn) {
+        if (room.guests.length >= 5) return res.status(400).json({ error: "Der Tisch ist voll (Max 6 Spieler)." });
+        
+        room.guests.push({ id: guestId, name: req.session.username });
+        await global.redisPub.setEx(redisKey, 7200, JSON.stringify(room));
+    }
+
+    console.log(`${LOG_PREFIX_SERVER} [Casino P2P] ${req.session.username} hat sich an Tisch ${roomCode} gesetzt.`);
+    res.json({ roomCode: roomCode.toUpperCase(), playerId: guestId, isHost: false, hostId: room.hostId });
+});
+
+// 3. WebRTC Signale austauschen (Direkte Kommunikation am Tisch)
+app.post('/api/casino/p2p/signal', isAuthenticated, async (req, res) => {
+    const { roomCode, targetId, signal } = req.body;
+    const senderId = req.session.userId;
+    const redisKey = `casino_room:${roomCode.toUpperCase()}`;
+
+    const roomRaw = await global.redisPub.get(redisKey);
+    if (!roomRaw) return res.status(404).json({ error: "Tisch nicht gefunden." });
+    
+    const room = JSON.parse(roomRaw);
+    room.signals.push({ from: senderId, to: targetId, signal });
+    
+    await global.redisPub.setEx(redisKey, 7200, JSON.stringify(room));
+    res.json({ success: true });
+});
+
+// 4. Signale abrufen (Polling für die Spieler)
+app.get('/api/casino/p2p/signal/:roomCode', isAuthenticated, async (req, res) => {
+    const { roomCode } = req.params;
+    const receiverId = req.session.userId;
+    const redisKey = `casino_room:${roomCode.toUpperCase()}`;
+
+    const roomRaw = await global.redisPub.get(redisKey);
+    if (!roomRaw) return res.json({ signals: [], guests: [] });
+
+    const room = JSON.parse(roomRaw);
+    const mySignals = room.signals.filter(s => s.to === receiverId);
+    
+    if (mySignals.length > 0) {
+        room.signals = room.signals.filter(s => s.to !== receiverId);
+        await global.redisPub.setEx(redisKey, 7200, JSON.stringify(room));
+    }
+    
+    res.json({ signals: mySignals, guests: room.guests, hostName: room.hostName, lockedBets: room.lockedBets });
+});
+
+// 5. EINSATZ SPERREN (TREUHAND) - Wird aufgerufen, wenn ein Spieler wettet
+app.post('/api/casino/p2p/bet', isAuthenticated, async (req, res) => {
+    const { roomCode, amount } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const redisKey = `casino_room:${roomCode.toUpperCase()}`;
+    const betAmount = parseFloat(amount);
+
+    if (!betAmount || betAmount <= 0) return res.status(400).json({ error: "Ungültiger Einsatz." });
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (user.balance < betAmount) throw new Error("Du hast nicht genug Geld für diesen Einsatz.");
+
+            const roomRaw = await global.redisPub.get(redisKey);
+            if (!roomRaw) throw new Error("Tisch nicht gefunden.");
+            const room = JSON.parse(roomRaw);
+
+            // Geld in der DB abziehen
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -betAmount } }, { session });
+
+            // Einsatz im Redis-Raum sichern
+            room.lockedBets[req.session.userId] = (room.lockedBets[req.session.userId] || 0) + betAmount;
+            
+            await global.redisPub.setEx(redisKey, 7200, JSON.stringify(room));
+        });
+
+        res.json({ success: true, message: `Einsatz von $${betAmount} gelockt.` });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// 6. RUNDE AUSWERTEN (Host sendet die Ergebnisse)
+app.post('/api/casino/p2p/resolve', isAuthenticated, async (req, res) => {
+    const { roomCode, results } = req.body; 
+    // results Format: { "userId1": "win", "userId2": "lose", "userId3": "blackjack", "userId4": "push" }
+    
+    const hostId = req.session.userId;
+    const redisKey = `casino_room:${roomCode.toUpperCase()}`;
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const roomRaw = await global.redisPub.get(redisKey);
+            if (!roomRaw) throw new Error("Tisch nicht gefunden.");
+            const room = JSON.parse(roomRaw);
+
+            // Nur der Host darf die Runde beenden
+            if (room.hostId !== hostId) throw new Error("Nur der Dealer (Host) kann die Runde auswerten.");
+
+            // Alle Einsätze durchgehen
+            for (const [playerIdStr, betAmount] of Object.entries(room.lockedBets)) {
+                const outcome = results[playerIdStr];
+                const playerObjectId = new ObjectId(playerIdStr);
+                
+                let payout = 0;
+                let netProfit = -betAmount;
+                let isWin = false;
+
+                if (outcome === 'win') {
+                    payout = betAmount * 2;
+                    netProfit = betAmount;
+                    isWin = true;
+                } else if (outcome === 'blackjack') {
+                    payout = betAmount * 2.5; // 3:2 Auszahlung
+                    netProfit = betAmount * 1.5;
+                    isWin = true;
+                } else if (outcome === 'push') {
+                    payout = betAmount; // Einsatz zurück
+                    netProfit = 0;
+                } else {
+                    // Lose -> Geld bleibt weg. Das Casino freut sich.
+                    // Das verlorene Geld in den Lotto-Topf werfen
+                    await systemSettingsCollection.updateOne(
+                        { id: 'lottery_state' },
+                        { $inc: { pot: betAmount } },
+                        { upsert: true, session }
+                    );
+                }
+
+                if (payout > 0) {
+                    await usersCollection.updateOne(
+                        { _id: playerObjectId }, 
+                        { 
+                            $inc: { 
+                                balance: payout,
+                                "casinoStats.totalWagered": betAmount,
+                                "casinoStats.netProfit": netProfit,
+                                "casinoStats.wins": isWin ? 1 : 0
+                            }
+                        }, 
+                        { session }
+                    );
+                } else {
+                    await usersCollection.updateOne(
+                        { _id: playerObjectId }, 
+                        { 
+                            $inc: { 
+                                "casinoStats.totalWagered": betAmount,
+                                "casinoStats.netProfit": netProfit,
+                                "casinoStats.losses": 1
+                            }
+                        }, 
+                        { session }
+                    );
+                }
+            }
+
+            // Einsätze nach der Runde leeren
+            room.lockedBets = {};
+            await global.redisPub.setEx(redisKey, 7200, JSON.stringify(room));
+        });
+
+        res.json({ success: true, message: "Runde abgerechnet. Einsätze wurden ausgezahlt." });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
     }
 });
 
