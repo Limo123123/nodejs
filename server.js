@@ -4730,6 +4730,7 @@ app.post('/api/bank/transfer', isAuthenticated, async (req, res) => {
     const { recipientName, amount, type, reason, highLimitMode } = req.body;
     const senderId = new ObjectId(req.session.userId);
     const senderName = req.session.username;
+	let fee = 0;
 
     // Standard Limits
     const MAX_MONEY_TRANSFER = 1000000;
