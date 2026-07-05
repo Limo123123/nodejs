@@ -17055,9 +17055,19 @@ app.post('/api/casino/blackjack/start', isAuthenticated, async (req, res) => {
         await session.withTransaction(async () => {
             const user = await usersCollection.findOne({ _id: userId }, { session });
             if (user.balance < betAmount) throw new Error("Nicht genug Geld.");
-            if (user.activeBlackjack) throw new Error("Du hast noch ein laufendes Spiel!");
+            
+            // FIX: Wenn noch ein altes Spiel im Speicher hängt, wird es als Verlust abgerechnet
+            if (user.activeBlackjack) {
+                await usersCollection.updateOne(
+                    { _id: userId },
+                    { $inc: { "casinoStats.losses": 1, "casinoStats.netProfit": -user.activeBlackjack.bet } }, 
+                    { session }
+                );
+                // Das Geld vom abgebrochenen Spiel wandert in den Lotto-Pot
+                await systemSettingsCollection.updateOne({ id: 'lottery_state' }, { $inc: { pot: user.activeBlackjack.bet } }, { upsert: true, session });
+            }
 
-            // Einsatz abziehen
+            // Neuen Einsatz abziehen
             await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -betAmount } }, { session });
 
             // Karten austeilen
@@ -17068,7 +17078,7 @@ app.post('/api/casino/blackjack/start', isAuthenticated, async (req, res) => {
                 bet: betAmount,
                 playerHand,
                 dealerHand,
-                status: 'playing' // 'playing', 'won', 'lost', 'push'
+                status: 'playing' 
             };
 
             // Prüfen auf sofortigen Blackjack (21 mit 2 Karten)
