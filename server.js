@@ -143,6 +143,40 @@ app.use((req, res, next) => {
 app.use('/api/', globalApiRateLimit);
 
 // =========================================================
+// === PRIVAT-MODUS: GLOBALE 404 SCHRANKE ===
+// =========================================================
+const publicPaths = [
+    '/api/auth/login',
+    '/api/auth/temp-login',
+    '/api/auth/register',
+    '/api/auth/logout',
+    '/api/status',
+    '/health'
+];
+
+app.use((req, res, next) => {
+    // 1. Erlaube Zugriffe auf öffentliche Routen (Login, Register etc.)
+    if (publicPaths.includes(req.path)) {
+        return next();
+    }
+    
+    // 2. Erlaube den Zugriff auf das CDN, falls dein Login-Screen Bilder vom Server lädt.
+    // (Falls dein Login KEINE Bilder braucht, kannst du diese if-Abfrage löschen)
+    if (req.path.startsWith('/cdn/')) {
+        return next();
+    }
+
+    // 3. Prüfe, ob eine gültige Session existiert
+    if (req.session && req.session.userId) {
+        return next();
+    }
+
+    // 4. Keine Session = Tarnkappe (404 Not Found)
+    // Wir werfen absichtlich keinen 401/403, damit Scanner keine Routen erraten können.
+    return res.status(404).send('Not Found');
+});
+
+// =========================================================
 // === STREIK-SYSTEM: BLOCKIERTE ROUTEN ===
 // =========================================================
 // Wenn ein Streik aktiv ist, blockiert der Türsteher ab hier alle Anfragen an diese Pfade
@@ -199,6 +233,7 @@ let requestsCollection;
 let classifiedAdsCollection;
 let orphanageCollection;
 let cartelApplicationsCollection;
+let inviteCodesCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -1009,6 +1044,7 @@ const ENDPOINT_PERMISSIONS = {
     'POST /api/admin/banUser': 'manage_users_critical', 
     'GET /api/admin/roles': 'manage_users_critical',
     'GET /api/admin/permissions': 'manage_users_critical',
+	'POST /api/admin/generate-invite': 'manage_users_critical',
 
     // --- LNN News ---
     'POST /api/admin/news': 'manage_news',
@@ -1277,6 +1313,7 @@ MongoClient.connect(mongoUri)
 	 	classifiedAdsCollection = db.collection('classifiedAds');
         authCodesCollection = db.collection(authCodesCollectionName);
 		orphanageCollection = db.collection('orphanage');
+		inviteCodesCollection = db.collection('inviteCodes');
 
         bankTransactionsCollection = db.collection('bankTransactions');
 		cartelApplicationsCollection = db.collection('cartelApplications');
@@ -1892,7 +1929,6 @@ app.post('/api/auth/register', async (req, res) => {
 
     console.log(`${LOG_PREFIX_SERVER} Registrierungsversuch. IP: ${clientIp} | Fingerprint: ${fingerprint || 'N/A'}`);
 
-    // 2. Harter Ban-Check (NUR DeviceID & Fingerprint)
     const queryConditions = [];
     if (deviceId) queryConditions.push({ deviceId: deviceId });
     if (fingerprint) queryConditions.push({ fingerprint: fingerprint });
@@ -1905,10 +1941,15 @@ app.post('/api/auth/register', async (req, res) => {
         }
     }
 
-    const { username, password } = req.body;
+    // NEU: inviteCode aus dem Body holen
+    const { username, password, inviteCode } = req.body;
     
     if (!username || !password || typeof username !== 'string' || typeof password !== 'string' || username.length < 3 || username.length > 30 || password.length < 6) {
         return res.status(400).json({ error: 'Benutzername (3-30 Zeichen) und Passwort (min 6 Zeichen) erforderlich.' });
+    }
+    
+    if (!inviteCode || typeof inviteCode !== 'string' || inviteCode.trim() === '') {
+        return res.status(400).json({ error: 'Ein gültiger Bestätigungscode (Invite Code) ist zwingend erforderlich.' });
     }
 
     const usernameRegex = /^[a-zA-Z0-9_äöüÄÖÜß]+$/;
@@ -1920,39 +1961,61 @@ app.post('/api/auth/register', async (req, res) => {
         return res.status(400).json({ error: 'Netter Versuch, aber dieser Name steht auf der schwarzen Liste des Einwohnermeldeamtes.' });
     }
 
-    try {
-        const existingUser = await usersCollection.findOne({ username: username.toLowerCase() });
-        if (existingUser) {
-            return res.status(409).json({ error: 'Benutzername bereits vergeben.' });
-        }
+    const sessionMongo = client.startSession();
 
-        const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
+    try {
+        await sessionMongo.withTransaction(async () => {
+            // 1. Code prüfen (muss in Transaktion passieren, damit er nicht doppelt genutzt wird)
+            const validCode = await inviteCodesCollection.findOne({ code: inviteCode.trim(), isUsed: false }, { session: sessionMongo });
+            if (!validCode) {
+                throw new Error('Der eingegebene Code ist ungültig oder wurde bereits verwendet.');
+            }
+
+            const existingUser = await usersCollection.findOne({ username: username.toLowerCase() }, { session: sessionMongo });
+            if (existingUser) {
+                throw new Error('Benutzername bereits vergeben.');
+            }
+
+            const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
+            
+            const newUser = {
+                username: username.toLowerCase(), 
+                password: hashedPassword, 
+                balance: 5000.00, 
+                tokens: DEFAULT_STARTING_TOKENS,
+                isAdmin: false, 
+                infinityMoney: false, 
+                unlockedInfinityMoney: false, 
+                createdAt: new Date(), 
+                productSellCooldowns: {}, 
+                schufaScore: 500, 
+                activeLoan: null,
+                lastDeviceId: deviceId,
+                lastFingerprint: fingerprint,
+                lastIp: clientIp
+            };
+            
+            await usersCollection.insertOne(newUser, { session: sessionMongo });
+            
+            // 2. Code verbrennen
+            await inviteCodesCollection.updateOne(
+                { _id: validCode._id },
+                { $set: { isUsed: true, usedBy: username.toLowerCase(), usedAt: new Date() } },
+                { session: sessionMongo }
+            );
+        });
         
-        const newUser = {
-            username: username.toLowerCase(), 
-            password: hashedPassword, 
-            balance: 5000.00, 
-            tokens: DEFAULT_STARTING_TOKENS,
-            isAdmin: false, 
-            infinityMoney: false, 
-            unlockedInfinityMoney: false, 
-            createdAt: new Date(), 
-            productSellCooldowns: {}, 
-            schufaScore: 500, 
-            activeLoan: null,
-            lastDeviceId: deviceId,
-            lastFingerprint: fingerprint,
-            lastIp: clientIp
-        };
-        
-        await usersCollection.insertOne(newUser);
-        
-        console.log(`${LOG_PREFIX_SERVER} User ${username.toLowerCase()} erfolgreich registriert.`);
+        console.log(`${LOG_PREFIX_SERVER} User ${username.toLowerCase()} erfolgreich mit Code ${inviteCode.trim()} registriert.`);
         res.status(201).json({ message: 'Registrierung erfolgreich!' });
         
     } catch (err) {
+        if (err.message === 'Der eingegebene Code ist ungültig oder wurde bereits verwendet.' || err.message === 'Benutzername bereits vergeben.') {
+            return res.status(400).json({ error: err.message });
+        }
         console.error(`${LOG_PREFIX_SERVER} Fehler bei Registrierung für User ${username}:`, err);
         res.status(500).json({ error: 'Fehler bei der Registrierung auf dem Server.' });
+    } finally {
+        await sessionMongo.endSession();
     }
 });
 
@@ -2313,6 +2376,42 @@ app.post('/api/admin/generate-token-code', isAdmin, async (req, res) => {
         res.status(201).json({ message: `${count} Token-Code(s) mit je ${tokenAmount} Tokens erfolgreich generiert.`, codes: generatedCodes });
     } catch (err) {
         console.error(`${LOG_PREFIX_SERVER} Admin Fehler Code-Generierung:`, err);
+        res.status(500).json({ error: "Fehler bei der Code-Generierung." });
+    }
+});
+
+app.post('/api/admin/generate-invite', isAuthenticated, isAdmin, async (req, res) => {
+    const { count = 1 } = req.body;
+    
+    if (typeof count !== 'number' || count < 1 || count > 50) {
+        return res.status(400).json({ error: "Bitte eine Anzahl zwischen 1 und 50 angeben." });
+    }
+
+    try {
+        const codesToInsert = [];
+        const generatedCodes = [];
+
+        for (let i = 0; i < count; i++) {
+            const uniqueCode = `INV-${Math.random().toString(36).substring(2, 7).toUpperCase()}-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
+            codesToInsert.push({
+                code: uniqueCode,
+                isUsed: false,
+                usedBy: null,
+                generatedByAdminId: new ObjectId(req.session.userId),
+                createdAt: new Date()
+            });
+            generatedCodes.push(uniqueCode);
+        }
+
+        await inviteCodesCollection.insertMany(codesToInsert);
+        
+        console.log(`${LOG_PREFIX_SERVER} Admin ${req.session.username} hat ${count} Invite-Codes generiert.`);
+        res.status(201).json({ 
+            message: `${count} Einladungscode(s) erfolgreich generiert.`, 
+            codes: generatedCodes 
+        });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Admin Fehler Invite-Generierung:`, err);
         res.status(500).json({ error: "Fehler bei der Code-Generierung." });
     }
 });
@@ -7629,7 +7728,7 @@ const ENGINE_ALLOWED_COLLECTIONS = [
     'humans', 'ratings', 'criteria', 'categories', 'tindaSwipes', 'restaurantOrders', 'limterestPins', 
     'teachermonCards', 'teachermonInventories', 'teachermonTrades', 'teachermonBattles', 'teachermonUniverses', 
     'properties', 'ownedProperties', 'propertyInvites', 'pets', 'petCemetery', 'limeaLayouts', 
-    'gangs', 'publicGangChat', 'zones', 'bounties', 'lotteryTickets', 'banned_ips'
+    'gangs', 'publicGangChat', 'zones', 'bounties', 'lotteryTickets', 'banned_ips', 'inviteCodes'
 ];
 
 app.post('/api/admin/engine', isAuthenticated, isAdmin, isEnvWhitelisted, async (req, res) => {
