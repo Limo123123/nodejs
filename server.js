@@ -15460,13 +15460,14 @@ app.post('/api/classifieds', isAuthenticated, async (req, res) => {
     const sellerId = new ObjectId(req.session.userId);
 
     if (!title || !description || !price || price <= 0 || !['limazon', 'real', 'darknet'].includes(type)) {
-        return res.status(400).json({ error: 'Ungültige Daten für Kleinanzeige.' });
-    }
+    	return res.status(400).json({ error: 'Ungültige Daten für Kleinanzeige.' });
+	}
     if (containsForbiddenWords(title) || containsForbiddenWords(description)) {
         return res.status(400).json({ error: 'Bitte achte auf deine Wortwahl (Wortfilter aktiv).' });
     }
 
     let finalProductId = null;
+    // Hier fügen wir 'darknet' mit ein!
     if (type === 'limazon' || type === 'darknet') {
         finalProductId = isNaN(Number(productId)) ? productId : Number(productId);
     }
