@@ -1771,6 +1771,59 @@ app.delete('/api/admin/cartel/dealers/:id/fire', isAuthenticated, isAdmin, async
     }
 });
 
+// POST: Dealer kauft Ware beim Kartell ein (Großhandel)
+app.post('/api/cartel/buy-stock', isAuthenticated, async (req, res) => {
+    const { drugId, quantity } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const qty = parseInt(quantity);
+
+    if (!qty || qty < 1) return res.status(400).json({ error: "Ungültige Menge." });
+
+    const CARTEL_BUY_COST = 500; // Kosten pro Kristall im Einkauf (50x = $25.000)
+    const totalCost = CARTEL_BUY_COST * qty;
+    const session = client.startSession();
+
+    try {
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (!user.isDealer) throw new Error("Du gehörst nicht zur Familie. Verschwinde!");
+            if (user.balance < totalCost) throw new Error(`Du brauchst $${totalCost.toLocaleString()} für diese Lieferung.`);
+
+            // 1. Geld beim Dealer abziehen
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -totalCost } }, { session });
+
+            // 2. Produkt sicherstellen (Limo-Kristalle)
+            await productsCollection.updateOne(
+                { id: 'limo_crystals' },
+                { $setOnInsert: { 
+                    id: 'limo_crystals', name: 'Limo-Kristalle 💠', price: '$0.00', description: 'Reiner Fokus. Hochgradig illegal.', stock: 0, isTokenCard: false 
+                }},
+                { upsert: true, session }
+            );
+
+            // 3. Ware ins Inventar legen
+            await inventoriesCollection.updateOne(
+                { userId: userId, productId: 'limo_crystals' },
+                { $inc: { quantityOwned: qty } },
+                { upsert: true, session }
+            );
+
+            // 4. Geld in den Kartell-Fonds schieben
+            await systemSettingsCollection.updateOne(
+                { id: 'cartel_fund' },
+                { $inc: { balance: totalCost } },
+                { upsert: true, session }
+            );
+        });
+
+        res.json({ message: `Lieferung bestätigt. ${qty}x Limo-Kristalle wurden deinem Inventar hinzugefügt.` });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
 // POST: Manuelle Steuereintreibung (Admin Only)
 app.post('/api/admin/system/force-tax', isAuthenticated, isAdmin, async (req, res) => {
     console.log(`${LOG_PREFIX_SERVER} 👮 Admin ${req.session.username} erzwingt Steuer-Eintreibung...`);
