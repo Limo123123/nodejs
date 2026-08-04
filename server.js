@@ -15415,8 +15415,7 @@ app.post('/api/classifieds', isAuthenticated, async (req, res) => {
 
     let finalProductId = null;
     if (type === 'limazon' || type === 'darknet') {
-        const parsedId = Number(productId);
-        finalProductId = isNaN(parsedId) ? productId : parsedId;
+        finalProductId = isNaN(Number(productId)) ? productId : Number(productId);
     }
 
     const session = client.startSession();
@@ -15443,8 +15442,8 @@ app.post('/api/classifieds', isAuthenticated, async (req, res) => {
                 title: title.trim(),
                 description: description.trim(),
                 price: parseFloat(price),
-                type,
-                productId: finalProductId, // Hier die gefixte ID nutzen!
+                type: type === 'darknet' ? 'limazon' : type,
+                productId: finalProductId,
                 quantity: (type === 'limazon' || type === 'darknet') ? parseInt(quantity) : 1,
                 imageUrl: imageUrl || null,
                 status: 'active',
