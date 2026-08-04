@@ -141,8 +141,6 @@ app.use((req, res, next) => {
 });
 
 app.use('/api/', globalApiRateLimit);
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
 // =========================================================
 // === PRIVAT-MODUS: GLOBALE 404 SCHRANKE ===
@@ -15460,6 +15458,10 @@ app.get('/api/classifieds/chats', isAuthenticated, async (req, res) => {
 app.post('/api/classifieds', isAuthenticated, async (req, res) => {
     const { title, description, price, type, productId, quantity, imageUrl } = req.body;
     const sellerId = new ObjectId(req.session.userId);
+	
+	console.log("Content-Type:", req.headers["content-type"]);
+	console.log("Content-Length:", req.headers["content-length"]);
+	console.log("Headers:", req.headers);
 
     if (!title || !description || !price || price <= 0 || !['limazon', 'real', 'darknet'].includes(type)) {
     	return res.status(400).json({ error: 'Ungültige Daten für Kleinanzeige.' });
