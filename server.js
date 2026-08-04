@@ -190,6 +190,12 @@ app.use('/api/gangs', isNotOnStrike('gangs'));
 app.use('/api/limterest', isNotOnStrike('limterest'));
 app.use('/api/realestate', isNotOnStrike('realestate'));
 app.use('/api/auctions', isNotOnStrike('auctions'));
+app.use('/api/products', isNotOnStrike('shop'));
+app.use('/api/purchase', isNotOnStrike('shop'));
+app.use('/api/bank', isNotOnStrike('bank'));
+app.use('/api/pets', isNotOnStrike('pets'));
+app.use('/api/delivery', isNotOnStrike('delivery'));
+app.use('/api/wheels', isNotOnStrike('wheels'));
 
 // --- Datenbank Variablen ---
 let db;
@@ -234,6 +240,7 @@ let classifiedAdsCollection;
 let orphanageCollection;
 let cartelApplicationsCollection;
 let inviteCodesCollection;
+let movementsCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -1314,6 +1321,7 @@ MongoClient.connect(mongoUri)
         authCodesCollection = db.collection(authCodesCollectionName);
 		orphanageCollection = db.collection('orphanage');
 		inviteCodesCollection = db.collection('inviteCodes');
+		movementsCollection = db.collection('movements');
 
         bankTransactionsCollection = db.collection('bankTransactions');
 		cartelApplicationsCollection = db.collection('cartelApplications');
@@ -7728,7 +7736,7 @@ const ENGINE_ALLOWED_COLLECTIONS = [
     'humans', 'ratings', 'criteria', 'categories', 'tindaSwipes', 'restaurantOrders', 'limterestPins', 
     'teachermonCards', 'teachermonInventories', 'teachermonTrades', 'teachermonBattles', 'teachermonUniverses', 
     'properties', 'ownedProperties', 'propertyInvites', 'pets', 'petCemetery', 'limeaLayouts', 
-    'gangs', 'publicGangChat', 'zones', 'bounties', 'lotteryTickets', 'banned_ips', 'inviteCodes'
+    'gangs', 'publicGangChat', 'zones', 'bounties', 'lotteryTickets', 'banned_ips', 'inviteCodes', 'movements'
 ];
 
 app.post('/api/admin/engine', isAuthenticated, isAdmin, isEnvWhitelisted, async (req, res) => {
@@ -15893,20 +15901,137 @@ app.delete('/api/admin/petitions/:id', isAuthenticated, isAdmin, async (req, res
 });
 
 // =========================================================
-// === STREIK-SYSTEM: API ENDPUNKTE ===
+// === ✊ BEWEGUNGEN & STREIK-SYSTEM ===
 // =========================================================
 
+const MOVEMENT_CREATE_COST = 2500; // Kostet etwas Geld, eine offizielle Organisation zu gründen
 const STRIKE_DURATION_HOURS = 12; // Wie lange ein Streik dauert
 const MIN_STRIKERS_NEEDED = 2;    // Wie viele Leute man braucht
 
-// 1. Einen Streik ausrufen (landet im Status 'pending')
+// --- 1. BEWEGUNGEN (ORGANISATIONEN) API ---
+
+// Alle Bewegungen abrufen
+app.get('/api/movements', isAuthenticated, async (req, res) => {
+    try {
+        const movements = await movementsCollection.find({}).sort({ createdAt: -1 }).toArray();
+        res.json({ movements });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der Bewegungen." });
+    }
+});
+
+// Eigene Bewegung abrufen
+app.get('/api/movements/my', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const movement = await movementsCollection.findOne({ members: userId });
+        res.json({ movement });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden deiner Bewegung." });
+    }
+});
+
+// Bewegung gründen
+app.post('/api/movements/create', isAuthenticated, async (req, res) => {
+    const { name, description } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const username = req.session.username;
+
+    if (!name || name.length < 3 || name.length > 30) return res.status(400).json({ error: "Name ungültig (3-30 Zeichen)." });
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (user.balance < MOVEMENT_CREATE_COST) throw new Error(`Die Anmeldung der Bewegung kostet $${MOVEMENT_CREATE_COST}.`);
+
+            const existingMovement = await movementsCollection.findOne({ members: userId }, { session });
+            if (existingMovement) throw new Error("Du bist bereits Teil einer Bewegung. Tritt erst aus.");
+
+            const nameTaken = await movementsCollection.findOne({ name: { $regex: new RegExp(`^${name.trim()}$`, 'i') } }, { session });
+            if (nameTaken) throw new Error("Eine Bewegung mit diesem Namen existiert bereits.");
+
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -MOVEMENT_CREATE_COST } }, { session });
+
+            await movementsCollection.insertOne({
+                name: name.trim(),
+                description: description ? description.substring(0, 200) : "Wir fordern Gerechtigkeit!",
+                leaderId: userId,
+                leaderName: username,
+                members: [userId],
+                memberNames: [username],
+                createdAt: new Date()
+            }, { session });
+        });
+        res.json({ message: `Die Bewegung "${name}" wurde erfolgreich gegründet!` });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// Bewegung beitreten
+app.post('/api/movements/join/:id', isAuthenticated, async (req, res) => {
+    const movementId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+    const username = req.session.username;
+
+    try {
+        const existingMovement = await movementsCollection.findOne({ members: userId });
+        if (existingMovement) return res.status(400).json({ error: "Du bist bereits in einer Bewegung." });
+
+        const targetMovement = await movementsCollection.findOne({ _id: movementId });
+        if (!targetMovement) return res.status(404).json({ error: "Bewegung nicht gefunden." });
+
+        await movementsCollection.updateOne(
+            { _id: movementId },
+            { 
+                $push: { members: userId, memberNames: username }
+            }
+        );
+        res.json({ message: `Du hast dich der Bewegung "${targetMovement.name}" angeschlossen!` });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Beitreten." });
+    }
+});
+
+// Bewegung verlassen
+app.post('/api/movements/leave', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const myMovement = await movementsCollection.findOne({ members: userId });
+        if (!myMovement) return res.status(400).json({ error: "Du bist in keiner Bewegung." });
+
+        // Wenn der Anführer geht, wird die Bewegung aufgelöst
+        if (myMovement.leaderId.equals(userId)) {
+            await movementsCollection.deleteOne({ _id: myMovement._id });
+            return res.json({ message: "Du hast die Bewegung verlassen. Da du der Anführer warst, hat sie sich aufgelöst." });
+        }
+
+        // Normales Verlassen
+        await movementsCollection.updateOne(
+            { _id: myMovement._id },
+            { 
+                $pull: { members: userId, memberNames: req.session.username }
+            }
+        );
+        res.json({ message: "Du bist aus der Bewegung ausgetreten." });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Austreten." });
+    }
+});
+
+// --- 2. STREIK API (Jetzt mit Bewegungen verzahnt) ---
+
+// Streik ausrufen
 app.post('/api/strikes/propose', isAuthenticated, async (req, res) => {
     const { moduleName, reason } = req.body;
     const userId = new ObjectId(req.session.userId);
     const username = req.session.username;
 
-    // Erlaubte Module
-    const ALLOWED_MODULES = ['teachermon', 'limonews', 'casino', 'restaurant', 'jobs', 'crime', 'gangs', 'limterest', 'realestate', 'auctions'];
+    const ALLOWED_MODULES = ['teachermon', 'limonews', 'casino', 'restaurant', 'jobs', 'crime', 'gangs', 'limterest', 'realestate', 'auctions', 'shop', 'bank', 'pets', 'delivery', 'wheels'];
 
     if (!ALLOWED_MODULES.includes(moduleName)) {
         return res.status(400).json({ error: "Dieses System ist essenziell und darf nicht bestreikt werden!" });
@@ -15916,7 +16041,6 @@ app.post('/api/strikes/propose', isAuthenticated, async (req, res) => {
     }
 
     try {
-        // Gibt es schon einen laufenden/geplanten Streik?
         const existingStrike = await db.collection('strikes').findOne({
             module: moduleName,
             status: { $in: ['pending', 'active'] }
@@ -15926,25 +16050,43 @@ app.post('/api/strikes/propose', isAuthenticated, async (req, res) => {
             return res.status(400).json({ error: "Es läuft bereits eine Streik-Organisation oder ein aktiver Streik für dieses Modul!" });
         }
 
+        // NEU: Prüfen, ob der User in einer Bewegung ist
+        const myMovement = await movementsCollection.findOne({ members: userId });
+        
+        let movementData = null;
+        if (myMovement) {
+            // Nur der Anführer darf den Streik für die Bewegung ausrufen!
+            if (!myMovement.leaderId.equals(userId)) {
+                return res.status(403).json({ error: "Nur der Anführer einer Bewegung kann einen offiziellen Streik ausrufen!" });
+            }
+            movementData = { id: myMovement._id, name: myMovement.name };
+        }
+
         const newStrike = {
             module: moduleName,
             reason: reason.trim(),
-            status: 'pending', // Wartet auf Mitstreiter
+            status: 'pending',
             strikers: [userId],
             strikerNames: [username],
+            movementId: movementData ? movementData.id : null,
+            movementName: movementData ? movementData.name : null,
             createdAt: new Date()
         };
 
         await db.collection('strikes').insertOne(newStrike);
-        res.status(201).json({ message: "Streik ausgerufen! Du brauchst noch mindestens einen Mitstreiter, damit er aktiv wird." });
+        
+        if (movementData) {
+            res.status(201).json({ message: `Streik im Namen von "${movementData.name}" ausgerufen! Ein weiteres Mitglied deiner Bewegung muss nun bestätigen.` });
+        } else {
+            res.status(201).json({ message: "Unabhängiger Streik ausgerufen! Du brauchst noch einen Mitstreiter." });
+        }
 
     } catch (e) {
-        console.error("Fehler bei /api/strikes/propose:", e);
         res.status(500).json({ error: "Fehler beim Ausrufen des Streiks." });
     }
 });
 
-// 2. Einem Streik beitreten
+// Streik beitreten / bestätigen
 app.post('/api/strikes/join/:id', isAuthenticated, async (req, res) => {
     const strikeId = new ObjectId(req.params.id);
     const userId = new ObjectId(req.session.userId);
@@ -15955,6 +16097,14 @@ app.post('/api/strikes/join/:id', isAuthenticated, async (req, res) => {
         
         if (!strike) return res.status(404).json({ error: "Streik nicht gefunden oder bereits aktiv." });
         if (strike.strikers.some(id => id.equals(userId))) return res.status(400).json({ error: "Du streikst hier bereits mit!" });
+
+        // NEU: Wenn es ein Bewegungs-Streik ist, darf nur ein Mitglied der gleichen Bewegung beitreten
+        if (strike.movementId) {
+            const myMovement = await movementsCollection.findOne({ members: userId, _id: strike.movementId });
+            if (!myMovement) {
+                return res.status(403).json({ error: `Dieser Streik wird von der Bewegung "${strike.movementName}" geführt. Du musst Mitglied sein, um dich anzuschließen!` });
+            }
+        }
 
         const newStrikerCount = strike.strikers.length + 1;
         const updateOps = {
@@ -15970,16 +16120,24 @@ app.post('/api/strikes/join/:id', isAuthenticated, async (req, res) => {
                 expiresAt: endsAt 
             };
             
-            // LNN News-Meldung generieren
+            // LNN News-Meldung generieren (Dynamisch für Bewegung oder Unabhängig)
+            let headline, content;
+            if (strike.movementName) {
+                headline = `BEWEGUNG '${strike.movementName.toUpperCase()}' BESTREIKT ${strike.module.toUpperCase()}! 🛑`;
+                content = `Die Organisation "${strike.movementName}" hat unter der Führung von ${strike.strikerNames[0]} das Modul lahmgelegt! Grund: "${strike.reason}". Die Blockade hält ${STRIKE_DURATION_HOURS} Stunden an.`;
+            } else {
+                headline = `STREIK BEI ${strike.module.toUpperCase()}! 🛑`;
+                content = `${strike.strikerNames.join(', ')} und ${username} haben den Bereich blockiert! Grund: "${strike.reason}". Die Blockade hält ${STRIKE_DURATION_HOURS} Stunden an.`;
+            }
+
             await newsCollection.insertOne({
-                headline: `STREIK BEI ${strike.module.toUpperCase()}! 🛑`,
-                content: `${strike.strikerNames.join(', ')} und ${username} haben den Bereich blockiert! Grund: "${strike.reason}". Die Blockade hält ${STRIKE_DURATION_HOURS} Stunden an.`,
+                headline: headline,
+                content: content,
                 author: "LNN Gewerkschaft",
                 category: "Community",
                 createdAt: new Date(),
                 likes: 0
             });
-            // Polling fürs Frontend (falls du die Funktion hast)
             if (typeof updateDataVersion === 'function') updateDataVersion('news');
         }
 
@@ -15987,28 +16145,21 @@ app.post('/api/strikes/join/:id', isAuthenticated, async (req, res) => {
 
         res.json({ 
             message: newStrikerCount >= MIN_STRIKERS_NEEDED 
-                ? "Du bist beigetreten! Der Streik ist nun AKTIV!" 
+                ? "Du hast zugestimmt! Der Streik ist nun AKTIV!" 
                 : "Du bist beigetreten. Wir brauchen noch mehr Leute!" 
         });
 
     } catch (e) {
-        console.error("Fehler bei /api/strikes/join:", e);
         res.status(500).json({ error: "Fehler beim Beitreten." });
     }
 });
 
-// 3. Offene Streiks abrufen (für das Frontend Dashboard)
+// Offene Streiks abrufen
 app.get('/api/strikes', isAuthenticated, async (req, res) => {
     try {
         const now = new Date();
+        await db.collection('strikes').deleteMany({ status: 'active', expiresAt: { $lte: now } });
 
-        // 1. GEISTER-AUSTREIBUNG: Abgelaufene Streiks automatisch löschen!
-        await db.collection('strikes').deleteMany({
-            status: 'active',
-            expiresAt: { $lte: now }
-        });
-
-        // 2. Nur die wirklich noch gültigen Streiks laden
         const activeAndPending = await db.collection('strikes')
             .find({ status: { $in: ['pending', 'active'] } })
             .sort({ createdAt: -1 })
@@ -16016,12 +16167,11 @@ app.get('/api/strikes', isAuthenticated, async (req, res) => {
 
         res.json({ strikes: activeAndPending });
     } catch (e) {
-        console.error("Fehler bei /api/strikes:", e);
         res.status(500).json({ error: "Fehler beim Laden der Streiks." });
     }
 });
 
-// 4. Streik beenden (Nur für Ersteller oder Admins)
+// Streik beenden
 app.delete('/api/strikes/:id', isAuthenticated, async (req, res) => {
     const strikeId = new ObjectId(req.params.id);
     const userId = new ObjectId(req.session.userId);
@@ -16031,18 +16181,14 @@ app.delete('/api/strikes/:id', isAuthenticated, async (req, res) => {
         if (!strike) return res.status(404).json({ error: "Streik nicht gefunden." });
 
         const user = await usersCollection.findOne({ _id: userId });
-        
-        // Der Ersteller ist immer der erste Eintrag im Array (Index 0)
         const isCreator = strike.strikers[0].equals(userId);
 
         if (!isCreator && !user.isAdmin) {
             return res.status(403).json({ error: "Nur der Streikführer oder ein Admin kann diesen Streik beenden." });
         }
 
-        // Streik löschen
         await db.collection('strikes').deleteOne({ _id: strikeId });
 
-        // News-Meldung abfeuern
         await newsCollection.insertOne({
             headline: `STREIK BEI ${strike.module.toUpperCase()} BEENDET! ✅`,
             content: `Der Streik wurde von ${user.username} offiziell für beendet erklärt. Das Modul ist wieder frei zugänglich!`,
@@ -16055,18 +16201,16 @@ app.delete('/api/strikes/:id', isAuthenticated, async (req, res) => {
 
         res.json({ message: "Streik erfolgreich aufgelöst! Das System läuft wieder." });
     } catch (e) {
-        console.error("Fehler beim Beenden des Streiks:", e);
         res.status(500).json({ error: "Fehler beim Auflösen des Streiks." });
     }
 });
 
-// ÖFFENTLICHER Endpunkt für die Status-Anzeige auf der Index-Seite
+// ÖFFENTLICHER Endpunkt für die Status-Anzeige
 app.get('/api/strikes/public', async (req, res) => {
     try {
-        // Wir holen nur die aktiven Streiks und nur die nötigsten Infos
         const activeStrikes = await db.collection('strikes').find(
             { status: 'active', expiresAt: { $gt: new Date() } },
-            { projection: { module: 1, _id: 0 } }
+            { projection: { module: 1, movementName: 1, _id: 0 } }
         ).toArray();
         res.json({ strikes: activeStrikes });
     } catch (e) {
