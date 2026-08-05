@@ -17738,6 +17738,244 @@ app.post('/api/casino/p2p/resolve', isAuthenticated, async (req, res) => {
     }
 });
 
+// =========================================================
+// === 💬 WHATSLIM V2 (Simple Username Chat) ===
+// =========================================================
+const LOG_PREFIX_WHATSLIM = "[Whatslim]";
+
+// 1. Neuen Chat über Benutzernamen starten
+app.post('/api/whatslim/start', isAuthenticated, async (req, res) => {
+    const { targetUsername } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const myUsername = req.session.username;
+
+    if (!targetUsername || targetUsername.trim() === "") {
+        return res.status(400).json({ error: "Bitte gib einen Benutzernamen ein." });
+    }
+    
+    if (targetUsername.toLowerCase() === myUsername.toLowerCase()) {
+        return res.status(400).json({ error: "Du kannst nicht mit dir selbst chatten." });
+    }
+
+    try {
+        // Ziel-User suchen (Case Insensitive)
+        const targetUser = await usersCollection.findOne({ 
+            username: { $regex: new RegExp(`^${targetUsername.trim()}$`, 'i') } 
+        });
+        
+        if (!targetUser) {
+            return res.status(404).json({ error: "Dieser Benutzer existiert nicht in Limazon." });
+        }
+
+        // Prüfen, ob bereits ein Chat zwischen den beiden existiert
+        let chat = await limChatsCollection.findOne({
+            type: 'whatslim',
+            participants: { $all: [userId, targetUser._id], $size: 2 }
+        });
+
+        // Wenn nicht, neuen Chat anlegen
+        if (!chat) {
+            const now = new Date();
+            const newChat = {
+                type: 'whatslim',
+                participants: [userId, targetUser._id],
+                participantNames: [myUsername, targetUser.username], // Speichern für einfache Anzeige
+                createdAt: now,
+                updatedAt: now,
+                lastMessagePreview: "Chat gestartet",
+                lastMessageTimestamp: now
+            };
+            const result = await limChatsCollection.insertOne(newChat);
+            chat = { _id: result.insertedId, ...newChat };
+        }
+
+        res.json({ message: "Chat bereit!", chat });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_WHATSLIM} Fehler beim Starten:`, err);
+        res.status(500).json({ error: "Serverfehler beim Erstellen des Chats." });
+    }
+});
+
+// 2. Alle Whatslim-Chats für die Übersicht laden
+app.get('/api/whatslim/chats', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    
+    try {
+        const chats = await limChatsCollection.find({ type: 'whatslim', participants: userId })
+            .sort({ updatedAt: -1 })
+            .toArray();
+
+        // Schön formatieren fürs Frontend
+        const enrichedChats = chats.map(chat => {
+            const partnerId = chat.participants.find(p => !p.equals(userId));
+            // Finde den Namen des Partners aus dem Array
+            const partnerName = chat.participantNames.find(n => n.toLowerCase() !== req.session.username.toLowerCase()) || "Unbekannt";
+            
+            return {
+                chatId: chat._id,
+                partnerId: partnerId,
+                partnerName: partnerName,
+                lastMessage: chat.lastMessagePreview,
+                lastUpdate: chat.updatedAt
+            };
+        });
+
+        res.json({ chats: enrichedChats });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_WHATSLIM} Fehler beim Laden:`, err);
+        res.status(500).json({ error: "Fehler beim Laden deiner Chats." });
+    }
+});
+
+// =========================================================
+// === 🏫 LIMO SCHULE (SCHUL-SIMULATOR) ===
+// =========================================================
+const LOG_PREFIX_SCHOOL = "[Schule API]";
+const SCHOOL_SUBJECTS = ['Mathematik', 'Deutsch', 'Englisch', 'Kunst', 'Sport', 'Geschichte', 'Informatik'];
+
+// 1. Zur Schule gehen (Ereignisse & Noten sammeln)
+app.post('/api/school/attend', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    const session = client.startSession();
+
+    try {
+        let resultObj = {};
+        
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+
+            // Cooldown: 15 Minuten Pause zwischen den Schulstunden
+            const now = Date.now();
+            const lastSchool = user.schoolStats?.lastAttended ? new Date(user.schoolStats.lastAttended).getTime() : 0;
+            
+            if (now - lastSchool < 15 * 60 * 1000) {
+                const waitMin = Math.ceil((15 * 60 * 1000 - (now - lastSchool)) / 60000);
+                throw new Error(`Große Pause! Der Unterricht geht erst in ${waitMin} Minuten weiter.`);
+            }
+
+            // Zufälliges Fach auswürfeln
+            const subject = SCHOOL_SUBJECTS[Math.floor(Math.random() * SCHOOL_SUBJECTS.length)];
+            const rand = Math.random(); // 0.0 bis 1.0
+            
+            let grade = null;
+            let message = "";
+            let eventType = "";
+
+            if (rand < 0.10) {
+                // 10% Chance: Frei
+                eventType = "free";
+                message = `Hitzefrei / Lehrer krank! Du hast ${subject} geschwänzt und chillst auf dem Schulhof. Keine Note heute.`;
+            
+            } else if (rand < 0.20) {
+                // 10% Chance: Ausflug
+                eventType = "trip";
+                const cost = 25;
+                if (user.balance < cost) {
+                    throw new Error(`Heute ist Wandertag in ${subject}, aber du hast keine $25 für den Bus! Geh nach Hause.`);
+                }
+                await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -cost } }, { session });
+                message = `Wandertag im Fach ${subject}! Es kostet $25 Busgeld, aber dafür entkommst du dem Klassenzimmer.`;
+            
+            } else if (rand < 0.30) {
+                // 10% Chance: Zu spät
+                eventType = "late";
+                grade = 6; // Sofort eine 6 kassieren
+                message = `Zu spät in ${subject}! Der Lehrer rastet komplett aus und drückt dir direkt eine ungenügend (6) rein.`;
+            
+            } else if (rand < 0.35) {
+                // 5% Chance: Lehrer rastet aus
+                eventType = "hit";
+                const schmerzensgeld = 1500;
+                await usersCollection.updateOne({ _id: userId }, { $inc: { balance: schmerzensgeld } }, { session });
+                message = `AUTSCH! Der Lehrer in ${subject} hat dir einen Schwamm an den Kopf geworfen und dich geschlagen! Du verklagst die Schule und bekommst $${schmerzensgeld.toLocaleString()} Schmerzensgeld!`;
+            
+            } else if (rand < 0.65) {
+                // 30% Chance: PowerPoint Präsentation
+                eventType = "ppp";
+                // Gewichtete Noten (eher gute Noten bei einer PPP)
+                grade = Math.floor(Math.random() * 4) + 1; // Note 1-4
+                message = `Du hast deine PowerPoint-Präsentation (PPP) in ${subject} gehalten. Hoffentlich hat keiner deine zitternden Hände gesehen. Deine Note: ${grade}.`;
+            
+            } else {
+                // 35% Chance: Normale Aufgabe
+                eventType = "task";
+                grade = Math.floor(Math.random() * 6) + 1; // Note 1-6
+                message = `Klassenarbeit in ${subject}! Du hast geschwitzt und das Blatt abgegeben. Deine Note: ${grade}.`;
+            }
+
+            // Datenbank Updates (Zeitstempel & Noten Array)
+            const updateQuery = {
+                $set: { "schoolStats.lastAttended": new Date() }
+            };
+
+            if (grade !== null) {
+                // Legt die Note dynamisch in das Array des jeweiligen Faches
+                updateQuery.$push = { [`schoolStats.grades.${subject}`]: grade };
+            }
+
+            await usersCollection.updateOne({ _id: userId }, updateQuery, { session });
+
+            resultObj = { message, eventType, subject, grade };
+        });
+
+        res.json(resultObj);
+
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// 2. Das Zeugnis abrufen
+app.get('/api/school/zeugnis', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    
+    try {
+        const user = await usersCollection.findOne({ _id: userId }, { projection: { schoolStats: 1 } });
+        const grades = user.schoolStats?.grades || {};
+
+        const zeugnis = [];
+        let totalSum = 0;
+        let totalCount = 0;
+
+        // Alle bekannten Fächer durchgehen
+        SCHOOL_SUBJECTS.forEach(subject => {
+            const subjectGrades = grades[subject] || [];
+            
+            if (subjectGrades.length > 0) {
+                const sum = subjectGrades.reduce((a, b) => a + b, 0);
+                const avg = sum / subjectGrades.length;
+                
+                zeugnis.push({ 
+                    subject, 
+                    average: parseFloat(avg.toFixed(2)), 
+                    count: subjectGrades.length 
+                });
+                
+                totalSum += sum;
+                totalCount += subjectGrades.length;
+            } else {
+                // Fach taucht auf, aber noch unbewertet
+                zeugnis.push({ subject, average: null, count: 0 }); 
+            }
+        });
+
+        // Gesamtdurchschnitt
+        const totalAverage = totalCount > 0 ? parseFloat((totalSum / totalCount).toFixed(2)) : null;
+
+        res.json({ 
+            zeugnis: zeugnis, 
+            totalAverage: totalAverage,
+            totalExams: totalCount
+        });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SCHOOL} Fehler:`, err);
+        res.status(500).json({ error: "Der Drucker im Sekretariat ist kaputt. Zeugnis konnte nicht geladen werden." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
