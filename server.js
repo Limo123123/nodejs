@@ -10227,43 +10227,58 @@ app.get('/api/limterest/feed', async (req, res) => {
 // 2. User Profil laden (Stats & Follow Status)
 app.get('/api/limterest/user/:targetUsername', isAuthenticated, async (req, res) => {
     const { targetUsername } = req.params;
-    const myId = new ObjectId(req.session.userId);
+    const myIdStr = req.session.userId; // Wir nutzen Strings für den sicheren Vergleich
 
     try {
-        const user = await usersCollection.findOne({ username: targetUsername });
+        // Case-Insensitive Suche nach dem User
+        const user = await usersCollection.findOne({ 
+            username: { $regex: new RegExp(`^${targetUsername.trim()}$`, 'i') } 
+        });
+        
         if (!user) return res.status(404).json({ error: "User nicht gefunden." });
 
-        // Stats berechnen
-        const pinCount = await limterestCollection.countDocuments({ username: targetUsername });
-        const followersCount = (user.followers || []).length;
+        // Stats berechnen (Ebenfalls Case-Insensitive für die Pins)
+        const pinCount = await limterestCollection.countDocuments({ 
+            username: { $regex: new RegExp(`^${targetUsername.trim()}$`, 'i') } 
+        });
+        
+        // Sicherstellen, dass followers ein Array ist
+        const followersList = Array.isArray(user.followers) ? user.followers : [];
+        const followersCount = followersList.length;
 
-        // Folge ich ihm schon?
-        const isFollowing = user.followers && user.followers.some(id => id.equals(myId));
+        // Folge ich ihm schon? (Sicherer toString() Vergleich bewahrt uns vor Typ-Fehlern!)
+        const isFollowing = followersList.some(id => id && id.toString() === myIdStr);
 
         res.json({
             username: user.username,
             bio: user.bio || "Keine Bio.",
             stats: { pins: pinCount, followers: followersCount },
             isFollowing: !!isFollowing,
-            joinDate: user._id.getTimestamp()
+            // Fallback: Nutze createdAt, falls _id kein Standard ObjectId ist
+            joinDate: user.createdAt || (user._id.getTimestamp ? user._id.getTimestamp() : new Date())
         });
     } catch (e) {
-        res.status(500).json({ error: "Profil-Fehler." });
+        console.error(`${LOG_PREFIX_PIN} Profil-Fehler bei User ${targetUsername}:`, e);
+        res.status(500).json({ error: "Profil-Fehler. Siehe Server-Logs für Details." });
     }
 });
 
-// 3. Follow / Unfollow
+// 3. Follow / Unfollow (Auch hier kugelsicher gemacht!)
 app.post('/api/limterest/user/:targetUsername/follow', isAuthenticated, async (req, res) => {
     const { targetUsername } = req.params;
     const myId = new ObjectId(req.session.userId);
+    const myIdStr = req.session.userId;
 
     try {
-        const targetUser = await usersCollection.findOne({ username: targetUsername });
+        const targetUser = await usersCollection.findOne({ 
+            username: { $regex: new RegExp(`^${targetUsername.trim()}$`, 'i') } 
+        });
+        
         if (!targetUser) return res.status(404).json({ error: "User 404" });
-        if (targetUser._id.equals(myId)) return res.status(400).json({ error: "Kein Eigen-Follow." });
+        if (targetUser._id.toString() === myIdStr) return res.status(400).json({ error: "Kein Eigen-Follow." });
 
-        // Check if already following
-        const isFollowing = targetUser.followers && targetUser.followers.some(id => id.equals(myId));
+        const followersList = Array.isArray(targetUser.followers) ? targetUser.followers : [];
+        const isFollowing = followersList.some(id => id && id.toString() === myIdStr);
 
         if (isFollowing) {
             // UNFOLLOW
@@ -10277,6 +10292,7 @@ app.post('/api/limterest/user/:targetUsername/follow', isAuthenticated, async (r
             res.json({ message: "Followed", isFollowing: true });
         }
     } catch (e) {
+        console.error(`${LOG_PREFIX_PIN} Follow Fehler:`, e);
         res.status(500).json({ error: "Follow Fehler." });
     }
 });
