@@ -17883,6 +17883,131 @@ app.delete('/api/whatslim/chats/:id', isAuthenticated, async (req, res) => {
     }
 });
 
+// 5. Gruppe umbenennen
+app.patch('/api/whatslim/group/:id/rename', isAuthenticated, async (req, res) => {
+    const chatId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+    const { newName } = req.body;
+
+    if (!newName || newName.trim().length < 3) return res.status(400).json({ error: "Gruppenname zu kurz (min. 3 Zeichen)." });
+
+    try {
+        const chat = await limChatsCollection.findOne({ _id: chatId, type: 'whatslim_group', participants: userId });
+        if (!chat) return res.status(404).json({ error: "Gruppe nicht gefunden." });
+
+        await limChatsCollection.updateOne(
+            { _id: chatId },
+            { $set: { groupName: newName.trim(), updatedAt: new Date() } }
+        );
+
+        await limMessagesCollection.insertOne({
+            chatId: chatId, senderId: null, senderUsername: "System",
+            content: `${req.session.username} hat die Gruppe in "${newName.trim()}" umbenannt.`,
+            timestamp: new Date(), isSystem: true
+        });
+
+        res.json({ message: "Gruppe umbenannt!" });
+    } catch (err) {
+        res.status(500).json({ error: "Fehler beim Umbenennen." });
+    }
+});
+
+// 6. User zur Gruppe hinzufügen
+app.post('/api/whatslim/group/:id/add', isAuthenticated, async (req, res) => {
+    const chatId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+    const { usernames } = req.body; // Erwartet ein Array von Namen
+
+    if (!usernames || !Array.isArray(usernames) || usernames.length === 0) return res.status(400).json({ error: "Keine Benutzer angegeben." });
+
+    try {
+        const chat = await limChatsCollection.findOne({ _id: chatId, type: 'whatslim_group', participants: userId });
+        if (!chat) return res.status(404).json({ error: "Gruppe nicht gefunden." });
+
+        const regexArray = usernames.map(name => new RegExp(`^${name.trim()}$`, 'i'));
+        const newUsers = await usersCollection.find({ username: { $in: regexArray } }).toArray();
+
+        if (newUsers.length === 0) return res.status(404).json({ error: "Keiner der Benutzer wurde gefunden." });
+
+        const newIds = [];
+        const newNames = [];
+
+        newUsers.forEach(u => {
+            // Checken ob der User schon drin ist
+            if (!chat.participants.some(p => p.equals(u._id))) {
+                newIds.push(u._id);
+                newNames.push(u.username);
+            }
+        });
+
+        if (newIds.length === 0) return res.status(400).json({ error: "Alle Benutzer sind bereits in der Gruppe." });
+
+        await limChatsCollection.updateOne(
+            { _id: chatId },
+            { 
+                $push: { participants: { $each: newIds }, participantNames: { $each: newNames } },
+                $set: { updatedAt: new Date() }
+            }
+        );
+
+        await limMessagesCollection.insertOne({
+            chatId: chatId, senderId: null, senderUsername: "System",
+            content: `${req.session.username} hat ${newNames.join(', ')} hinzugefügt.`,
+            timestamp: new Date(), isSystem: true
+        });
+
+        res.json({ message: "Benutzer hinzugefügt!" });
+    } catch (err) {
+        res.status(500).json({ error: "Fehler beim Hinzufügen." });
+    }
+});
+
+// 7. User aus Gruppe entfernen (Kicken)
+app.post('/api/whatslim/group/:id/remove', isAuthenticated, async (req, res) => {
+    const chatId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+    const { targetUsername } = req.body;
+
+    if (!targetUsername) return res.status(400).json({ error: "Benutzername fehlt." });
+
+    try {
+        const chat = await limChatsCollection.findOne({ _id: chatId, type: 'whatslim_group', participants: userId });
+        if (!chat) return res.status(404).json({ error: "Gruppe nicht gefunden." });
+
+        const targetUser = await usersCollection.findOne({ username: { $regex: new RegExp(`^${targetUsername.trim()}$`, 'i') } });
+        if (!targetUser) return res.status(404).json({ error: "Benutzer nicht gefunden." });
+
+        if (!chat.participants.some(p => p.equals(targetUser._id))) {
+            return res.status(400).json({ error: "Benutzer ist nicht in der Gruppe." });
+        }
+
+        if (targetUser._id.equals(userId)) {
+            return res.status(400).json({ error: "Um selbst zu gehen, nutze den Verlassen-Button." });
+        }
+
+        // Finde den exakten (case-sensitive) Namen aus dem Array, um ihn sauber zu pullen
+        const nameToRemove = chat.participantNames.find(n => n.toLowerCase() === targetUser.username.toLowerCase());
+
+        await limChatsCollection.updateOne(
+            { _id: chatId },
+            { 
+                $pull: { participants: targetUser._id, participantNames: nameToRemove },
+                $set: { updatedAt: new Date() }
+            }
+        );
+
+        await limMessagesCollection.insertOne({
+            chatId: chatId, senderId: null, senderUsername: "System",
+            content: `${req.session.username} hat ${targetUser.username} aus der Gruppe entfernt.`,
+            timestamp: new Date(), isSystem: true
+        });
+
+        res.json({ message: "Benutzer entfernt!" });
+    } catch (err) {
+        res.status(500).json({ error: "Fehler beim Entfernen." });
+    }
+});
+
 // =========================================================
 // === 🏫 LIMO SCHULE (SCHUL-SIMULATOR) ===
 // =========================================================
