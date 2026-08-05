@@ -17219,15 +17219,24 @@ app.post('/api/cartel/snitch', isAuthenticated, async (req, res) => {
     const session = client.startSession();
     try {
         let responseMessage = "";
+        let sendAsError = false; // Steuert, ob wir am Ende eine rote Fehlermeldung ausgeben
 
         await session.withTransaction(async () => {
             const user = await usersCollection.findOne({ _id: userId }, { session });
-            if (!user.needsToSnitch) throw new Error("Du bist gar nicht verhaftet.");
+            if (!user.needsToSnitch) {
+                sendAsError = true;
+                responseMessage = "Du bist gar nicht verhaftet.";
+                return; // Beendet den Transaktions-Block sicher ohne Rollback
+            }
 
-            const attempts = user.snitchAttemptsLeft || 0;
-            if (attempts <= 0) throw new Error("Du hattest deine Chance.");
+            const attempts = user.snitchAttemptsLeft !== undefined ? user.snitchAttemptsLeft : 3;
+            if (attempts <= 0) {
+                sendAsError = true;
+                responseMessage = "Du hattest deine Chance.";
+                return;
+            }
 
-            // Dealer suchen (Regex für Case-Insensitive, z.B. "kEvIn" = "Kevin")
+            // Dealer suchen (Regex für Case-Insensitive)
             const dealer = await usersCollection.findOne({ 
                 username: { $regex: new RegExp(`^${dealerName.trim()}$`, 'i') },
                 isDealer: true 
@@ -17235,7 +17244,6 @@ app.post('/api/cartel/snitch', isAuthenticated, async (req, res) => {
 
             if (dealer) {
                 // DEALER IST KORREKT ERKANNT!
-                // 1. User freilassen mit kleiner Strafe
                 const smallFine = 2500;
                 await usersCollection.updateOne(
                     { _id: userId },
@@ -17246,16 +17254,14 @@ app.post('/api/cartel/snitch', isAuthenticated, async (req, res) => {
                     { session }
                 );
 
-                // 2. Dealer vernichten (Drogen weg, Strafe)
                 const dealerFine = 50000;
                 await usersCollection.updateOne(
                     { _id: dealer._id },
-                    { $inc: { balance: -dealerFine } }, // Geht ggf. ins Minus
+                    { $inc: { balance: -dealerFine } },
                     { session }
                 );
                 await inventoriesCollection.deleteOne({ userId: dealer._id, productId: 'limo_crystals' }, { session });
 
-                // 3. LNN News für maximales Drama
                 await newsCollection.insertOne({
                     headline: "VERRAT IM UNTERGRUND! 🚨",
                     content: `Das SEK hat die Bude von ${dealer.username} gestürmt! Zehntausende Limo-Kristalle wurden beschlagnahmt. Ein kleiner Fisch hat gesungen!`,
@@ -17264,12 +17270,15 @@ app.post('/api/cartel/snitch', isAuthenticated, async (req, res) => {
                     createdAt: new Date(),
                     likes: 0
                 }, { session });
-                updateDataVersion('news'); // Frontend-Trigger
-				
-				await logActivity(req, "USER_SNITCHED", { 
-                    dealerName: dealer.username, 
-                    snitcher: req.session.username 
-                });
+                
+                if (typeof updateDataVersion === 'function') updateDataVersion('news'); 
+                
+                if (typeof logActivity === 'function') {
+                    await logActivity(req, "USER_SNITCHED", { 
+                        dealerName: dealer.username, 
+                        snitcher: req.session.username 
+                    });
+                }
 
                 responseMessage = `Deal akzeptiert! Du wurdest mit einer kleinen Strafe ($${smallFine}) freigelassen. ${dealer.username} kriegt gerade Besuch vom SEK. Pass auf dich auf!`;
 
@@ -17283,7 +17292,9 @@ app.post('/api/cartel/snitch', isAuthenticated, async (req, res) => {
                         { $set: { snitchAttemptsLeft: newAttempts } },
                         { session }
                     );
-                    throw new Error(`Wir konnten diesen Dealer nicht finden. Verarsch uns nicht! Du hast noch ${newAttempts} Versuche.`);
+                    
+                    sendAsError = true;
+                    responseMessage = `Wir konnten diesen Dealer nicht finden. Verarsch uns nicht! Du hast noch ${newAttempts} Versuche.`;
                 } else {
                     // MAXIMALE VERSUCHE ERREICHT -> HARTE STRAFE
                     const brutalFine = Math.floor(user.balance * 0.5); // 50% vom Geld weg
@@ -17297,15 +17308,23 @@ app.post('/api/cartel/snitch', isAuthenticated, async (req, res) => {
                         { session }
                     );
 
+                    sendAsError = true;
                     responseMessage = `Zeit abgelaufen! Da du nicht kooperieren willst, sperren wir dich weg. Dein Konto wurde um 50% ($${brutalFine.toLocaleString()}) gepfändet und deine Schufa ist auf 0 gefallen.`;
                 }
             }
         });
 
-        res.json({ message: responseMessage });
+        // WICHTIG: Die Transaktion ist hier fertig und GÜLTIG. Die Datenbank wurde aktualisiert!
+        // Jetzt können wir das Frontend über das `sendAsError` Flag steuern.
+        if (sendAsError) {
+            return res.status(400).json({ error: responseMessage });
+        } else {
+            return res.json({ message: responseMessage });
+        }
 
     } catch (e) {
-        res.status(400).json({ error: e.message });
+        console.error("Snitch Error:", e);
+        res.status(500).json({ error: "Serverfehler beim Verhör." });
     } finally {
         await session.endSession();
     }
