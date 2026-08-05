@@ -7302,19 +7302,27 @@ app.post('/api/casino/slots', isAuthenticated, async (req, res) => {
 const LOG_PREFIX_JOBS = "[JobCenter API]";
 
 // Job-Definitionen (Konstanten)
+
 const JOB_LIST = [
+    { id: 'unemployed', title: 'Arbeitslos (Hartz 4)', salary: 80, cooldownSeconds: 1800, reqLevel: 0, cost: 0 }, // 30 Min
     { id: 'dishwasher', title: 'Tellerwäscher', salary: 50, cooldownSeconds: 60, reqLevel: 0, cost: 0 },
     { id: 'delivery', title: 'Pizza-Bote', salary: 120, cooldownSeconds: 300, reqLevel: 2, cost: 500 }, // 5 Min
+    { id: 'limo_tester', title: 'Limo-Vorkoster', salary: 250, cooldownSeconds: 600, reqLevel: 3, cost: 1000 }, // 10 Min
     { id: 'coder', title: 'Junior Dev', salary: 400, cooldownSeconds: 900, reqLevel: 5, cost: 2000 }, // 15 Min
-    { id: 'ceo', title: 'CEO', salary: 5000, cooldownSeconds: 14400, reqLevel: 20, cost: 100000 }, // 4 Std
-    { id: 'idol', title: 'K-Pop Idol', salary: 12000, cooldownSeconds: 28800, reqLevel: 25, cost: 500000 }, // 8 Std Cooldown, extrem hohes Gehalt
-	{ id: 'hacker', title: 'White-Hat Hacker', salary: 1500, cooldownSeconds: 3600, reqLevel: 10, cost: 15000 }, // 1 Std
-    { id: 'streamer', title: 'Twitch Star', salary: 3000, cooldownSeconds: 7200, reqLevel: 15, cost: 40000 }, // 2 Std
-    { id: 'astronaut', title: 'Astronaut', salary: 25000, cooldownSeconds: 86400, reqLevel: 30, cost: 2000000 }, // 24 Std
-	{ id: 'limo_tester', title: 'Limo-Vorkoster', salary: 250, cooldownSeconds: 600, reqLevel: 3, cost: 1000 }, // 10 Min
     { id: 'prompt_engineer', title: 'KI-Flüsterer', salary: 800, cooldownSeconds: 1800, reqLevel: 8, cost: 5000 }, // 30 Min
+    { id: 'hacker', title: 'White-Hat Hacker', salary: 1500, cooldownSeconds: 3600, reqLevel: 10, cost: 15000 }, // 1 Std
     { id: 'crypto_bro', title: 'Krypto-Guru', salary: 2000, cooldownSeconds: 5400, reqLevel: 12, cost: 25000 }, // 1.5 Std
-    { id: 'esports_pro', title: 'E-Sports Profi', salary: 7500, cooldownSeconds: 18000, reqLevel: 22, cost: 250000 } // 5 Std
+    { id: 'robber', title: 'Räuber', salary: 2500, cooldownSeconds: 7200, reqLevel: 14, cost: 30000 }, // 2 Std
+    { id: 'streamer', title: 'Twitch Star', salary: 3000, cooldownSeconds: 7200, reqLevel: 15, cost: 40000 }, // 2 Std
+    { id: 'child_thief', title: 'Kinderklauer', salary: 4000, cooldownSeconds: 10800, reqLevel: 18, cost: 75000 }, // 3 Std
+    { id: 'child_seller', title: 'Kinderverkäufer', salary: 4000, cooldownSeconds: 10800, reqLevel: 18, cost: 75000 }, // 3 Std
+    { id: 'ceo', title: 'CEO', salary: 5000, cooldownSeconds: 14400, reqLevel: 20, cost: 100000 }, // 4 Std
+    { id: 'esports_pro', title: 'E-Sports Profi', salary: 7500, cooldownSeconds: 18000, reqLevel: 22, cost: 250000 }, // 5 Std
+    { id: 'pilot', title: 'Pilot', salary: 8000, cooldownSeconds: 21600, reqLevel: 24, cost: 300000 }, // 6 Std
+    { id: 'idol', title: 'K-Pop Idol', salary: 12000, cooldownSeconds: 28800, reqLevel: 25, cost: 500000 }, // 8 Std 
+    { id: 'pop_king', title: 'Michael Jackson', salary: 15000, cooldownSeconds: 43200, reqLevel: 28, cost: 1000000 }, // 12 Std
+    { id: 'astronaut', title: 'Astronaut', salary: 25000, cooldownSeconds: 86400, reqLevel: 30, cost: 2000000 }, // 24 Std
+    { id: 'hitman', title: 'Auftragskiller', salary: 35000, cooldownSeconds: 172800, reqLevel: 35, cost: 4000000 } // 48 Std
 ];
 
 // GET: Verfügbare Jobs & Mein Status
@@ -13667,6 +13675,7 @@ const PET_CATALOG = [
     { id: 'capybara', name: 'Capybara', icon: '🦦', enclosure: 'Heiße Quelle ♨️', price: 4000, starvationTimeHours: 48 },
     { id: 'golden_retriever', name: 'Golden Retriever', icon: '🦮', enclosure: 'Hundehütte 🛖', price: 1000, starvationTimeHours: 24 },
     { id: 'dino', name: 'Dinosaurier', icon: '🦖', enclosure: 'Jurassic Park 🌋', price: 500000, starvationTimeHours: 120 },
+	{ id: 'troll', name: 'Troll', icon: '🧌', enclosure: 'Modrige Brücke 🌉', price: 35000, starvationTimeHours: 96 }
 ];
 
 const FEED_COST = 15; // $15 pro Fütterung
