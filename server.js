@@ -17739,82 +17739,105 @@ app.post('/api/casino/p2p/resolve', isAuthenticated, async (req, res) => {
 });
 
 // =========================================================
-// === 💬 WHATSLIM V2 (Simple Username Chat) ===
+// === WHATSLIM ===
 // =========================================================
 const LOG_PREFIX_WHATSLIM = "[Whatslim]";
 
-// 1. Neuen Chat über Benutzernamen starten
+// 1. Neuen 1-zu-1 Chat starten
 app.post('/api/whatslim/start', isAuthenticated, async (req, res) => {
     const { targetUsername } = req.body;
     const userId = new ObjectId(req.session.userId);
     const myUsername = req.session.username;
 
-    if (!targetUsername || targetUsername.trim() === "") {
-        return res.status(400).json({ error: "Bitte gib einen Benutzernamen ein." });
-    }
-    
-    if (targetUsername.toLowerCase() === myUsername.toLowerCase()) {
-        return res.status(400).json({ error: "Du kannst nicht mit dir selbst chatten." });
-    }
+    if (!targetUsername || targetUsername.trim() === "") return res.status(400).json({ error: "Bitte gib einen Benutzernamen ein." });
+    if (targetUsername.toLowerCase() === myUsername.toLowerCase()) return res.status(400).json({ error: "Du kannst nicht mit dir selbst chatten." });
 
     try {
-        // Ziel-User suchen (Case Insensitive)
-        const targetUser = await usersCollection.findOne({ 
-            username: { $regex: new RegExp(`^${targetUsername.trim()}$`, 'i') } 
-        });
-        
-        if (!targetUser) {
-            return res.status(404).json({ error: "Dieser Benutzer existiert nicht in Limazon." });
-        }
+        const targetUser = await usersCollection.findOne({ username: { $regex: new RegExp(`^${targetUsername.trim()}$`, 'i') } });
+        if (!targetUser) return res.status(404).json({ error: "Dieser Benutzer existiert nicht in Limazon." });
 
-        // Prüfen, ob bereits ein Chat zwischen den beiden existiert
         let chat = await limChatsCollection.findOne({
             type: 'whatslim',
             participants: { $all: [userId, targetUser._id], $size: 2 }
         });
 
-        // Wenn nicht, neuen Chat anlegen
         if (!chat) {
             const now = new Date();
             const newChat = {
                 type: 'whatslim',
                 participants: [userId, targetUser._id],
-                participantNames: [myUsername, targetUser.username], // Speichern für einfache Anzeige
-                createdAt: now,
-                updatedAt: now,
-                lastMessagePreview: "Chat gestartet",
-                lastMessageTimestamp: now
+                participantNames: [myUsername, targetUser.username],
+                createdAt: now, updatedAt: now,
+                lastMessagePreview: "Chat gestartet", lastMessageTimestamp: now
             };
             const result = await limChatsCollection.insertOne(newChat);
             chat = { _id: result.insertedId, ...newChat };
         }
-
         res.json({ message: "Chat bereit!", chat });
     } catch (err) {
-        console.error(`${LOG_PREFIX_WHATSLIM} Fehler beim Starten:`, err);
         res.status(500).json({ error: "Serverfehler beim Erstellen des Chats." });
     }
 });
 
-// 2. Alle Whatslim-Chats für die Übersicht laden
+// 2. Neue GRUPPE starten
+app.post('/api/whatslim/group', isAuthenticated, async (req, res) => {
+    const { groupName, usernames } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const myUsername = req.session.username;
+
+    if (!groupName || groupName.trim() === "") return res.status(400).json({ error: "Gruppenname fehlt." });
+    if (!usernames || !Array.isArray(usernames) || usernames.length === 0) return res.status(400).json({ error: "Mindestens ein weiteres Mitglied erforderlich." });
+
+    try {
+        // Suche alle angegebenen Usernamen
+        const regexArray = usernames.map(name => new RegExp(`^${name.trim()}$`, 'i'));
+        const users = await usersCollection.find({ username: { $in: regexArray } }).toArray();
+        
+        if (users.length === 0) return res.status(404).json({ error: "Keiner der Benutzer wurde gefunden." });
+
+        const participantIds = [userId, ...users.map(u => u._id)];
+        const participantNames = [myUsername, ...users.map(u => u.username)];
+
+        const now = new Date();
+        const newGroup = {
+            type: 'whatslim_group',
+            groupName: groupName.trim(),
+            ownerId: userId,
+            participants: participantIds,
+            participantNames: participantNames,
+            createdAt: now, updatedAt: now,
+            lastMessagePreview: "Gruppe erstellt", lastMessageTimestamp: now
+        };
+
+        const result = await limChatsCollection.insertOne(newGroup);
+        res.json({ message: "Gruppe erstellt!", chat: { _id: result.insertedId, ...newGroup } });
+    } catch (err) {
+        res.status(500).json({ error: "Serverfehler bei der Gruppenerstellung." });
+    }
+});
+
+// 3. Alle Whatslim-Chats (1on1 & Gruppen) laden
 app.get('/api/whatslim/chats', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
     
     try {
-        const chats = await limChatsCollection.find({ type: 'whatslim', participants: userId })
-            .sort({ updatedAt: -1 })
-            .toArray();
+        const chats = await limChatsCollection.find({ 
+            type: { $in: ['whatslim', 'whatslim_group'] }, 
+            participants: userId 
+        }).sort({ updatedAt: -1 }).toArray();
 
-        // Schön formatieren fürs Frontend
         const enrichedChats = chats.map(chat => {
-            const partnerId = chat.participants.find(p => !p.equals(userId));
-            // Finde den Namen des Partners aus dem Array
-            const partnerName = chat.participantNames.find(n => n.toLowerCase() !== req.session.username.toLowerCase()) || "Unbekannt";
+            const isGroup = chat.type === 'whatslim_group';
+            let displayName = isGroup ? chat.groupName : "Unbekannt";
+            
+            if (!isGroup) {
+                displayName = chat.participantNames.find(n => n.toLowerCase() !== req.session.username.toLowerCase()) || "Unbekannt";
+            }
             
             return {
                 chatId: chat._id,
-                partnerId: partnerId,
-                partnerName: partnerName,
+                isGroup: isGroup,
+                displayName: displayName,
                 lastMessage: chat.lastMessagePreview,
                 lastUpdate: chat.updatedAt
             };
@@ -17822,8 +17845,41 @@ app.get('/api/whatslim/chats', isAuthenticated, async (req, res) => {
 
         res.json({ chats: enrichedChats });
     } catch (err) {
-        console.error(`${LOG_PREFIX_WHATSLIM} Fehler beim Laden:`, err);
         res.status(500).json({ error: "Fehler beim Laden deiner Chats." });
+    }
+});
+
+// 4. Chat löschen oder Gruppe verlassen
+app.delete('/api/whatslim/chats/:id', isAuthenticated, async (req, res) => {
+    const chatId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const chat = await limChatsCollection.findOne({ _id: chatId, participants: userId });
+        if (!chat) return res.status(404).json({ error: "Chat nicht gefunden." });
+
+        if (chat.type === 'whatslim_group') {
+            // Bei Gruppen: User verlässt die Gruppe.
+            await limChatsCollection.updateOne(
+                { _id: chatId }, 
+                { $pull: { participants: userId, participantNames: req.session.username } }
+            );
+            
+            // Info-Nachricht in die Gruppe senden
+            await limMessagesCollection.insertOne({
+                chatId: chatId, senderId: null, senderUsername: "System",
+                content: `${req.session.username} hat die Gruppe verlassen.`,
+                timestamp: new Date(), isSystem: true
+            });
+            res.json({ message: "Gruppe verlassen." });
+        } else {
+            // Bei 1on1 Chats: Chat restlos vernichten
+            await limChatsCollection.deleteOne({ _id: chatId });
+            await limMessagesCollection.deleteMany({ chatId: chatId });
+            res.json({ message: "Chat erfolgreich gelöscht." });
+        }
+    } catch (err) {
+        res.status(500).json({ error: "Fehler beim Löschen des Chats." });
     }
 });
 
