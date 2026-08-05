@@ -18014,7 +18014,7 @@ app.post('/api/whatslim/group/:id/remove', isAuthenticated, async (req, res) => 
 const LOG_PREFIX_SCHOOL = "[Schule API]";
 const SCHOOL_SUBJECTS = ['Mathematik', 'Deutsch', 'Englisch', 'Kunst', 'Sport', 'Geschichte', 'Informatik'];
 
-// 1. Zur Schule gehen (Ereignisse & Noten sammeln)
+// 1. Zur Schule gehen
 app.post('/api/school/attend', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
     const session = client.startSession();
@@ -18025,16 +18025,15 @@ app.post('/api/school/attend', isAuthenticated, async (req, res) => {
         await session.withTransaction(async () => {
             const user = await usersCollection.findOne({ _id: userId }, { session });
 
-            // Cooldown: 15 Minuten Pause zwischen den Schulstunden
+            // Cooldown: 15 Minuten Pause
             const now = Date.now();
             const lastSchool = user.schoolStats?.lastAttended ? new Date(user.schoolStats.lastAttended).getTime() : 0;
             
             if (now - lastSchool < 15 * 60 * 1000) {
                 const waitMin = Math.ceil((15 * 60 * 1000 - (now - lastSchool)) / 60000);
-                throw new Error(`Große Pause! Der Unterricht geht erst in ${waitMin} Minuten weiter.`);
+                throw new Error(`Der Pausengong hat noch nicht geläutet! Geh in ${waitMin} Minuten wieder in den Unterricht.`);
             }
 
-            // Zufälliges Fach auswürfeln
             const subject = SCHOOL_SUBJECTS[Math.floor(Math.random() * SCHOOL_SUBJECTS.length)];
             const rand = Math.random(); // 0.0 bis 1.0
             
@@ -18042,46 +18041,78 @@ app.post('/api/school/attend', isAuthenticated, async (req, res) => {
             let message = "";
             let eventType = "";
 
-            if (rand < 0.10) {
-                // 10% Chance: Frei
-                eventType = "free";
-                message = `Hitzefrei / Lehrer krank! Du hast ${subject} geschwänzt und chillst auf dem Schulhof. Keine Note heute.`;
-            
-            } else if (rand < 0.20) {
-                // 10% Chance: Ausflug
+            if (rand < 0.15) {
+                // 15% Chance: Spicken erwischt! (Strafe)
+                eventType = "late"; // Nutzt das rote/gelbe UI-Design
+                grade = 6; 
+                const strafe = 500;
+                await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -strafe } }, { session });
+                message = `Du wurdest in ${subject} beim Spicken erwischt! Der Lehrer hat deinen Spickzettel gefressen, dir eine 6 gegeben und dir $${strafe} für die "Kaffeekasse des Lehrerzimmers" abgeknöpft.`;
+
+            } else if (rand < 0.25) {
+                // 10% Chance: Klassenfahrt eskaliert
                 eventType = "trip";
-                const cost = 25;
+                const cost = 250;
                 if (user.balance < cost) {
-                    throw new Error(`Heute ist Wandertag in ${subject}, aber du hast keine $25 für den Bus! Geh nach Hause.`);
+                    throw new Error(`Die ${subject}-Exkursion ins Casino kostet $250! Du bist zu arm und musst im leeren Klassenraum Aufgaben abschreiben.`);
                 }
-                await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -cost } }, { session });
-                message = `Wandertag im Fach ${subject}! Es kostet $25 Busgeld, aber dafür entkommst du dem Klassenzimmer.`;
-            
-            } else if (rand < 0.30) {
-                // 10% Chance: Zu spät
-                eventType = "late";
-                grade = 6; // Sofort eine 6 kassieren
-                message = `Zu spät in ${subject}! Der Lehrer rastet komplett aus und drückt dir direkt eine ungenügend (6) rein.`;
-            
+                
+                // Entweder verliert man Geld oder gewinnt den Jackpot
+                if (Math.random() < 0.5) {
+                    await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -cost } }, { session });
+                    message = `Klassenfahrt in ${subject}! Euer Lehrer dachte, das Casino wäre pädagogisch wertvoll. Du hast dein Taschengeld ($${cost}) am Spielautomaten verzockt. Keine Note heute.`;
+                } else {
+                    const win = 5000;
+                    await usersCollection.updateOne({ _id: userId }, { $inc: { balance: (win - cost) } }, { session });
+                    message = `Klassenfahrt in ${subject} ins Casino! Du knackst den Automaten und gehst mit $${win.toLocaleString()} nach Hause. Der Lehrer weint.`;
+                }
+
             } else if (rand < 0.35) {
-                // 5% Chance: Lehrer rastet aus
-                eventType = "hit";
-                const schmerzensgeld = 1500;
-                await usersCollection.updateOne({ _id: userId }, { $inc: { balance: schmerzensgeld } }, { session });
-                message = `AUTSCH! Der Lehrer in ${subject} hat dir einen Schwamm an den Kopf geworfen und dich geschlagen! Du verklagst die Schule und bekommst $${schmerzensgeld.toLocaleString()} Schmerzensgeld!`;
-            
-            } else if (rand < 0.65) {
-                // 30% Chance: PowerPoint Präsentation
+                // 10% Chance: Referat geht viral
                 eventType = "ppp";
-                // Gewichtete Noten (eher gute Noten bei einer PPP)
-                grade = Math.floor(Math.random() * 4) + 1; // Note 1-4
-                message = `Du hast deine PowerPoint-Präsentation (PPP) in ${subject} gehalten. Hoffentlich hat keiner deine zitternden Hände gesehen. Deine Note: ${grade}.`;
-            
+                grade = 1; 
+                const viewsGeld = 2500;
+                await usersCollection.updateOne({ _id: userId }, { $inc: { balance: viewsGeld } }, { session });
+                message = `Dein Referat in ${subject} war so absurd, dass ein Mitschüler es auf Limtube gestreamt hat. Es ging viral! Du hast eine glatte 1 bekommen und $${viewsGeld.toLocaleString()} an Werbeeinnahmen generiert.`;
+
+            } else if (rand < 0.45) {
+                // 10% Chance: Hausmeister Mafia
+                eventType = "task";
+                const bestechung = 1000;
+                
+                if (user.balance >= bestechung && Math.random() < 0.5) {
+                    grade = 1;
+                    await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -bestechung } }, { session });
+                    message = `Du hast den Hausmeister mit $${bestechung.toLocaleString()} bestochen. Er hat nachts den Schulserver gehackt und dir in ${subject} heimlich eine 1 eingetragen!`;
+                } else {
+                    grade = 5;
+                    message = `Der Hausmeister hat dich beim Schwänzen von ${subject} erwischt. Er hat dich beim Direktor verpetzt. Note: 5!`;
+                }
+
+            } else if (rand < 0.50) {
+                // 5% Chance: Körperverletzung (Klassiker)
+                eventType = "hit";
+                const schmerzensgeld = 2500;
+                await usersCollection.updateOne({ _id: userId }, { $inc: { balance: schmerzensgeld } }, { session });
+                message = `AUTSCH! Der Lehrer in ${subject} hat dir das Mathebuch an den Kopf geworfen! Du verklagst die Schule auf $${schmerzensgeld.toLocaleString()} Schmerzensgeld und gehst nach Hause.`;
+
+            } else if (rand < 0.65) {
+                // 15% Chance: Hitzefrei / Chillig
+                eventType = "free";
+                message = `Feueralarm während ${subject}! Jemand hat einen Böller in der Toilette gezündet. Die Schule ist dicht, du hast frei!`;
+
             } else {
-                // 35% Chance: Normale Aufgabe
+                // 35% Chance: Normaler Unterricht (Aber mit witzigen Texten)
                 eventType = "task";
                 grade = Math.floor(Math.random() * 6) + 1; // Note 1-6
-                message = `Klassenarbeit in ${subject}! Du hast geschwitzt und das Blatt abgegeben. Deine Note: ${grade}.`;
+                
+                if (grade <= 2) {
+                    message = `Du warst in ${subject} überraschend schlau heute. Entweder bist du ein Genie oder der Lehrer hat sich verguckt. Deine Note: ${grade}.`;
+                } else if (grade >= 5) {
+                    message = `Kompletter Blackout in ${subject}. Du hast auf dem Testbogen nur deinen Namen gemalt (und den falsch buchstabiert). Deine Note: ${grade}.`;
+                } else {
+                    message = `Mittelmäßiger Unterricht in ${subject}. Du hast aus dem Fenster gestarrt und trotzdem den Test irgendwie bestanden. Deine Note: ${grade}.`;
+                }
             }
 
             // Datenbank Updates (Zeitstempel & Noten Array)
@@ -18090,7 +18121,6 @@ app.post('/api/school/attend', isAuthenticated, async (req, res) => {
             };
 
             if (grade !== null) {
-                // Legt die Note dynamisch in das Array des jeweiligen Faches
                 updateQuery.$push = { [`schoolStats.grades.${subject}`]: grade };
             }
 
