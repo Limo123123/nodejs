@@ -18025,12 +18025,12 @@ app.post('/api/school/attend', isAuthenticated, async (req, res) => {
         await session.withTransaction(async () => {
             const user = await usersCollection.findOne({ _id: userId }, { session });
 
-            // Cooldown: 15 Minuten Pause
+            // Cooldown: 5 Minuten Pause
             const now = Date.now();
             const lastSchool = user.schoolStats?.lastAttended ? new Date(user.schoolStats.lastAttended).getTime() : 0;
             
-            if (now - lastSchool < 15 * 60 * 1000) {
-                const waitMin = Math.ceil((15 * 60 * 1000 - (now - lastSchool)) / 60000);
+            if (now - lastSchool < 5 * 60 * 1000) {
+                const waitMin = Math.ceil((5 * 60 * 1000 - (now - lastSchool)) / 60000);
                 throw new Error(`Der Pausengong hat noch nicht geläutet! Geh in ${waitMin} Minuten wieder in den Unterricht.`);
             }
 
