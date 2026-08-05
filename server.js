@@ -5226,16 +5226,20 @@ app.post('/api/bank/loan/pay', isAuthenticated, async (req, res) => {
             const updateOps = { $inc: { balance: -actualPayment } };
 
             if (newRemaining <= 0) {
-                // Kredit komplett abbezahlt! Schufa Score basierend auf der Kredithöhe erhöhen
+                // Kredit komplett abbezahlt! 
                 const currentScore = user.schufaScore || DEFAULT_SCHUFA_SCORE;
-                // +1 Punkt pro $500 Kredit, maximal aber +25 Punkte pro abbezahltem Kredit
-                const earnedPoints = Math.min(25, Math.floor(user.activeLoan.principal / 500));
+                
+                // FIX: 10 Basis-Punkte (um den Abzug der Aufnahme auszugleichen) 
+                // PLUS 1 Punkt pro $500 Kredit (Maximal 40 zusätzliche Punkte)
+                const bonusPoints = Math.min(40, Math.floor(user.activeLoan.principal / 500));
+                const earnedPoints = 10 + bonusPoints; 
+                
                 let newScore = currentScore + earnedPoints;
                 if (newScore > 1000) newScore = 1000; // Cap bei 1000
 
                 updateOps.$unset = { activeLoan: "" };
                 updateOps.$set = { schufaScore: newScore };
-                message = `Kredit vollständig abbezahlt! Dein Schufa-Score ist auf ${newScore} gestiegen.`;
+                message = `Kredit vollständig abbezahlt! Dein Schufa-Score ist um +${earnedPoints} auf ${newScore} gestiegen.`;
             } else {
                 // Teilzahlung
                 updateOps.$set = { "activeLoan.remainingDue": newRemaining };
