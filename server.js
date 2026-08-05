@@ -13823,6 +13823,67 @@ app.get('/api/pets/cemetery', async (req, res) => {
     }
 });
 
+app.post('/api/pets/:id/euthanize', isAuthenticated, async (req, res) => {
+    const petId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+    const { sendToCemetery } = req.body; // true oder false
+
+    const session = client.startSession();
+    try {
+        let resultMessage = "";
+
+        await session.withTransaction(async () => {
+            // 1. Tier suchen und Berechtigung prüfen
+            const pet = await petsCollection.findOne({ _id: petId, userId: userId }, { session });
+            if (!pet) {
+                throw new Error("Dieses Tier existiert nicht oder gehört dir nicht.");
+            }
+
+            // 2. Soll es auf den Friedhof?
+            if (sendToCemetery) {
+                const now = new Date();
+                const ageDays = Math.floor((now.getTime() - new Date(pet.adoptedAt).getTime()) / (1000 * 60 * 60 * 24));
+                
+                await petCemeteryCollection.insertOne({
+                    userId: pet.userId,
+                    ownerName: pet.ownerName,
+                    petName: pet.name,
+                    icon: pet.icon,
+                    type: pet.typeName,
+                    ageDays: ageDays,
+                    deathDate: now,
+                    cause: 'Eingeschläfert 💉'
+                }, { session });
+                
+                resultMessage = `${pet.name} ist friedlich eingeschlafen und wurde auf dem Tierfriedhof beigesetzt.`;
+            } else {
+                resultMessage = `${pet.name} wurde eingeschläfert und restlos entfernt.`;
+            }
+
+            // 3. Das Tier aus der Datenbank der Lebenden löschen
+            await petsCollection.deleteOne({ _id: petId }, { session });
+
+            // 4. Falls das Tier gerade ausgerüstet war, muss es auch beim User entfernt werden
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (user.activePet && user.activePet.dbId === petId.toString()) {
+                await usersCollection.updateOne(
+                    { _id: userId },
+                    { $unset: { activePet: "" } },
+                    { session }
+                );
+            }
+        });
+
+        res.json({ success: true, message: resultMessage });
+
+    } catch (e) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Einschläfern:`, e);
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
 // --- DER SENSENMANN (CRON JOB) ---
 if (cluster.isPrimary) {
     setInterval(async () => {
