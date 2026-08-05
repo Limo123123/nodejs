@@ -16236,12 +16236,16 @@ app.post('/api/strikes/join/:id', isAuthenticated, async (req, res) => {
     const username = req.session.username;
 
     try {
-        const strike = await db.collection('strikes').findOne({ _id: strikeId, status: 'pending' });
+        // FIX: Wir erlauben jetzt auch den Beitritt zu aktiven (laufenden) Streiks
+        const strike = await db.collection('strikes').findOne({ 
+            _id: strikeId, 
+            status: { $in: ['pending', 'active'] } 
+        });
         
-        if (!strike) return res.status(404).json({ error: "Streik nicht gefunden oder bereits aktiv." });
+        if (!strike) return res.status(404).json({ error: "Streik nicht gefunden oder bereits abgelaufen." });
         if (strike.strikers.some(id => id.equals(userId))) return res.status(400).json({ error: "Du streikst hier bereits mit!" });
 
-        // NEU: Wenn es ein Bewegungs-Streik ist, darf nur ein Mitglied der gleichen Bewegung beitreten
+        // Wenn es ein Bewegungs-Streik ist, darf nur ein Mitglied der gleichen Bewegung beitreten
         if (strike.movementId) {
             const myMovement = await movementsCollection.findOne({ members: userId, _id: strike.movementId });
             if (!myMovement) {
@@ -16254,8 +16258,11 @@ app.post('/api/strikes/join/:id', isAuthenticated, async (req, res) => {
             $push: { strikers: userId, strikerNames: username }
         };
 
-        // Wird der Streik jetzt aktiv?
-        if (newStrikerCount >= MIN_STRIKERS_NEEDED) {
+        let newlyActivated = false;
+
+        // FIX: Wird der Streik JETZT ERST aktiv? (War vorher pending)
+        if (strike.status === 'pending' && newStrikerCount >= MIN_STRIKERS_NEEDED) {
+            newlyActivated = true;
             const endsAt = new Date(Date.now() + STRIKE_DURATION_HOURS * 60 * 60 * 1000);
             updateOps.$set = { 
                 status: 'active', 
@@ -16263,7 +16270,7 @@ app.post('/api/strikes/join/:id', isAuthenticated, async (req, res) => {
                 expiresAt: endsAt 
             };
             
-            // LNN News-Meldung generieren (Dynamisch für Bewegung oder Unabhängig)
+            // LNN News-Meldung generieren
             let headline, content;
             if (strike.movementName) {
                 headline = `BEWEGUNG '${strike.movementName.toUpperCase()}' BESTREIKT ${strike.module.toUpperCase()}! 🛑`;
@@ -16286,13 +16293,17 @@ app.post('/api/strikes/join/:id', isAuthenticated, async (req, res) => {
 
         await db.collection('strikes').updateOne({ _id: strikeId }, updateOps);
 
-        res.json({ 
-            message: newStrikerCount >= MIN_STRIKERS_NEEDED 
-                ? "Du hast zugestimmt! Der Streik ist nun AKTIV!" 
-                : "Du bist beigetreten. Wir brauchen noch mehr Leute!" 
-        });
+        // Maßgeschneiderte Rückmeldung ans Frontend
+        if (newlyActivated) {
+            res.json({ message: "Du hast zugestimmt! Der Streik ist nun AKTIV und das Modul gesperrt!" });
+        } else if (strike.status === 'active') {
+            res.json({ message: "Solidarität! Du hast dich dem laufenden Streik angeschlossen." });
+        } else {
+            res.json({ message: "Du bist beigetreten. Wir brauchen noch mehr Leute!" });
+        }
 
     } catch (e) {
+        console.error("Fehler beim Streikbeitritt:", e);
         res.status(500).json({ error: "Fehler beim Beitreten." });
     }
 });
