@@ -18644,6 +18644,78 @@ app.post('/api/webauthn/register-verify', isAuthenticated, async (req, res) => {
     }
 });
 
+// --- 3. LOGIN: Optionen abrufen (Auf der index.html) ---
+app.get('/api/webauthn/login-options', async (req, res) => {
+    try {
+        const options = await generateAuthenticationOptions({
+            rpID,
+            userVerification: 'preferred',
+        });
+
+        // Wir speichern die Challenge in der Session des noch nicht eingeloggten Users
+        req.session.currentWebAuthnChallenge = options.challenge;
+        res.json(options);
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    }
+});
+
+// --- 4. LOGIN: Verifizieren und einloggen ---
+app.post('/api/webauthn/login-verify', async (req, res) => {
+    const body = req.body; 
+    const expectedChallenge = req.session.currentWebAuthnChallenge;
+
+    try {
+        // Wir suchen den User anhand der einzigartigen Passkey/Geräte-ID in der Datenbank
+        const user = await usersCollection.findOne({ "passkeys.credentialID": body.id });
+        if (!user) {
+            return res.status(400).json({ error: "Kein Limazon-Account zu diesem Gerät gefunden." });
+        }
+
+        const passkey = user.passkeys.find(pk => pk.credentialID === body.id);
+
+        let verification;
+        try {
+            verification = await verifyAuthenticationResponse({
+                response: body,
+                expectedChallenge,
+                expectedOrigin,
+                expectedRPID: rpID,
+                authenticator: {
+                    credentialPublicKey: Buffer.from(passkey.credentialPublicKey, 'base64url'),
+                    credentialID: Buffer.from(passkey.credentialID, 'base64url'),
+                    counter: passkey.counter,
+                }
+            });
+        } catch (error) {
+            console.error(error);
+            return res.status(400).json({ error: 'Fingerabdruck abgelehnt.' });
+        }
+
+        if (verification.verified) {
+            // Sicherheits-Counter des Schlüssels updaten
+            await usersCollection.updateOne(
+                { _id: user._id, "passkeys.credentialID": passkey.credentialID },
+                { 
+                    $set: { "passkeys.$.counter": verification.authenticationInfo.newCounter },
+                    $unset: { currentWebAuthnChallenge: "" }
+                }
+            );
+
+            // User offiziell in die Session einloggen
+            req.session.userId = user._id;
+            req.session.username = user.username;
+            req.session.isAdmin = user.isAdmin;
+
+            res.json({ verified: true, username: user.username });
+        } else {
+            res.status(400).json({ error: 'Verifizierung fehlgeschlagen.' });
+        }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
