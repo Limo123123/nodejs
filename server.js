@@ -18539,6 +18539,111 @@ app.post('/api/event/spin-wheel', isAuthenticated, async (req, res) => {
     }
 });
 
+const {
+    generateRegistrationOptions,
+    verifyRegistrationResponse,
+    generateAuthenticationOptions,
+    verifyAuthenticationResponse
+} = require('@simplewebauthn/server');
+
+// ==========================================
+// === PASSKEYS (WEBAUTHN) SYSTEM ===========
+// ==========================================
+
+const rpName = 'Limazon Universe';
+const rpID = 'app.limazon.v6.rocks';
+const expectedOrigin = 'https://app.limazon.v6.rocks';
+
+// --- 1. REGISTRIERUNG: Optionen abrufen (In den Account-Einstellungen) ---
+app.post('/api/webauthn/register-options', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        const userPasskeys = user.passkeys || [];
+
+        const options = await generateRegistrationOptions({
+            rpName,
+            rpID,
+            userID: user._id.toString(),
+            userName: user.username,
+            // Verhindert, dass man dasselbe Gerät 2x registriert
+            excludeCredentials: userPasskeys.map(key => ({
+                id: key.credentialID,
+                type: 'public-key',
+                transports: key.transports,
+            })),
+            authenticatorSelection: {
+                residentKey: 'required',
+                userVerification: 'preferred',
+            },
+        });
+
+        // Wir müssen die Challenge kurz in der DB speichern, um sie im nächsten Schritt zu prüfen
+        await usersCollection.updateOne(
+            { _id: userId },
+            { $set: { currentWebAuthnChallenge: options.challenge } }
+        );
+
+        res.json(options);
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    }
+});
+
+// --- 2. REGISTRIERUNG: Verifizieren und speichern ---
+app.post('/api/webauthn/register-verify', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    const body = req.body; // Das Objekt, das vom Browser (Fingerabdruck) zurückkommt
+
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        const expectedChallenge = user.currentWebAuthnChallenge;
+
+        let verification;
+        try {
+            verification = await verifyRegistrationResponse({
+                response: body,
+                expectedChallenge,
+                expectedOrigin,
+                expectedRPID: rpID,
+            });
+        } catch (error) {
+            console.error(error);
+            return res.status(400).json({ error: 'Verifizierung fehlgeschlagen.' });
+        }
+
+        const { verified, registrationInfo } = verification;
+
+        if (verified && registrationInfo) {
+            const { credentialPublicKey, credentialID, counter } = registrationInfo;
+
+            const newPasskey = {
+                // Wir speichern die rohen Buffer-Daten als Base64 Strings, damit MongoDB nicht meckert
+                credentialID: Buffer.from(credentialID).toString('base64url'),
+                credentialPublicKey: Buffer.from(credentialPublicKey).toString('base64url'),
+                counter,
+                transports: body.response.transports || [],
+                addedAt: new Date()
+            };
+
+            await usersCollection.updateOne(
+                { _id: userId },
+                { 
+                    $push: { passkeys: newPasskey },
+                    $unset: { currentWebAuthnChallenge: "" } // Challenge aufräumen
+                }
+            );
+
+            res.json({ verified: true, message: "Passkey erfolgreich verknüpft!" });
+        } else {
+            res.status(400).json({ error: 'Fingerabdruck abgelehnt.' });
+        }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
