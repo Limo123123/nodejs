@@ -3529,6 +3529,12 @@ app.post('/api/chat/chats/:chatId/messages', isAuthenticated, isChatParticipant,
         // 1. Nachricht in die DB speichern
         const result = await limMessagesCollection.insertOne(newMessageData);
         const newMessage = { _id: result.insertedId, ...newMessageData };
+		
+		// 1,5. Ollama Easter Egg
+		const OLLAMA_ID = "111111111111111111111111";
+        if (chat.type === 'whatslim' && chat.participants.some(p => p.toString() === OLLAMA_ID)) {
+            triggerOllamaAi(chatId, content.trim());
+        }
 
         // 2. Chat-Vorschau aktualisieren (damit es in der Übersicht nach oben rutscht)
         await limChatsCollection.updateOne(
@@ -13134,6 +13140,51 @@ REGELN:
     }
 }
 
+async function triggerOllamaAi(chatId, userMessage) {
+    try {
+        const GROQ_API_KEY = process.env.GROQ_API_KEY;
+        if (!GROQ_API_KEY) return;
+
+        const systemPrompt = `Du bist ein durchgeknallter KI-Bot namens "Ollama". Deine Persönlichkeit ist eine extrem überdrehte, satirische Version von Donald Trump, aber du lebst im Browsergame "Limazon". Du schreibst oft in GROSSBUCHSTABEN. Du forderst ständig, eine riesige Mauer um die Limo-Bank zu bauen, weil die Krypto-Wale und das Kartell das ganze Geld stehlen. Das Kartell muss die Mauer bezahlen! Es wird die beste Mauer sein. Sei extrem überheblich, lustig und völlig absurd. Antworte in langen 3-6 Sätzen`;
+
+        const apiMessages = [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userMessage }
+        ];
+
+        const payload = {
+            model: "llama-3.1-8b-instant",
+            messages: apiMessages,
+            temperature: 0.9,
+            max_tokens: 150
+        };
+
+        const aiRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', payload, {
+            headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' }
+        });
+
+        const aiText = aiRes.data.choices[0].message.content;
+
+        if (aiText) {
+            await limMessagesCollection.insertOne({
+                chatId: new ObjectId(chatId),
+                senderId: new ObjectId("111111111111111111111111"), // Feste Ollama ID
+                senderUsername: "Ollama",
+                content: aiText.trim(),
+                timestamp: new Date(),
+                isAi: true
+            });
+
+            await limChatsCollection.updateOne({ _id: new ObjectId(chatId) }, {
+                $set: { lastMessagePreview: aiText.trim().substring(0, 30), updatedAt: new Date(), lastMessageTimestamp: new Date() }
+            });
+            if (typeof updateDataVersion === 'function') updateDataVersion('chat');
+        }
+    } catch (err) {
+        console.error("Ollama AI Fehler:", err.message);
+    }
+}
+
 // 1. Therapie-Chat abrufen oder neu erstellen
 app.get('/api/therapy/chat', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
@@ -14480,6 +14531,14 @@ app.post('/api/delivery/send-all', isAuthenticated, async (req, res) => {
     const provider = req.session.deliveryQuotes.find(p => p.id === providerId);
     if (!provider) return res.status(400).json({ error: "Lieferdienst existiert nicht." });
 
+    // --- TIEFSEEBAHN EASTER EGG ---
+    let finalProviderName = provider.name;
+    const currentHour = new Date().getHours();
+    // Triggert immer um 3 Uhr nachts oder mit 5% Chance
+    if (currentHour === 3 || Math.random() < 0.05) {
+        finalProviderName = "Tiefseebahn (Linie 8)";
+    }
+
     const session = client.startSession();
     try {
         await session.withTransaction(async () => {
@@ -14525,7 +14584,7 @@ app.post('/api/delivery/send-all', isAuthenticated, async (req, res) => {
                     targetId: target._id, targetName: target.username,
                     productId: item.productId, productName: itemName, productIcon: itemIcon,
                     quantity: item.quantityOwned,
-                    providerName: provider.name + " (Umzug LKW)",
+                    providerName: finalProviderName + " (Umzug LKW)", // Angepasst für das Easter Egg!
                     cost: 0, // In Bulk-Kosten verrechnet
                     status: 'pending', arrivalDate, createdAt: new Date()
                 });
@@ -14536,7 +14595,7 @@ app.post('/api/delivery/send-all', isAuthenticated, async (req, res) => {
             await inventoriesCollection.deleteMany({ userId: senderId }, { session });
         });
 
-        res.json({ message: `📦 KOMPLETTER UMZUG an ${provider.name} übergeben! Alles kommt in ca. ${provider.timeMins} Minuten an.` });
+        res.json({ message: `📦 KOMPLETTER UMZUG an ${finalProviderName} übergeben! Alles kommt in ca. ${provider.timeMins} Minuten an.` });
     } catch (e) {
         res.status(400).json({ error: e.message });
     } finally {
@@ -14976,6 +15035,14 @@ app.post('/api/delivery/send', isAuthenticated, async (req, res) => {
         }
     }
 
+    // --- TIEFSEEBAHN EASTER EGG ---
+    let finalProviderName = provider.name;
+    const currentHour = new Date().getHours();
+    // Triggert immer um 3 Uhr nachts oder mit 5% Chance
+    if (currentHour === 3 || Math.random() < 0.05) {
+        finalProviderName = "Tiefseebahn (Linie 8)";
+    }
+
     const session = client.startSession();
     try {
         await session.withTransaction(async () => {
@@ -15011,7 +15078,7 @@ app.post('/api/delivery/send', isAuthenticated, async (req, res) => {
                 productName: itemName,
                 productIcon: itemIcon,
                 quantity: qty,
-                providerName: provider.name,
+                providerName: finalProviderName, // Angepasst für das Easter Egg!
                 cost: finalCost,
                 status: 'pending',
                 arrivalDate: arrivalDate,
@@ -15020,7 +15087,7 @@ app.post('/api/delivery/send', isAuthenticated, async (req, res) => {
         });
 
         req.session.deliveryQuotes = null;
-        res.json({ message: `📦 Paket an ${provider.name} übergeben! Es kommt in ca. ${provider.timeMins} Minuten an.` });
+        res.json({ message: `📦 Paket an ${finalProviderName} übergeben! Es kommt in ca. ${provider.timeMins} Minuten an.` });
 
     } catch (e) {
         res.status(400).json({ error: e.message });
@@ -17878,25 +17945,42 @@ app.post('/api/whatslim/start', isAuthenticated, async (req, res) => {
     if (targetUsername.toLowerCase() === myUsername.toLowerCase()) return res.status(400).json({ error: "Du kannst nicht mit dir selbst chatten." });
 
     try {
-        const targetUser = await usersCollection.findOne({ username: { $regex: new RegExp(`^${targetUsername.trim()}$`, 'i') } });
-        if (!targetUser) return res.status(404).json({ error: "Dieser Benutzer existiert nicht in Limazon." });
+        let targetUserId;
+        let finalTargetName;
+
+        // --- OLLAMA EASTER EGG ---
+        if (targetUsername.toLowerCase() === 'ollama') {
+            targetUserId = new ObjectId("111111111111111111111111"); // Feste ID
+            finalTargetName = "Ollama";
+        } else {
+            // Normale User-Suche
+            const targetUser = await usersCollection.findOne({ username: { $regex: new RegExp(`^${targetUsername.trim()}$`, 'i') } });
+            if (!targetUser) return res.status(404).json({ error: "Dieser Benutzer existiert nicht in Limazon." });
+            targetUserId = targetUser._id;
+            finalTargetName = targetUser.username;
+        }
 
         let chat = await limChatsCollection.findOne({
             type: 'whatslim',
-            participants: { $all: [userId, targetUser._id], $size: 2 }
+            participants: { $all: [userId, targetUserId], $size: 2 }
         });
 
         if (!chat) {
             const now = new Date();
             const newChat = {
                 type: 'whatslim',
-                participants: [userId, targetUser._id],
-                participantNames: [myUsername, targetUser.username],
+                participants: [userId, targetUserId],
+                participantNames: [myUsername, finalTargetName],
                 createdAt: now, updatedAt: now,
                 lastMessagePreview: "Chat gestartet", lastMessageTimestamp: now
             };
             const result = await limChatsCollection.insertOne(newChat);
             chat = { _id: result.insertedId, ...newChat };
+
+            // Begrüßung durch Ollama
+            if (finalTargetName === "Ollama") {
+                triggerOllamaAi(chat._id, "Hallo Ollama! Wer bist du?");
+            }
         }
         res.json({ message: "Chat bereit!", chat });
     } catch (err) {
