@@ -18609,6 +18609,7 @@ app.post('/api/webauthn/register-verify', isAuthenticated, async (req, res) => {
                 expectedChallenge,
                 expectedOrigin,
                 expectedRPID: rpID,
+                requireUserVerification: false
             });
         } catch (error) {
             console.error(error);
@@ -18687,7 +18688,8 @@ app.post('/api/webauthn/login-verify', async (req, res) => {
                     credentialPublicKey: Buffer.from(passkey.credentialPublicKey, 'base64url'),
                     credentialID: Buffer.from(passkey.credentialID, 'base64url'),
                     counter: passkey.counter,
-                }
+                },
+				requireUserVerification: false
             });
         } catch (error) {
             console.error(error);
