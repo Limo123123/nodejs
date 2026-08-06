@@ -14789,12 +14789,24 @@ if (cluster.isPrimary) {
                     { $set: { status: 'delivered', deliveredAt: new Date() } }
                 );
 
+                const isTiefsee = delivery.providerName.includes('Tiefseebahn');
+                
+                let mailSender = `🚚 ${delivery.providerName}`;
+                let mailSubject = `Paket von ${delivery.senderName} ist angekommen!`;
+                let mailContent = `Ding Dong! Dein Paket wurde erfolgreich zugestellt.\n\nInhalt: ${delivery.quantity}x ${delivery.productIcon || ''} ${delivery.productName}\nAbsender: ${delivery.senderName}\n\nViel Spaß damit!`;
+
+                if (isTiefsee) {
+                    mailSender = `🚇 Tiefseebahn (Linie 8)`;
+                    mailSubject = `Ein Paket aus der Tiefe...`;
+                    mailContent = `Die Waggontüren dieser uralten, noch von den Limos erbauten Bahn öffnen sich zischend. Dein Paket liegt verlassen auf einem Sitz.\n\nInhalt: ${delivery.quantity}x ${delivery.productIcon || ''} ${delivery.productName}\nAbsender: ${delivery.senderName}\n\n*Abgestempelt von: Dedf1sh*\n\nP.S.: Auf dem Karton klebt eine Notiz: "Bleib immer schön spritzig! - Käpt'n Kuddelfisch"`;
+                }
+
                 // 3. Lieferschein per Limo-Mail an den Empfänger schicken
                 await mailsCollection.insertOne({
                     userId: delivery.targetId,
-                    sender: `🚚 ${delivery.providerName}`,
-                    subject: `Paket von ${delivery.senderName} ist angekommen!`,
-                    content: `Ding Dong! Dein Paket wurde erfolgreich zugestellt.\n\nInhalt: ${delivery.quantity}x ${delivery.productIcon || ''} ${delivery.productName}\nAbsender: ${delivery.senderName}\n\nViel Spaß damit!`,
+                    sender: mailSender,
+                    subject: mailSubject,
+                    content: mailContent,
                     isRead: false,
                     isClaimed: false,
                     createdAt: new Date()
@@ -17252,25 +17264,23 @@ app.post('/api/drugs/use', isAuthenticated, async (req, res) => {
                 resultMessage = `ÜBERDOSIS! Du wachst im Krankenhaus auf. Die Magenpump-Behandlung hat dich $${hospitalBill.toLocaleString()} gekostet.`;
 
             } else {
+				
                 // RAZZIA (5%)
                 eventType = "raid";
                 
-                // User wird "eingefroren" und muss einen Namen nennen
                 await usersCollection.updateOne(
                     { _id: userId },
-                    { 
-                        $set: { 
-                            needsToSnitch: true, 
-                            snitchAttemptsLeft: 3 
-                        } 
-                    },
+                    { $set: { needsToSnitch: true, snitchAttemptsLeft: 3 } },
                     { session }
                 );
-
-                // Komplettes restliches Drogen-Inventar wird beschlagnahmt
                 await inventoriesCollection.deleteOne({ userId, productId: DRUG_ID }, { session });
                 
-                resultMessage = "RAZZIA! Die Tür fliegt auf, das SEK stürmt rein. Du bist verhaftet. Nenne deinen Dealer oder wandere lebenslang in den Knast!";
+                // --- THE ROOKIE EASTER EGG ---
+                if (Math.random() < 0.5) {
+                    resultMessage = "RAZZIA! Die Tür fliegt auf. Officer John Nolan und Officer Celina Juarez vom LAPD stürmen dein Wohnzimmer! Celina schnuppert an der Luft und sagt: 'Ich wusste es! Die Aura dieses Hauses ist extrem dunkel. Verhaften Sie ihn, Sir.' Du sitzt in U-Haft. Nenne deinen Dealer!";
+                } else {
+                    resultMessage = "RAZZIA! Die Tür fliegt auf, das SEK stürmt rein. Du bist verhaftet. Nenne deinen Dealer oder wandere lebenslang in den Knast!";
+                }
             }
         });
 
@@ -17373,7 +17383,7 @@ app.post('/api/cartel/snitch', isAuthenticated, async (req, res) => {
                     responseMessage = `Wir konnten diesen Dealer nicht finden. Verarsch uns nicht! Du hast noch ${newAttempts} Versuche.`;
                 } else {
                     // MAXIMALE VERSUCHE ERREICHT -> HARTE STRAFE
-                    const brutalFine = Math.floor(user.balance * 0.5); // 50% vom Geld weg
+                    const brutalFine = Math.floor(user.balance * 0.5); 
                     await usersCollection.updateOne(
                         { _id: userId },
                         { 
@@ -17385,8 +17395,12 @@ app.post('/api/cartel/snitch', isAuthenticated, async (req, res) => {
                     );
 
                     sendAsError = true;
-                    responseMessage = `Zeit abgelaufen! Da du nicht kooperieren willst, sperren wir dich weg. Dein Konto wurde um 50% ($${brutalFine.toLocaleString()}) gepfändet und deine Schufa ist auf 0 gefallen.`;
-                }
+                    // --- THE ROOKIE EASTER EGG (Nyla Harper) ---
+                    if (Math.random() < 0.5) {
+                        responseMessage = `Zeit abgelaufen! Detective Nyla Harper betritt den Verhörraum, verschränkt die Arme und starrt dich eiskalt an. 'Reicht mir. Sperrt ihn ein.' Dein Konto wurde um 50% ($${brutalFine.toLocaleString()}) gepfändet und deine Schufa ist auf 0 gefallen.`;
+                    } else {
+                        responseMessage = `Zeit abgelaufen! Da du nicht kooperieren willst, sperren wir dich weg. Dein Konto wurde um 50% ($${brutalFine.toLocaleString()}) gepfändet und deine Schufa ist auf 0 gefallen.`;
+					}
             }
         });
 
