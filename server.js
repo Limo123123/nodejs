@@ -18407,6 +18407,144 @@ app.get('/api/school/zeugnis', isAuthenticated, async (req, res) => {
     }
 });
 
+// ==========================================
+// === EVENT SYSTEM (CSD, HALLOWEEN, ETC) ===
+// ==========================================
+
+// Die zentrale Event-Config direkt in der server.js
+const eventConfig = {
+    isActive: true, // Setze dies auf false, um das Event serverseitig zu deaktivieren
+    id: "csd_2026", // WICHTIG: Wenn du das Event änderst (z.B. zu "halloween_26"), können User die Daily Reward neu abholen!
+    name: "Pride Month & CSD",
+    description: "Feiere die Vielfalt in Limazon! Hol dir deine tägliche Event-Ration und dreh am Pride-Rad.",
+    
+    // Optik für das Frontend
+    theme: {
+        backgroundGradient: "linear-gradient(135deg, rgba(255,0,24,0.1) 0%, rgba(255,165,44,0.1) 20%, rgba(255,255,65,0.1) 40%, rgba(0,128,24,0.1) 60%, rgba(0,0,249,0.1) 80%, rgba(134,0,125,0.1) 100%)",
+        accentColor: "#ec4899", // Pink
+        emoji: "🏳️‍🌈"
+    },
+
+    // Tägliche Belohnung
+    dailyReward: {
+        money: 15000,
+        tokens: 5 // Wir führen "Event-Tokens" ein
+    },
+
+    // Das Event-Glücksrad
+    wheel: {
+        costMoney: 2500, // Kostet $2.500 pro Dreh
+        prizes: [
+            { id: "jackpot", label: "JACKPOT ($100.000)", type: "money", amount: 100000, chance: 0.05, color: "#ff0018" },
+            { id: "win_high", label: "$25.000", type: "money", amount: 25000, chance: 0.15, color: "#ffa52c" },
+            { id: "win_tokens", label: "10 Event-Tokens", type: "token", amount: 10, chance: 0.20, color: "#ffff41" },
+            { id: "lose_small", label: "Leider Niete", type: "nothing", amount: 0, chance: 0.35, color: "#008018" },
+            { id: "lose_bad", label: "Zahltag! (-$5.000)", type: "money", amount: -5000, chance: 0.25, color: "#0000f9" }
+        ]
+    }
+};
+
+// 1. Config ans Frontend senden
+app.get('/api/event/info', isAuthenticated, (req, res) => {
+    res.json(eventConfig);
+});
+
+// 2. Tägliche Belohnung abholen
+app.post('/api/event/claim-daily', isAuthenticated, async (req, res) => {
+    if (!eventConfig.isActive) return res.status(400).json({ error: "Aktuell läuft kein Event." });
+
+    const userId = new ObjectId(req.session.userId);
+    const today = new Date().toISOString().split('T')[0]; // Format: YYYY-MM-DD
+    const eventClaimKey = `eventClaims.${eventConfig.id}`; // z.B. eventClaims.csd_2026
+
+    const session = client.startSession();
+    try {
+        let message = "";
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            
+            // Checken ob heute schon abgeholt
+            if (user.eventClaims && user.eventClaims[eventConfig.id] === today) {
+                throw new Error("Du hast deine Belohnung für heute schon abgeholt! Komm morgen wieder.");
+            }
+
+            // Geld und Tokens geben
+            const rewardMoney = eventConfig.dailyReward.money;
+            const rewardTokens = eventConfig.dailyReward.tokens;
+
+            await usersCollection.updateOne(
+                { _id: userId },
+                { 
+                    $inc: { balance: rewardMoney, eventTokens: rewardTokens },
+                    $set: { [eventClaimKey]: today } // Speichert z.B. eventClaims.csd_2026: "2026-08-06"
+                },
+                { session }
+            );
+
+            message = `Belohnung abgeholt! +$${rewardMoney.toLocaleString()} und +${rewardTokens} Event-Tokens.`;
+        });
+        res.json({ message });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// 3. Event-Glücksrad drehen
+app.post('/api/event/spin-wheel', isAuthenticated, async (req, res) => {
+    if (!eventConfig.isActive) return res.status(400).json({ error: "Aktuell läuft kein Event." });
+
+    const userId = new ObjectId(req.session.userId);
+    const cost = eventConfig.wheel.costMoney;
+
+    const session = client.startSession();
+    try {
+        let wonPrize = null;
+
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (user.balance < cost) throw new Error(`Du brauchst $${cost.toLocaleString()} für einen Dreh.`);
+
+            // Einsatz abziehen
+            await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -cost } }, { session });
+
+            // Preis berechnen (Gewichteter Zufall)
+            const rand = Math.random();
+            let cumulative = 0;
+            
+            for (const prize of eventConfig.wheel.prizes) {
+                cumulative += prize.chance;
+                if (rand <= cumulative) {
+                    wonPrize = prize;
+                    break;
+                }
+            }
+            // Fallback, falls Rundungsfehler auftreten
+            if (!wonPrize) wonPrize = eventConfig.wheel.prizes[eventConfig.wheel.prizes.length - 1];
+
+            // Gewinn gutschreiben
+            const updateDoc = { $inc: {} };
+            if (wonPrize.type === 'money' && wonPrize.amount !== 0) {
+                updateDoc.$inc.balance = wonPrize.amount;
+            } else if (wonPrize.type === 'token' && wonPrize.amount !== 0) {
+                updateDoc.$inc.eventTokens = wonPrize.amount;
+            }
+
+            // Nur updaten, wenn es was zu updaten gibt
+            if (Object.keys(updateDoc.$inc).length > 0) {
+                await usersCollection.updateOne({ _id: userId }, updateDoc, { session });
+            }
+        });
+
+        res.json({ success: true, prize: wonPrize });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
