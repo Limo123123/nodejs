@@ -17271,88 +17271,81 @@ app.get('/api/cartel/status', isAuthenticated, async (req, res) => {
     }
 });
 
-// 2. Drogen konsumieren (Die Würfel fallen!)
+// 2. Limo-Kristalle konsumieren
 app.post('/api/drugs/use', isAuthenticated, async (req, res) => {
+    const { drugId } = req.body;
     const userId = new ObjectId(req.session.userId);
     const DRUG_ID = 'limo_crystals';
+
+    if (drugId !== DRUG_ID) return res.status(400).json({ error: "Diese Droge gibt es nicht." });
 
     const session = client.startSession();
     try {
         let resultMessage = "";
-        let eventType = "buff"; // 'buff', 'overdose', 'raid'
+        let eventType = "";
 
         await session.withTransaction(async () => {
-            const user = await usersCollection.findOne({ _id: userId }, { session });
-            
-            // Verhör-Check: Wer in Handschellen sitzt, kann keine Drogen nehmen
-            if (user.needsToSnitch) throw new Error("Du hast gerade ganz andere Probleme. Das SEK steht in deinem Wohnzimmer!");
-
             const inventoryItem = await inventoriesCollection.findOne({ userId, productId: DRUG_ID }, { session });
             if (!inventoryItem || inventoryItem.quantityOwned < 1) {
-                throw new Error("Du hast keine Limo-Kristalle im Inventar.");
+                throw new Error("Du hast keine Limo-Kristalle mehr.");
             }
 
-            // 1. Droge abziehen
-            await inventoriesCollection.updateOne(
-                { _id: inventoryItem._id },
-                { $inc: { quantityOwned: -1 } },
-                { session }
-            );
+            const rand = Math.random();
 
-            // 2. Würfeln (85% Buff, 10% Überdosis, 5% Razzia)
-            const roll = Math.random();
-
-            if (roll < 0.85) {
-                // ERFOLG: Mega-Buff (Reset aller Cooldowns & Energie voll)
-                await usersCollection.updateOne(
-                    { _id: userId },
-                    { 
-                        $set: { 
-                            lastWorkedAt: 0, 
-                            lastRobberyAt: 0, 
-                            lastHeistAt: 0 
-                        } 
-                    },
+            if (rand < 0.85) {
+                // MEGA-BUFF (85%)
+                eventType = "buff";
+                await inventoriesCollection.updateOne(
+                    { _id: inventoryItem._id },
+                    { $inc: { quantityOwned: -1 } },
                     { session }
                 );
-                resultMessage = "Der Fokus kickt rein! Du fühlst dich unbesiegbar. Alle deine Arbeits- und Crime-Cooldowns wurden sofort zurückgesetzt.";
+                await usersCollection.updateOne(
+                    { _id: userId },
+                    { $set: { "cooldowns.rob": null, "cooldowns.heist": null } },
+                    { session }
+                );
+                resultMessage = "Die Kristalle kicken rein! Dein Fokus ist rasiermesserscharf. Alle Crime-Cooldowns (Raub & Heist) wurden sofort auf Null gesetzt!";
                 
-            } else if (roll < 0.95) {
+            } else if (rand < 0.95) {
                 // ÜBERDOSIS (10%)
                 eventType = "overdose";
                 const hospitalBill = 15000;
+                await inventoriesCollection.updateOne(
+                    { _id: inventoryItem._id },
+                    { $inc: { quantityOwned: -1 } },
+                    { session }
+                );
                 await usersCollection.updateOne(
                     { _id: userId },
                     { $inc: { balance: -hospitalBill } },
                     { session }
                 );
-                // Geld geht an die Staatskasse
-                await systemSettingsCollection.updateOne({ id: 'state_treasury' }, { $inc: { balance: hospitalBill } }, { upsert: true, session });
-                resultMessage = `ÜBERDOSIS! Du wachst im Krankenhaus auf. Die Magenpump-Behandlung hat dich $${hospitalBill.toLocaleString()} gekostet.`;
-
+                resultMessage = `Zu viel! Du bist kollabiert und im Krankenhaus aufgewacht. Magen auspumpen hat dich $${hospitalBill.toLocaleString()} gekostet.`;
+                
             } else {
-				
                 // RAZZIA (5%)
                 eventType = "raid";
-                
-                await usersCollection.updateOne(
-                    { _id: userId },
-                    { $set: { needsToSnitch: true, snitchAttemptsLeft: 3 } },
-                    { session }
-                );
-                await inventoriesCollection.deleteOne({ userId, productId: DRUG_ID }, { session });
+                let arrestedBy = 'sek'; // Standard: Deutsches SEK
                 
                 // --- THE ROOKIE EASTER EGG ---
                 if (Math.random() < 0.5) {
+                    arrestedBy = 'lapd'; // LAPD übernimmt!
                     resultMessage = "RAZZIA! Die Tür fliegt auf. Officer John Nolan und Officer Celina Juarez vom LAPD stürmen dein Wohnzimmer! Celina schnuppert an der Luft und sagt: 'Ich wusste es! Die Aura dieses Hauses ist extrem dunkel. Verhaften Sie ihn, Sir.' Du sitzt in U-Haft. Nenne deinen Dealer!";
                 } else {
                     resultMessage = "RAZZIA! Die Tür fliegt auf, das SEK stürmt rein. Du bist verhaftet. Nenne deinen Dealer oder wandere lebenslang in den Knast!";
                 }
+
+                await usersCollection.updateOne(
+                    { _id: userId },
+                    { $set: { needsToSnitch: true, snitchAttemptsLeft: 3, arrestedBy: arrestedBy } },
+                    { session }
+                );
+                await inventoriesCollection.deleteOne({ userId, productId: DRUG_ID }, { session });
             }
         });
 
-        res.json({ success: true, event: eventType, message: resultMessage });
-
+        res.json({ message: resultMessage, event: eventType });
     } catch (e) {
         res.status(400).json({ error: e.message });
     } finally {
@@ -17372,24 +17365,25 @@ app.post('/api/cartel/snitch', isAuthenticated, async (req, res) => {
     const session = client.startSession();
     try {
         let responseMessage = "";
-        let sendAsError = false; // Steuert, ob wir am Ende eine rote Fehlermeldung ausgeben
+        let sendAsError = false; 
 
         await session.withTransaction(async () => {
             const user = await usersCollection.findOne({ _id: userId }, { session });
             if (!user.needsToSnitch) {
                 sendAsError = true;
                 responseMessage = "Du bist gar nicht verhaftet.";
-                return; // Beendet den Transaktions-Block sicher ohne Rollback
+                return; 
             }
 
             const attempts = user.snitchAttemptsLeft !== undefined ? user.snitchAttemptsLeft : 3;
+            const arrestedBy = user.arrestedBy || 'sek'; // Check, wer uns verhaftet hat!
+
             if (attempts <= 0) {
                 sendAsError = true;
                 responseMessage = "Du hattest deine Chance.";
                 return;
             }
 
-            // Dealer suchen (Regex für Case-Insensitive)
             const dealer = await usersCollection.findOne({ 
                 username: { $regex: new RegExp(`^${dealerName.trim()}$`, 'i') },
                 isDealer: true 
@@ -17402,7 +17396,8 @@ app.post('/api/cartel/snitch', isAuthenticated, async (req, res) => {
                     { _id: userId },
                     { 
                         $inc: { balance: -smallFine },
-                        $unset: { needsToSnitch: "", snitchAttemptsLeft: "" }
+                        // WICHTIG: arrestedBy wird auch gelöscht
+                        $unset: { needsToSnitch: "", snitchAttemptsLeft: "", arrestedBy: "" }
                     },
                     { session }
                 );
@@ -17415,9 +17410,21 @@ app.post('/api/cartel/snitch', isAuthenticated, async (req, res) => {
                 );
                 await inventoriesCollection.deleteOne({ userId: dealer._id, productId: 'limo_crystals' }, { session });
 
+                // Nachrichten anpassen je nach Behörde
+                let newsHeadline = "VERRAT IM UNTERGRUND! 🚨";
+                let newsContent = `Das SEK hat die Bude von ${dealer.username} gestürmt! Zehntausende Limo-Kristalle wurden beschlagnahmt. Ein kleiner Fisch hat gesungen!`;
+                
+                if (arrestedBy === 'lapd') {
+                    newsHeadline = "DEA & LAPD SCHLAGEN ZU! 🚨";
+                    newsContent = `Das LAPD SWAT-Team hat das Drogenversteck von ${dealer.username} ausgehoben! Eine große Menge Kristalle wurde sichergestellt. Detective Harper dankt einem anonymen Informanten.`;
+                    responseMessage = `Deal akzeptiert! Die DEA erlässt dir die Haft für $${smallFine}. ${dealer.username} kriegt gerade Besuch vom LAPD SWAT. Pass auf dich auf!`;
+                } else {
+                    responseMessage = `Deal akzeptiert! Du wurdest mit einer kleinen Strafe ($${smallFine}) freigelassen. ${dealer.username} kriegt gerade Besuch vom SEK. Pass auf dich auf!`;
+                }
+
                 await newsCollection.insertOne({
-                    headline: "VERRAT IM UNTERGRUND! 🚨",
-                    content: `Das SEK hat die Bude von ${dealer.username} gestürmt! Zehntausende Limo-Kristalle wurden beschlagnahmt. Ein kleiner Fisch hat gesungen!`,
+                    headline: newsHeadline,
+                    content: newsContent,
                     author: "LNN Justiz",
                     category: "Verbrechen",
                     createdAt: new Date(),
@@ -17432,8 +17439,6 @@ app.post('/api/cartel/snitch', isAuthenticated, async (req, res) => {
                         snitcher: req.session.username 
                     });
                 }
-
-                responseMessage = `Deal akzeptiert! Du wurdest mit einer kleinen Strafe ($${smallFine}) freigelassen. ${dealer.username} kriegt gerade Besuch vom SEK. Pass auf dich auf!`;
 
             } else {
                 // FALSCHER NAME (Versuch abziehen)
@@ -17456,24 +17461,28 @@ app.post('/api/cartel/snitch', isAuthenticated, async (req, res) => {
                         { 
                             $inc: { balance: -brutalFine },
                             $set: { schufaScore: 0 },
-                            $unset: { needsToSnitch: "", snitchAttemptsLeft: "" }
+                            // Wieder arrestedBy mit löschen
+                            $unset: { needsToSnitch: "", snitchAttemptsLeft: "", arrestedBy: "" }
                         },
                         { session }
                     );
 
                     sendAsError = true;
-                    // --- THE ROOKIE EASTER EGG (Nyla Harper) ---
-                    if (Math.random() < 0.5) {
-                        responseMessage = `Zeit abgelaufen! Detective Nyla Harper betritt den Verhörraum, verschränkt die Arme und starrt dich eiskalt an. 'Reicht mir. Sperrt ihn ein.' Dein Konto wurde um 50% ($${brutalFine.toLocaleString()}) gepfändet und deine Schufa ist auf 0 gefallen.`;
+
+                    // Strafe anpassen je nach Behörde
+                    if (arrestedBy === 'lapd') {
+                        if (Math.random() < 0.5) {
+                            responseMessage = `Zeit abgelaufen! Detective Nyla Harper betritt den Verhörraum, verschränkt die Arme und starrt dich eiskalt an. 'Reicht mir. Sperrt ihn ins L.A. County Jail.' Dein Konto wurde um 50% ($${brutalFine.toLocaleString()}) gepfändet und deine Schufa ist ruiniert.`;
+                        } else {
+                            responseMessage = `Zeit abgelaufen! Da du nicht kooperierst, übergeben wir dich der DEA. Dein Konto wurde um 50% ($${brutalFine.toLocaleString()}) gepfändet und du wurdest eingesperrt.`;
+                        }
                     } else {
-                        responseMessage = `Zeit abgelaufen! Da du nicht kooperieren willst, sperren wir dich weg. Dein Konto wurde um 50% ($${brutalFine.toLocaleString()}) gepfändet und deine Schufa ist auf 0 gefallen.`;
-					}
+                        responseMessage = `Zeit abgelaufen! Da du nicht kooperieren willst, sperrt dich das SEK weg. Dein Konto wurde um 50% ($${brutalFine.toLocaleString()}) gepfändet und deine Schufa ist auf 0 gefallen.`;
+                    }
                 }
             }
         });
 
-        // WICHTIG: Die Transaktion ist hier fertig und GÜLTIG. Die Datenbank wurde aktualisiert!
-        // Jetzt können wir das Frontend über das `sendAsError` Flag steuern.
         if (sendAsError) {
             return res.status(400).json({ error: responseMessage });
         } else {
