@@ -17468,6 +17468,7 @@ app.post('/api/cartel/snitch', isAuthenticated, async (req, res) => {
                     } else {
                         responseMessage = `Zeit abgelaufen! Da du nicht kooperieren willst, sperren wir dich weg. Dein Konto wurde um 50% ($${brutalFine.toLocaleString()}) gepfändet und deine Schufa ist auf 0 gefallen.`;
 					}
+                }
             }
         });
 
