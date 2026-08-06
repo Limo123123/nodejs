@@ -3530,9 +3530,10 @@ app.post('/api/chat/chats/:chatId/messages', isAuthenticated, isChatParticipant,
         const result = await limMessagesCollection.insertOne(newMessageData);
         const newMessage = { _id: result.insertedId, ...newMessageData };
 		
-		// 1,5. Ollama Easter Egg
-		const OLLAMA_ID = "111111111111111111111111";
-        if (chat.type === 'whatslim' && chat.participants.some(p => p.toString() === OLLAMA_ID)) {
+        const OLLAMA_ID = "111111111111111111111111";
+        const ollamaChat = await limChatsCollection.findOne({ _id: new ObjectId(chatId) });
+        
+        if (ollamaChat && ollamaChat.type === 'whatslim' && ollamaChat.participants.some(p => p.toString() === OLLAMA_ID)) {
             triggerOllamaAi(chatId, content.trim());
         }
 
