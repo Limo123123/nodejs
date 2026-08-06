@@ -18413,10 +18413,10 @@ app.get('/api/school/zeugnis', isAuthenticated, async (req, res) => {
 
 // Die zentrale Event-Config direkt in der server.js
 const eventConfig = {
-    isActive: true, // Setze dies auf false, um das Event serverseitig zu deaktivieren
-    id: "csd_2026", // WICHTIG: Wenn du das Event änderst (z.B. zu "halloween_26"), können User die Daily Reward neu abholen!
+    isActive: true, 
+    id: "csd_2026_v2", // Neue ID, falls du schon abgeholt hast, kannst du nochmal!
     name: "Pride Month & CSD",
-    description: "Feiere die Vielfalt in Limazon! Hol dir deine tägliche Event-Ration und dreh am Pride-Rad.",
+    description: "Hol dir deine tägliche Event-Ration und finde am Glücksrad heraus: Welche Sexualität hast du heute?",
     
     // Optik für das Frontend
     theme: {
@@ -18428,18 +18428,19 @@ const eventConfig = {
     // Tägliche Belohnung
     dailyReward: {
         money: 15000,
-        tokens: 5 // Wir führen "Event-Tokens" ein
+        tokens: 5
     },
 
     // Das Event-Glücksrad
     wheel: {
         costMoney: 2500, // Kostet $2.500 pro Dreh
         prizes: [
-            { id: "jackpot", label: "JACKPOT ($100.000)", type: "money", amount: 100000, chance: 0.05, color: "#ff0018" },
-            { id: "win_high", label: "$25.000", type: "money", amount: 25000, chance: 0.15, color: "#ffa52c" },
-            { id: "win_tokens", label: "10 Event-Tokens", type: "token", amount: 10, chance: 0.20, color: "#ffff41" },
-            { id: "lose_small", label: "Leider Niete", type: "nothing", amount: 0, chance: 0.35, color: "#008018" },
-            { id: "lose_bad", label: "Zahltag! (-$5.000)", type: "money", amount: -5000, chance: 0.25, color: "#0000f9" }
+            { id: "gay", label: "Schwul/Lesbisch (Fabulous! +$25.000)", type: "money", amount: 25000, chance: 0.15, color: "#ff0018" },
+            { id: "bi", label: "Bisexuell (Doppeltes Chaos! +$5.000)", type: "money", amount: 5000, chance: 0.25, color: "#a855f7" },
+            { id: "pan", label: "Pansexuell (Blindflug in die Liebe! +10 Tokens)", type: "token", amount: 10, chance: 0.20, color: "#ff1b8d" },
+            { id: "ace", label: "Asexuell (Knoblauchbrot gefunden! +$10.000)", type: "money", amount: 10000, chance: 0.15, color: "#000000" },
+            { id: "hetero", label: "Hetero (Standard-Settings. Niete.)", type: "nothing", amount: 0, chance: 0.20, color: "#808080" },
+            { id: "octoling", label: "Octoling (Warte... das ist keine Sexualität! JACKPOT $100k)", type: "money", amount: 100000, chance: 0.05, color: "#00ffcc" }
         ]
     }
 };
@@ -18454,8 +18455,8 @@ app.post('/api/event/claim-daily', isAuthenticated, async (req, res) => {
     if (!eventConfig.isActive) return res.status(400).json({ error: "Aktuell läuft kein Event." });
 
     const userId = new ObjectId(req.session.userId);
-    const today = new Date().toISOString().split('T')[0]; // Format: YYYY-MM-DD
-    const eventClaimKey = `eventClaims.${eventConfig.id}`; // z.B. eventClaims.csd_2026
+    const today = new Date().toISOString().split('T')[0];
+    const eventClaimKey = `eventClaims.${eventConfig.id}`;
 
     const session = client.startSession();
     try {
@@ -18463,12 +18464,10 @@ app.post('/api/event/claim-daily', isAuthenticated, async (req, res) => {
         await session.withTransaction(async () => {
             const user = await usersCollection.findOne({ _id: userId }, { session });
             
-            // Checken ob heute schon abgeholt
             if (user.eventClaims && user.eventClaims[eventConfig.id] === today) {
                 throw new Error("Du hast deine Belohnung für heute schon abgeholt! Komm morgen wieder.");
             }
 
-            // Geld und Tokens geben
             const rewardMoney = eventConfig.dailyReward.money;
             const rewardTokens = eventConfig.dailyReward.tokens;
 
@@ -18476,7 +18475,7 @@ app.post('/api/event/claim-daily', isAuthenticated, async (req, res) => {
                 { _id: userId },
                 { 
                     $inc: { balance: rewardMoney, eventTokens: rewardTokens },
-                    $set: { [eventClaimKey]: today } // Speichert z.B. eventClaims.csd_2026: "2026-08-06"
+                    $set: { [eventClaimKey]: today }
                 },
                 { session }
             );
@@ -18506,10 +18505,8 @@ app.post('/api/event/spin-wheel', isAuthenticated, async (req, res) => {
             const user = await usersCollection.findOne({ _id: userId }, { session });
             if (user.balance < cost) throw new Error(`Du brauchst $${cost.toLocaleString()} für einen Dreh.`);
 
-            // Einsatz abziehen
             await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -cost } }, { session });
 
-            // Preis berechnen (Gewichteter Zufall)
             const rand = Math.random();
             let cumulative = 0;
             
@@ -18520,10 +18517,8 @@ app.post('/api/event/spin-wheel', isAuthenticated, async (req, res) => {
                     break;
                 }
             }
-            // Fallback, falls Rundungsfehler auftreten
             if (!wonPrize) wonPrize = eventConfig.wheel.prizes[eventConfig.wheel.prizes.length - 1];
 
-            // Gewinn gutschreiben
             const updateDoc = { $inc: {} };
             if (wonPrize.type === 'money' && wonPrize.amount !== 0) {
                 updateDoc.$inc.balance = wonPrize.amount;
@@ -18531,7 +18526,6 @@ app.post('/api/event/spin-wheel', isAuthenticated, async (req, res) => {
                 updateDoc.$inc.eventTokens = wonPrize.amount;
             }
 
-            // Nur updaten, wenn es was zu updaten gibt
             if (Object.keys(updateDoc.$inc).length > 0) {
                 await usersCollection.updateOne({ _id: userId }, updateDoc, { session });
             }
