@@ -344,20 +344,20 @@ app.delete('/api/cdn/delete/:filename', isAuthenticated, isAdmin, (req, res) => 
 // --- LIMTUBE: VIDEO UPLOAD SYSTEM ---
 const videoStorage = multer.diskStorage({
     destination: (req, file, cb) => {
-        cb(null, CDN_DIR); // Gleicher Ordner wie Bilder, da Nginx hier schon lauscht!
+        cb(null, CDN_DIR); // Wir speichern sie im gleichen /cdn Ordner!
     },
     filename: (req, file, cb) => {
-        // Sicheren Dateinamen generieren (z.B. vid_169123_45.mp4)
         const ext = path.extname(file.originalname).toLowerCase();
-        // Nur .mp4 zulassen
+        // Nur MP4 zulassen
         if (ext !== '.mp4') return cb(new Error('Nur MP4 Dateien erlaubt!'), false);
+        // Dateiname: vid_1691234567_123.mp4
         cb(null, `vid_${Date.now()}_${Math.floor(Math.random() * 1000)}${ext}`);
     }
 });
 
 const uploadVideo = multer({ 
     storage: videoStorage, 
-    limits: { fileSize: 500 * 1024 * 1024 } // 500 MB Limit
+    limits: { fileSize: 500 * 1024 * 1024 } // Hard Limit: 500 MB
 });
 
 // ==============================================================================
@@ -18745,9 +18745,9 @@ app.post('/api/webauthn/login-verify', async (req, res) => {
 // === LIMTUBE V2 API ===
 // =========================================================
 
-// 1. Video hochladen
+// API: Neues Video hochladen
 app.post('/api/limtube/upload', isAuthenticated, (req, res) => {
-    // Wir nutzen den uploadVideo Middleware manuell, um Fehler sauber abzufangen
+    // Manuelles Aufrufen von Multer, um Errors sauber zu catchen
     uploadVideo.single('video')(req, res, async (err) => {
         if (err) {
             console.error(`${LOG_PREFIX_SERVER} Video-Upload Fehler:`, err);
@@ -18757,8 +18757,9 @@ app.post('/api/limtube/upload', isAuthenticated, (req, res) => {
         if (!req.file) return res.status(400).json({ error: 'Kein Video empfangen.' });
         
         const { title, description } = req.body;
+        
+        // Titel ist Pflicht! Wenn er fehlt, löschen wir das Video wieder.
         if (!title || title.trim().length < 5) {
-            // Wenn der Titel fehlt, löschen wir das hochgeladene Video wieder, um Platz zu sparen
             fs.unlinkSync(req.file.path);
             return res.status(400).json({ error: 'Ein Titel (min. 5 Zeichen) ist Pflicht!' });
         }
@@ -18768,7 +18769,6 @@ app.post('/api/limtube/upload', isAuthenticated, (req, res) => {
                 title: title.trim(),
                 description: description ? description.trim().substring(0, 500) : "",
                 filename: req.file.filename,
-                // Die Video-URL bauen wir fürs Frontend später zusammen, aber wir speichern den Filename
                 uploaderId: new ObjectId(req.session.userId),
                 uploaderName: req.session.username,
                 views: 0,
@@ -18780,30 +18780,42 @@ app.post('/api/limtube/upload', isAuthenticated, (req, res) => {
 
             await limtubeVideosCollection.insertOne(newVideo);
             
-            // Optional: Activity Log eintragen
-            await logActivity(req, "LIMTUBE_UPLOAD", { title: newVideo.title, filename: newVideo.filename });
+            // Optional: Du kannst hier auch direkt ein Achievement/Log verteilen
+            await logActivity(req, "LIMTUBE_UPLOAD", { title: newVideo.title });
 
             console.log(`${LOG_PREFIX_SERVER} 🎬 Limtube: ${req.session.username} hat "${newVideo.title}" hochgeladen.`);
             res.status(201).json({ message: 'Video erfolgreich hochgeladen!', video: newVideo });
 
         } catch (dbErr) {
             console.error(`${LOG_PREFIX_SERVER} Limtube DB-Fehler:`, dbErr);
-            fs.unlinkSync(req.file.path); // Aufräumen bei DB-Fehler
-            res.status(500).json({ error: 'Serverfehler beim Speichern des Videos.' });
+            fs.unlinkSync(req.file.path); 
+            res.status(500).json({ error: 'Serverfehler beim Speichern.' });
         }
     });
 });
 
-// 2. Feed abrufen (Die neuesten Videos laden)
+// API: Den Feed laden (Neueste Videos)
 app.get('/api/limtube/feed', isAuthenticated, async (req, res) => {
     try {
         const videos = await limtubeVideosCollection
             .find({ status: 'active' })
             .sort({ createdAt: -1 })
-            .limit(50)
+            .limit(50) // Paginierung später einbauen
             .toArray();
             
-        res.json({ videos });
+        // Wir formatieren die Daten kurz für das Frontend
+        const formattedVideos = videos.map(v => ({
+            id: v._id,
+            title: v.title,
+            description: v.description,
+            uploaderName: v.uploaderName,
+            views: v.views,
+            likesCount: v.likes.length,
+            streamUrl: `https://stream.limazon.v6.rocks/cdn/${v.filename}`,
+            createdAt: v.createdAt
+        }));
+
+        res.json({ videos: formattedVideos });
     } catch (e) {
         console.error(`${LOG_PREFIX_SERVER} Limtube Feed-Fehler:`, e);
         res.status(500).json({ error: "Fehler beim Laden der Videos." });
