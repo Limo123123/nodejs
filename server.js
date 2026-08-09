@@ -243,6 +243,7 @@ let orphanageCollection;
 let cartelApplicationsCollection;
 let inviteCodesCollection;
 let movementsCollection;
+let limtubeVideosCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -338,6 +339,25 @@ app.delete('/api/cdn/delete/:filename', isAuthenticated, isAdmin, (req, res) => 
         console.log(`${LOG_PREFIX_SERVER} 🗑️ Bild gelöscht: ${filename} von Admin ${req.session.username}`);
         res.json({ message: 'Bild erfolgreich gelöscht.' });
     });
+});
+
+// --- LIMTUBE: VIDEO UPLOAD SYSTEM ---
+const videoStorage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, CDN_DIR); // Gleicher Ordner wie Bilder, da Nginx hier schon lauscht!
+    },
+    filename: (req, file, cb) => {
+        // Sicheren Dateinamen generieren (z.B. vid_169123_45.mp4)
+        const ext = path.extname(file.originalname).toLowerCase();
+        // Nur .mp4 zulassen
+        if (ext !== '.mp4') return cb(new Error('Nur MP4 Dateien erlaubt!'), false);
+        cb(null, `vid_${Date.now()}_${Math.floor(Math.random() * 1000)}${ext}`);
+    }
+});
+
+const uploadVideo = multer({ 
+    storage: videoStorage, 
+    limits: { fileSize: 500 * 1024 * 1024 } // 500 MB Limit
 });
 
 // ==============================================================================
@@ -1324,9 +1344,9 @@ MongoClient.connect(mongoUri)
 		orphanageCollection = db.collection('orphanage');
 		inviteCodesCollection = db.collection('inviteCodes');
 		movementsCollection = db.collection('movements');
-
         bankTransactionsCollection = db.collection('bankTransactions');
 		cartelApplicationsCollection = db.collection('cartelApplications');
+		limtubeVideosCollection = db.collection('limtubeVideos');
         console.log(`${LOG_PREFIX_SERVER} ✅ MongoDB verbunden & alle Collections initialisiert.`);
         // --- 2. Indizes & Reparaturen ---
         try {
@@ -1385,6 +1405,7 @@ MongoClient.connect(mongoUri)
     			{ expireAfterSeconds: 30 * 24 * 60 * 60 } 
 			);
 			console.log(`${LOG_PREFIX_SERVER} ⏱️ TTL-Index für Activity-Logs aktiv (30 Tage).`);
+			await limtubeVideosCollection.createIndex({ createdAt: -1 });
 
             if (tokenTransactionsCollection) {
                 await tokenTransactionsCollection.createIndex({ userId: 1 });
@@ -18717,6 +18738,75 @@ app.post('/api/webauthn/login-verify', async (req, res) => {
         }
     } catch (e) {
         res.status(500).json({ error: e.message });
+    }
+});
+
+// =========================================================
+// === LIMTUBE V2 API ===
+// =========================================================
+
+// 1. Video hochladen
+app.post('/api/limtube/upload', isAuthenticated, (req, res) => {
+    // Wir nutzen den uploadVideo Middleware manuell, um Fehler sauber abzufangen
+    uploadVideo.single('video')(req, res, async (err) => {
+        if (err) {
+            console.error(`${LOG_PREFIX_SERVER} Video-Upload Fehler:`, err);
+            return res.status(400).json({ error: err.message || 'Fehler beim Upload. Max 500MB.' });
+        }
+
+        if (!req.file) return res.status(400).json({ error: 'Kein Video empfangen.' });
+        
+        const { title, description } = req.body;
+        if (!title || title.trim().length < 5) {
+            // Wenn der Titel fehlt, löschen wir das hochgeladene Video wieder, um Platz zu sparen
+            fs.unlinkSync(req.file.path);
+            return res.status(400).json({ error: 'Ein Titel (min. 5 Zeichen) ist Pflicht!' });
+        }
+
+        try {
+            const newVideo = {
+                title: title.trim(),
+                description: description ? description.trim().substring(0, 500) : "",
+                filename: req.file.filename,
+                // Die Video-URL bauen wir fürs Frontend später zusammen, aber wir speichern den Filename
+                uploaderId: new ObjectId(req.session.userId),
+                uploaderName: req.session.username,
+                views: 0,
+                likes: [],
+                comments: [],
+                createdAt: new Date(),
+                status: 'active'
+            };
+
+            await limtubeVideosCollection.insertOne(newVideo);
+            
+            // Optional: Activity Log eintragen
+            await logActivity(req, "LIMTUBE_UPLOAD", { title: newVideo.title, filename: newVideo.filename });
+
+            console.log(`${LOG_PREFIX_SERVER} 🎬 Limtube: ${req.session.username} hat "${newVideo.title}" hochgeladen.`);
+            res.status(201).json({ message: 'Video erfolgreich hochgeladen!', video: newVideo });
+
+        } catch (dbErr) {
+            console.error(`${LOG_PREFIX_SERVER} Limtube DB-Fehler:`, dbErr);
+            fs.unlinkSync(req.file.path); // Aufräumen bei DB-Fehler
+            res.status(500).json({ error: 'Serverfehler beim Speichern des Videos.' });
+        }
+    });
+});
+
+// 2. Feed abrufen (Die neuesten Videos laden)
+app.get('/api/limtube/feed', isAuthenticated, async (req, res) => {
+    try {
+        const videos = await limtubeVideosCollection
+            .find({ status: 'active' })
+            .sort({ createdAt: -1 })
+            .limit(50)
+            .toArray();
+            
+        res.json({ videos });
+    } catch (e) {
+        console.error(`${LOG_PREFIX_SERVER} Limtube Feed-Fehler:`, e);
+        res.status(500).json({ error: "Fehler beim Laden der Videos." });
     }
 });
 
