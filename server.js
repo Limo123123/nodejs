@@ -18746,8 +18746,38 @@ app.post('/api/webauthn/login-verify', async (req, res) => {
 // =========================================================
 
 // API: Neues Video hochladen
-app.post('/api/limtube/upload', isAuthenticated, (req, res) => {
-    // Manuelles Aufrufen von Multer, um Errors sauber zu catchen
+app.post('/api/limtube/upload', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const user = await usersCollection.findOne({ _id: userId }, { projection: { isAdmin: 1, activeSubscriptions: 1 } });
+        
+        // Wie viele Videos heute schon?
+        const todayStart = new Date();
+        todayStart.setHours(0, 0, 0, 0); // Start des heutigen Tages (00:00 Uhr)
+
+        const uploadedTodayCount = await limtubeVideosCollection.countDocuments({
+            uploaderId: userId,
+            createdAt: { $gte: todayStart }
+        });
+
+        // Limit festlegen
+        let dailyLimit = 2; // Standard: 2 Videos pro Tag
+        if (user.activeSubscriptions && user.activeSubscriptions.includes('prime')) {
+            dailyLimit = 5; // Prime-Nutzer: 5 Videos
+        }
+        if (user.isAdmin) {
+            dailyLimit = 999; // Admins juckt das Limit nicht
+        }
+
+        if (uploadedTodayCount >= dailyLimit) {
+            return res.status(429).json({ error: `Upload-Limit erreicht! Du darfst nur ${dailyLimit} Videos pro Tag hochladen.` });
+        }
+    } catch (e) {
+        return res.status(500).json({ error: "Fehler beim Prüfen der Upload-Limits." });
+    }
+
+    // Erst wenn das Limit NICHT erreicht ist, rufen wir multer auf und starten den Upload
     uploadVideo.single('video')(req, res, async (err) => {
         if (err) {
             console.error(`${LOG_PREFIX_SERVER} Video-Upload Fehler:`, err);
@@ -18758,7 +18788,6 @@ app.post('/api/limtube/upload', isAuthenticated, (req, res) => {
         
         const { title, description } = req.body;
         
-        // Titel ist Pflicht! Wenn er fehlt, löschen wir das Video wieder.
         if (!title || title.trim().length < 5) {
             fs.unlinkSync(req.file.path);
             return res.status(400).json({ error: 'Ein Titel (min. 5 Zeichen) ist Pflicht!' });
@@ -18769,9 +18798,10 @@ app.post('/api/limtube/upload', isAuthenticated, (req, res) => {
                 title: title.trim(),
                 description: description ? description.trim().substring(0, 500) : "",
                 filename: req.file.filename,
-                uploaderId: new ObjectId(req.session.userId),
+                uploaderId: userId,
                 uploaderName: req.session.username,
                 views: 0,
+                unpaidViews: 0, // WICHTIG FÜR DIE AUSZAHLUNG
                 likes: [],
                 comments: [],
                 createdAt: new Date(),
@@ -18779,8 +18809,6 @@ app.post('/api/limtube/upload', isAuthenticated, (req, res) => {
             };
 
             await limtubeVideosCollection.insertOne(newVideo);
-            
-            // Optional: Du kannst hier auch direkt ein Achievement/Log verteilen
             await logActivity(req, "LIMTUBE_UPLOAD", { title: newVideo.title });
 
             console.log(`${LOG_PREFIX_SERVER} 🎬 Limtube: ${req.session.username} hat "${newVideo.title}" hochgeladen.`);
@@ -18938,7 +18966,112 @@ app.delete('/api/limtube/video/:id', isAuthenticated, async (req, res) => {
     }
 });
 
+// Speichert, welcher User welches Video wann zuletzt geschaut hat (RAM-basiert für Speed)
+const viewCooldowns = new Map(); 
 
+app.post('/api/limtube/video/:id/view', isAuthenticated, async (req, res) => {
+    const videoIdStr = req.params.id;
+    const userIdStr = req.session.userId;
+
+    if (!ObjectId.isValid(videoIdStr)) return res.status(400).json({ error: "Ungültige Video-ID." });
+    
+    // Anti-Spam: Hat dieser User dieses Video vor kurzem schon gesehen?
+    const cooldownKey = `view_${userIdStr}_${videoIdStr}`;
+    const lastViewTime = viewCooldowns.get(cooldownKey);
+    const COOLDOWN_MS = 60 * 60 * 1000; // 1 Stunde Cooldown für legitime Views
+
+    if (lastViewTime && (Date.now() - lastViewTime) < COOLDOWN_MS) {
+        // Zählt nicht als bezahlter View, ist aber okay (User schaut es nochmal)
+        return res.json({ success: true, counted: false, message: "Bereits gesehen (Cooldown aktiv)" });
+    }
+
+    try {
+        const videoId = new ObjectId(videoIdStr);
+        
+        // Zählt den View hoch UND packt einen auf den "unpaidViews" Stapel
+        await limtubeVideosCollection.updateOne(
+            { _id: videoId },
+            { 
+                $inc: { 
+                    views: 1, 
+                    unpaidViews: 1 // Neu: Dieser Counter ist für die Bezahlung wichtig!
+                } 
+            }
+        );
+        
+        // Cooldown für diesen User & Video setzen
+        viewCooldowns.set(cooldownKey, Date.now());
+
+        res.json({ success: true, counted: true });
+    } catch (e) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Zählen des Views:`, e);
+        res.status(500).json({ error: "Fehler beim Zählen des Views." });
+    }
+});
+
+app.post('/api/limtube/payout', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    const DOLLARS_PER_VIEW = 5; // $5 pro View (kannst du anpassen)
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            // 1. Hole alle Videos des Users, die noch unbezahlte Views haben
+            const userVideos = await limtubeVideosCollection.find(
+                { uploaderId: userId, unpaidViews: { $gt: 0 } }, 
+                { session }
+            ).toArray();
+
+            if (userVideos.length === 0) {
+                throw new Error("Du hast keine ausstehenden Einnahmen.");
+            }
+
+            let totalUnpaidViews = 0;
+            let videoIdsToReset = [];
+
+            userVideos.forEach(vid => {
+                totalUnpaidViews += (vid.unpaidViews || 0);
+                videoIdsToReset.push(vid._id);
+            });
+
+            const payoutAmount = totalUnpaidViews * DOLLARS_PER_VIEW;
+
+            // 2. Das Geld dem User gutschreiben
+            await usersCollection.updateOne(
+                { _id: userId },
+                { $inc: { balance: payoutAmount } },
+                { session }
+            );
+
+            // 3. Die unpaidViews bei allen betroffenen Videos auf 0 setzen
+            await limtubeVideosCollection.updateMany(
+                { _id: { $in: videoIdsToReset } },
+                { $set: { unpaidViews: 0 } },
+                { session }
+            );
+
+            // Optional: Dem System die Ausgaben melden (z.B. aus der Staatskasse)
+            await systemSettingsCollection.updateOne(
+                { id: 'state_treasury' },
+                { $inc: { balance: -payoutAmount } },
+                { upsert: true, session }
+            );
+
+            // Res.locals nutzen, um Daten aus der Transaktion nach draußen zu retten
+            res.locals.payoutData = { views: totalUnpaidViews, amount: payoutAmount };
+        });
+
+        res.json({ 
+            success: true, 
+            message: `Auszahlung erfolgreich! Du hast für ${res.locals.payoutData.views} neue Views $${res.locals.payoutData.payoutData.amount.toLocaleString()} erhalten.` 
+        });
+
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
 
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
