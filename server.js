@@ -18968,6 +18968,7 @@ app.delete('/api/limtube/video/:id', isAuthenticated, async (req, res) => {
 
 const viewCooldowns = new Map(); 
 
+// 1. Der View-Zähler
 app.post('/api/limtube/video/:id/view', isAuthenticated, async (req, res) => {
     const videoIdStr = req.params.id;
     const userIdStr = req.session.userId;
@@ -18976,10 +18977,10 @@ app.post('/api/limtube/video/:id/view', isAuthenticated, async (req, res) => {
         return res.status(400).json({ error: "Ungültige Video-ID." });
     }
     
-    // Cooldown prüfen
+    // Cooldown prüfen (1 Stunde)
     const cooldownKey = `view_${userIdStr}_${videoIdStr}`;
     const lastViewTime = viewCooldowns.get(cooldownKey);
-    const COOLDOWN_MS = 60 * 60 * 1000; // 1 Stunde
+    const COOLDOWN_MS = 60 * 60 * 1000; 
 
     if (lastViewTime && (Date.now() - lastViewTime) < COOLDOWN_MS) {
         return res.json({ 
@@ -18992,32 +18993,25 @@ app.post('/api/limtube/video/:id/view', isAuthenticated, async (req, res) => {
     try {
         const videoId = new ObjectId(videoIdStr);
 
-        // 1. Zuerst schauen wir, ob es das Video überhaupt gibt
-        const video = await limtubeVideosCollection.findOne({ _id: videoId });
-        if (!video) {
-            return res.status(404).json({ error: "Video nicht gefunden." });
-        }
-        
-        // 2. View hochzählen (Update)
+        // View hochzählen UND unpaidViews erhöhen!
         const result = await limtubeVideosCollection.updateOne(
             { _id: videoId },
             { 
                 $inc: { 
                     views: 1, 
-                    unpaidViews: 1 
+                    unpaidViews: 1
                 } 
             }
         );
 
-        if (result.modifiedCount === 0) {
-            // Wenn nichts geändert wurde, stimmt was nicht.
-            throw new Error("Datenbank-Update fehlgeschlagen.");
+        if (result.matchedCount === 0) {
+            return res.status(404).json({ error: "Video nicht gefunden." });
         }
         
-        // 3. Cooldown setzen
+        // Cooldown für dich setzen
         viewCooldowns.set(cooldownKey, Date.now());
 
-        // 4. Saubere Rückmeldung
+        // Dem Frontend Bescheid sagen
         res.json({ success: true, counted: true, message: "View erfolgreich verbucht." });
         
     } catch (e) {
@@ -19026,14 +19020,15 @@ app.post('/api/limtube/video/:id/view', isAuthenticated, async (req, res) => {
     }
 });
 
+// 2. Die Auszahlung
 app.post('/api/limtube/payout', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
-    const DOLLARS_PER_VIEW = 5; // $5 pro View (kannst du anpassen)
+    const DOLLARS_PER_VIEW = 5; // $5 pro View
 
     const session = client.startSession();
     try {
         await session.withTransaction(async () => {
-            // 1. Hole alle Videos des Users, die noch unbezahlte Views haben
+            // Finde alle Videos des Users, die unbezahlte Views haben
             const userVideos = await limtubeVideosCollection.find(
                 { uploaderId: userId, unpaidViews: { $gt: 0 } }, 
                 { session }
@@ -19053,34 +19048,34 @@ app.post('/api/limtube/payout', isAuthenticated, async (req, res) => {
 
             const payoutAmount = totalUnpaidViews * DOLLARS_PER_VIEW;
 
-            // 2. Das Geld dem User gutschreiben
+            // Geld gutschreiben
             await usersCollection.updateOne(
                 { _id: userId },
                 { $inc: { balance: payoutAmount } },
                 { session }
             );
 
-            // 3. Die unpaidViews bei allen betroffenen Videos auf 0 setzen
+            // unpaidViews auf 0 setzen
             await limtubeVideosCollection.updateMany(
                 { _id: { $in: videoIdsToReset } },
                 { $set: { unpaidViews: 0 } },
                 { session }
             );
 
-            // Optional: Dem System die Ausgaben melden (z.B. aus der Staatskasse)
+            // Staatskasse belasten
             await systemSettingsCollection.updateOne(
                 { id: 'state_treasury' },
                 { $inc: { balance: -payoutAmount } },
                 { upsert: true, session }
             );
 
-            // Res.locals nutzen, um Daten aus der Transaktion nach draußen zu retten
+            // Wir retten die Daten für die Response nach draußen
             res.locals.payoutData = { views: totalUnpaidViews, amount: payoutAmount };
         });
 
         res.json({ 
             success: true, 
-            message: `Auszahlung erfolgreich! Du hast für ${res.locals.payoutData.views} neue Views $${res.locals.payoutData.payoutData.amount.toLocaleString()} erhalten.` 
+            message: `Auszahlung erfolgreich! Du hast für ${res.locals.payoutData.views} neue Views $${res.locals.payoutData.amount.toLocaleString()} erhalten.` 
         });
 
     } catch (e) {
