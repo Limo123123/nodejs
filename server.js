@@ -18966,46 +18966,63 @@ app.delete('/api/limtube/video/:id', isAuthenticated, async (req, res) => {
     }
 });
 
-// Speichert, welcher User welches Video wann zuletzt geschaut hat (RAM-basiert für Speed)
 const viewCooldowns = new Map(); 
 
 app.post('/api/limtube/video/:id/view', isAuthenticated, async (req, res) => {
     const videoIdStr = req.params.id;
     const userIdStr = req.session.userId;
 
-    if (!ObjectId.isValid(videoIdStr)) return res.status(400).json({ error: "Ungültige Video-ID." });
+    if (!ObjectId.isValid(videoIdStr)) {
+        return res.status(400).json({ error: "Ungültige Video-ID." });
+    }
     
-    // Anti-Spam: Hat dieser User dieses Video vor kurzem schon gesehen?
+    // Cooldown prüfen
     const cooldownKey = `view_${userIdStr}_${videoIdStr}`;
     const lastViewTime = viewCooldowns.get(cooldownKey);
-    const COOLDOWN_MS = 60 * 60 * 1000; // 1 Stunde Cooldown für legitime Views
+    const COOLDOWN_MS = 60 * 60 * 1000; // 1 Stunde
 
     if (lastViewTime && (Date.now() - lastViewTime) < COOLDOWN_MS) {
-        // Zählt nicht als bezahlter View, ist aber okay (User schaut es nochmal)
-        return res.json({ success: true, counted: false, message: "Bereits gesehen (Cooldown aktiv)" });
+        return res.json({ 
+            success: true, 
+            counted: false, 
+            message: "Bereits gesehen (Cooldown aktiv)" 
+        });
     }
 
     try {
         const videoId = new ObjectId(videoIdStr);
+
+        // 1. Zuerst schauen wir, ob es das Video überhaupt gibt
+        const video = await limtubeVideosCollection.findOne({ _id: videoId });
+        if (!video) {
+            return res.status(404).json({ error: "Video nicht gefunden." });
+        }
         
-        // Zählt den View hoch UND packt einen auf den "unpaidViews" Stapel
-        await limtubeVideosCollection.updateOne(
+        // 2. View hochzählen (Update)
+        const result = await limtubeVideosCollection.updateOne(
             { _id: videoId },
             { 
                 $inc: { 
                     views: 1, 
-                    unpaidViews: 1 // Neu: Dieser Counter ist für die Bezahlung wichtig!
+                    unpaidViews: 1 
                 } 
             }
         );
+
+        if (result.modifiedCount === 0) {
+            // Wenn nichts geändert wurde, stimmt was nicht.
+            throw new Error("Datenbank-Update fehlgeschlagen.");
+        }
         
-        // Cooldown für diesen User & Video setzen
+        // 3. Cooldown setzen
         viewCooldowns.set(cooldownKey, Date.now());
 
-        res.json({ success: true, counted: true });
+        // 4. Saubere Rückmeldung
+        res.json({ success: true, counted: true, message: "View erfolgreich verbucht." });
+        
     } catch (e) {
         console.error(`${LOG_PREFIX_SERVER} Fehler beim Zählen des Views:`, e);
-        res.status(500).json({ error: "Fehler beim Zählen des Views." });
+        res.status(500).json({ error: "Serverfehler beim Zählen des Views." });
     }
 });
 
