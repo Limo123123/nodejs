@@ -18822,6 +18822,124 @@ app.get('/api/limtube/feed', isAuthenticated, async (req, res) => {
     }
 });
 
+// 3. Video Liken / Entliken
+app.post('/api/limtube/video/:id/like', isAuthenticated, async (req, res) => {
+    const videoId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const video = await limtubeVideosCollection.findOne({ _id: videoId });
+        if (!video) return res.status(404).json({ error: "Video nicht gefunden." });
+
+        // Prüfen ob der User schon geliked hat
+        const hasLiked = video.likes && video.likes.some(id => id.equals(userId));
+
+        if (hasLiked) {
+            // Entliken
+            await limtubeVideosCollection.updateOne(
+                { _id: videoId },
+                { $pull: { likes: userId } }
+            );
+            res.json({ message: "Like entfernt.", isLiked: false, likesCount: video.likes.length - 1 });
+        } else {
+            // Liken
+            await limtubeVideosCollection.updateOne(
+                { _id: videoId },
+                { $addToSet: { likes: userId } }
+            );
+            res.json({ message: "Video geliked!", isLiked: true, likesCount: (video.likes ? video.likes.length : 0) + 1 });
+        }
+    } catch (e) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Liken:`, e);
+        res.status(500).json({ error: "Serverfehler beim Liken." });
+    }
+});
+
+// 4. Video kommentieren
+app.post('/api/limtube/video/:id/comment', isAuthenticated, async (req, res) => {
+    const videoId = new ObjectId(req.params.id);
+    const { text } = req.body;
+
+    if (!text || text.trim().length < 2 || text.trim().length > 500) {
+        return res.status(400).json({ error: "Kommentar muss zwischen 2 und 500 Zeichen lang sein." });
+    }
+
+    try {
+        const newComment = {
+            id: uuidv4(), // Eindeutige ID für den Kommentar (zum Löschen)
+            userId: new ObjectId(req.session.userId),
+            username: req.session.username,
+            text: text.trim(),
+            createdAt: new Date()
+        };
+
+        const result = await limtubeVideosCollection.updateOne(
+            { _id: videoId },
+            { $push: { comments: { $each: [newComment], $position: 0 } } } // $position: 0 packt ihn ganz nach oben!
+        );
+
+        if (result.matchedCount === 0) return res.status(404).json({ error: "Video nicht gefunden." });
+
+        res.status(201).json({ message: "Kommentar gepostet!", comment: newComment });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Kommentieren." });
+    }
+});
+
+// 5. Video View hochzählen (Hier klemmen wir später das Geld an!)
+app.post('/api/limtube/video/:id/view', isAuthenticated, async (req, res) => {
+    const videoId = new ObjectId(req.params.id);
+
+    try {
+        // Zählt die Views einfach um 1 hoch
+        await limtubeVideosCollection.updateOne(
+            { _id: videoId },
+            { $inc: { views: 1 } }
+        );
+        
+        // TODO für später: Hier prüfen wir, wem das Video gehört und überweisen ihm Limazon-Dollars!
+
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Zählen des Views." });
+    }
+});
+
+// 6. Video löschen (Inklusive Datei von der Platte fegen)
+app.delete('/api/limtube/video/:id', isAuthenticated, async (req, res) => {
+    const videoId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const video = await limtubeVideosCollection.findOne({ _id: videoId });
+        if (!video) return res.status(404).json({ error: "Video nicht gefunden." });
+
+        const user = await usersCollection.findOne({ _id: userId });
+        const isOwner = video.uploaderId.equals(userId);
+
+        if (!isOwner && !user.isAdmin) {
+            return res.status(403).json({ error: "Du darfst nur deine eigenen Videos löschen!" });
+        }
+
+        // 1. Aus der Datenbank löschen
+        await limtubeVideosCollection.deleteOne({ _id: videoId });
+
+        // 2. Datei von der Platte löschen (NVMe aufräumen)
+        const filepath = path.join(CDN_DIR, video.filename);
+        if (fs.existsSync(filepath)) {
+            fs.unlinkSync(filepath);
+            console.log(`${LOG_PREFIX_SERVER} 🗑️ Limtube: Datei ${video.filename} gelöscht.`);
+        }
+
+        res.json({ message: "Video erfolgreich gelöscht." });
+    } catch (e) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Löschen des Videos:`, e);
+        res.status(500).json({ error: "Fehler beim Löschen." });
+    }
+});
+
+
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
