@@ -18822,31 +18822,28 @@ app.post('/api/limtube/upload', isAuthenticated, async (req, res) => {
     });
 });
 
-// API: Den Feed laden (Neueste Videos)
+// --- Limtube Such-Route (Feed filtern) ---
 app.get('/api/limtube/feed', isAuthenticated, async (req, res) => {
-    try {
-        const videos = await limtubeVideosCollection
-            .find({ status: 'active' })
-            .sort({ createdAt: -1 })
-            .limit(50) // Paginierung später einbauen
-            .toArray();
-            
-        // Wir formatieren die Daten kurz für das Frontend
-        const formattedVideos = videos.map(v => ({
-            id: v._id,
-            title: v.title,
-            description: v.description,
-            uploaderName: v.uploaderName,
-            views: v.views,
-            likesCount: v.likes.length,
-            streamUrl: `https://stream.limazon.v6.rocks/cdn/${v.filename}`,
-            createdAt: v.createdAt
-        }));
+    const { q, u } = req.query; // q = Suchbegriff, u = Uploader
+    const query = { status: 'active' };
 
-        res.json({ videos: formattedVideos });
+    if (q) {
+        // Case-Insensitive Suche im Titel oder beim Uploader
+        query.$or = [
+            { title: { $regex: q, $options: 'i' } },
+            { uploaderName: { $regex: q, $options: 'i' } }
+        ];
+    }
+    if (u) {
+        // Nur Videos von einem bestimmten Uploader
+        query.uploaderName = u;
+    }
+
+    try {
+        const videos = await limtubeVideosCollection.find(query).sort({ createdAt: -1 }).limit(50).toArray();
+        res.json({ videos });
     } catch (e) {
-        console.error(`${LOG_PREFIX_SERVER} Limtube Feed-Fehler:`, e);
-        res.status(500).json({ error: "Fehler beim Laden der Videos." });
+        res.status(500).json({ error: "Fehler beim Laden." });
     }
 });
 
@@ -19161,6 +19158,39 @@ app.get('/api/limtube/admin/reports', isAuthenticated, isAdmin, async (req, res)
         res.json({ reports });
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Laden der Meldungen." });
+    }
+});
+
+// --- Limtube Kommentare löschen ---
+app.delete('/api/limtube/comment/:videoId/:commentId', isAuthenticated, async (req, res) => {
+    const videoId = new ObjectId(req.params.videoId);
+    const commentId = req.params.commentId;
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const video = await limtubeVideosCollection.findOne({ _id: videoId });
+        if (!video) return res.status(404).json({ error: "Video nicht gefunden." });
+
+        const comment = (video.comments || []).find(c => c.id === commentId);
+        if (!comment) return res.status(404).json({ error: "Kommentar nicht gefunden." });
+
+        const user = await usersCollection.findOne({ _id: userId });
+        const isCommentOwner = comment.userId && comment.userId.equals(userId);
+        const isVideoOwner = video.uploaderId.equals(userId);
+
+        // Nur der Verfasser, der Uploader des Videos oder ein Admin dürfen löschen!
+        if (!isCommentOwner && !isVideoOwner && !user.isAdmin) {
+            return res.status(403).json({ error: "Nicht berechtigt." });
+        }
+
+        await limtubeVideosCollection.updateOne(
+            { _id: videoId },
+            { $pull: { comments: { id: commentId } } }
+        );
+
+        res.json({ success: true, message: "Kommentar gelöscht." });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Löschen." });
     }
 });
 
