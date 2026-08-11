@@ -18794,15 +18794,24 @@ app.post('/api/limtube/upload', isAuthenticated, async (req, res) => {
             return res.status(400).json({ error: 'Ein Titel (min. 5 Zeichen) ist Pflicht!' });
         }
 
+        const thumbFilename = req.file.filename.replace('.mp4', '.jpg');
+        const thumbPath = path.join(CDN_DIR, thumbFilename);
+
+        const { exec } = require('child_process');
+        exec(`ffmpeg -i "${req.file.path}" -ss 00:00:01 -vframes 1 "${thumbPath}"`, (err) => {
+            if (err) console.error(`${LOG_PREFIX_SERVER} Thumbnail-Fehler:`, err.message);
+        });
+
         try {
             const newVideo = {
                 title: title.trim(),
                 description: description ? description.trim().substring(0, 500) : "",
                 filename: req.file.filename,
+                thumbnail: thumbFilename, // <--- NEU
                 uploaderId: userId,
                 uploaderName: req.session.username,
                 views: 0,
-                unpaidViews: 0, // WICHTIG FÜR DIE AUSZAHLUNG
+                unpaidViews: 0,
                 likes: [],
                 comments: [],
                 createdAt: new Date(),
@@ -19134,7 +19143,11 @@ app.get('/api/limtube/dashboard', isAuthenticated, async (req, res) => {
                 id: v._id,
                 title: v.title,
                 views: v.views,
-                createdAt: v.createdAt
+                createdAt: v.createdAt,
+                origin: v.origin,
+                filename: v.filename,
+                thumbnail: v.thumbnail,
+                ytId: v.ytId
             }))
         });
     } catch (e) {
@@ -19321,6 +19334,7 @@ app.post('/api/limtube/import-youtube', isAuthenticated, async (req, res) => {
                     title: title.substring(0, 100),
                     description: `Importiert von YouTube. Originaler Uploader: ${originalUploader}`,
                     filename: filename,
+					ytId: ytId,
                     uploaderId: userId,
                     uploaderName: req.session.username,
                     views: 0, unpaidViews: 0, likes: [], dislikes: [], comments: [],
