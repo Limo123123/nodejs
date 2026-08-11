@@ -18914,26 +18914,7 @@ app.post('/api/limtube/video/:id/comment', isAuthenticated, async (req, res) => 
     }
 });
 
-// 5. Video View hochzählen (Hier klemmen wir später das Geld an!)
-app.post('/api/limtube/video/:id/view', isAuthenticated, async (req, res) => {
-    const videoId = new ObjectId(req.params.id);
-
-    try {
-        // Zählt die Views einfach um 1 hoch
-        await limtubeVideosCollection.updateOne(
-            { _id: videoId },
-            { $inc: { views: 1 } }
-        );
-        
-        // TODO für später: Hier prüfen wir, wem das Video gehört und überweisen ihm Limazon-Dollars!
-
-        res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: "Fehler beim Zählen des Views." });
-    }
-});
-
-// 6. Video löschen (Inklusive Datei von der Platte fegen)
+// 5. Video löschen (Inklusive Datei von der Platte fegen)
 app.delete('/api/limtube/video/:id', isAuthenticated, async (req, res) => {
     const videoId = new ObjectId(req.params.id);
     const userId = new ObjectId(req.session.userId);
