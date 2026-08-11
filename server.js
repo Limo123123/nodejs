@@ -18867,10 +18867,13 @@ app.post('/api/limtube/video/:id/like', isAuthenticated, async (req, res) => {
             );
             res.json({ message: "Like entfernt.", isLiked: false, likesCount: video.likes.length - 1 });
         } else {
-            // Liken
+            // Liken UND gleichzeitig potenziellen Dislike entfernen!
             await limtubeVideosCollection.updateOne(
                 { _id: videoId },
-                { $addToSet: { likes: userId } }
+                { 
+                    $addToSet: { likes: userId },
+                    $pull: { dislikes: userId } // <--- Das fehlte!
+                }
             );
             res.json({ message: "Video geliked!", isLiked: true, likesCount: (video.likes ? video.likes.length : 0) + 1 });
         }
