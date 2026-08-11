@@ -19066,28 +19066,43 @@ app.post('/api/limtube/payout', isAuthenticated, async (req, res) => {
 // 1. Einzelnes Video abrufen (Für die Watch-Seite)
 app.get('/api/limtube/video/:id', isAuthenticated, async (req, res) => {
     try {
-        const videoId = new ObjectId(req.params.id);
-        const video = await limtubeVideosCollection.findOne({ _id: videoId });
+        const idParam = req.params.id;
+        
+        let query = { id: idParam }; 
+        if (ObjectId.isValid(idParam)) {
+            query = { $or: [{ _id: new ObjectId(idParam) }, { id: idParam }] };
+        }
+
+        const video = await limtubeVideosCollection.findOne(query);
+		const uploaderDoc = await usersCollection.findOne({ _id: video.uploaderId }, { projection: { subscribers: 1 } });
+		const subCount = uploaderDoc && uploaderDoc.subscribers ? uploaderDoc.subscribers.length : 0;
+		const isSubscribed = uploaderDoc && uploaderDoc.subscribers && uploaderDoc.subscribers.some(id => id.equals(new ObjectId(req.session.userId)));
+		const hasDisliked = video.dislikes && video.dislikes.some(id => id.equals(new ObjectId(req.session.userId)));
         if (!video) return res.status(404).json({ error: "Video nicht gefunden." });
         
         const hasLiked = video.likes && video.likes.some(id => id.equals(new ObjectId(req.session.userId)));
 
         res.json({
             video: {
-                id: video._id,
+                id: video._id || video.id, // Fallback für Frontend
                 title: video.title,
                 description: video.description,
-                uploaderName: video.uploaderName,
+                uploaderName: video.uploaderName || video.uploader || "Unbekannt", // Fallback für alte Videos!
                 uploaderId: video.uploaderId,
-                views: video.views,
+                views: video.views || 0,
                 likesCount: video.likes ? video.likes.length : 0,
                 isLiked: hasLiked,
                 filename: video.filename,
                 comments: video.comments || [],
-                createdAt: video.createdAt
+                createdAt: video.createdAt,
+				dislikesCount: video.dislikes ? video.dislikes.length : 0,
+				isDisliked: hasDisliked,
+				subscribersCount: subCount,
+				isSubscribed: isSubscribed
             }
         });
     } catch (e) {
+        console.error(e);
         res.status(500).json({ error: "Serverfehler." });
     }
 });
@@ -19192,6 +19207,128 @@ app.delete('/api/limtube/comment/:videoId/:commentId', isAuthenticated, async (r
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Löschen." });
     }
+});
+
+// --- 1. KANAL ABONNIEREN ---
+app.post('/api/limtube/subscribe/:targetUsername', isAuthenticated, async (req, res) => {
+    const { targetUsername } = req.params;
+    const userId = new ObjectId(req.session.userId);
+
+    if (targetUsername.toLowerCase() === req.session.username.toLowerCase()) {
+        return res.status(400).json({ error: "Du kannst dich nicht selbst abonnieren." });
+    }
+
+    try {
+        const targetUser = await usersCollection.findOne({ username: { $regex: new RegExp(`^${targetUsername}$`, 'i') } });
+        if (!targetUser) return res.status(404).json({ error: "Kanal nicht gefunden." });
+
+        const isSubscribed = targetUser.subscribers && targetUser.subscribers.some(id => id.equals(userId));
+
+        if (isSubscribed) {
+            // Deabonnieren
+            await usersCollection.updateOne({ _id: targetUser._id }, { $pull: { subscribers: userId } });
+            res.json({ message: "Kanal deabonniert.", isSubscribed: false });
+        } else {
+            // Abonnieren
+            await usersCollection.updateOne({ _id: targetUser._id }, { $addToSet: { subscribers: userId } });
+            res.json({ message: "Kanal abonniert!", isSubscribed: true });
+        }
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Abonnieren." });
+    }
+});
+
+// --- 2. DISLIKE HINZUFÜGEN ---
+app.post('/api/limtube/video/:id/dislike', isAuthenticated, async (req, res) => {
+    const videoId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const video = await limtubeVideosCollection.findOne({ _id: videoId });
+        if (!video) return res.status(404).json({ error: "Video nicht gefunden." });
+
+        const hasDisliked = video.dislikes && video.dislikes.some(id => id.equals(userId));
+
+        if (hasDisliked) {
+            await limtubeVideosCollection.updateOne({ _id: videoId }, { $pull: { dislikes: userId } });
+            res.json({ message: "Dislike entfernt.", isDisliked: false, dislikesCount: video.dislikes.length - 1 });
+        } else {
+            // Entferne Like, falls vorhanden, und füge Dislike hinzu
+            await limtubeVideosCollection.updateOne(
+                { _id: videoId }, 
+                { $addToSet: { dislikes: userId }, $pull: { likes: userId } }
+            );
+            res.json({ message: "Video gedisliked.", isDisliked: true });
+        }
+    } catch (e) {
+        res.status(500).json({ error: "Serverfehler beim Disliken." });
+    }
+});
+
+// --- 3. YOUTUBE IMPORT (yt-dlp in Limazon CDN) ---
+const { spawn, exec } = require('child_process');
+const activeYtImports = {};
+
+app.post('/api/limtube/import-youtube', isAuthenticated, async (req, res) => {
+    const { ytId } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (!ytId || ytId.length !== 11) return res.status(400).json({ error: "Ungültige YouTube ID." });
+    if (activeYtImports[ytId]) return res.status(400).json({ error: "Dieser Import läuft bereits." });
+
+    // Limit-Check (wie beim normalen Upload)
+    const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+    const uploadedTodayCount = await limtubeVideosCollection.countDocuments({ uploaderId: userId, createdAt: { $gte: todayStart } });
+    if (uploadedTodayCount >= 5 && !req.session.isAdmin) return res.status(429).json({ error: "Tageslimit für Uploads erreicht." });
+
+    const filename = `yt_${Date.now()}_${ytId}.mp4`;
+    const filePath = path.join(CDN_DIR, filename);
+
+    activeYtImports[ytId] = { progress: 0, status: 'started' };
+
+    const dl = spawn('yt-dlp', [
+        '-f', 'bestvideo[ext=mp4][vcodec!*=av01]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        '-o', filePath,
+        '--newline',
+        `https://www.youtube.com/watch?v=${ytId}`
+    ]);
+
+    dl.stdout.on('data', (data) => {
+        const match = data.toString().match(/(\d+\.\d+)%/);
+        if (match && match[1]) activeYtImports[ytId].progress = parseFloat(match[1]);
+    });
+
+    dl.on('close', async (code) => {
+        if (code === 0) {
+            // Metadaten holen
+            exec(`yt-dlp --get-title --get-filename -o "%(uploader)s" "https://www.youtube.com/watch?v=${ytId}"`, async (e, out) => {
+                const lines = out.split('\n');
+                const title = lines[0] || `YouTube Import ${ytId}`;
+                const originalUploader = lines[1] || 'YouTube';
+
+                const newVideo = {
+                    title: title.substring(0, 100),
+                    description: `Importiert von YouTube. Originaler Uploader: ${originalUploader}`,
+                    filename: filename,
+                    uploaderId: userId,
+                    uploaderName: req.session.username,
+                    views: 0, unpaidViews: 0, likes: [], dislikes: [], comments: [],
+                    createdAt: new Date(), status: 'active', origin: 'youtube'
+                };
+                
+                await limtubeVideosCollection.insertOne(newVideo);
+                activeYtImports[ytId] = { progress: 100, status: 'done', videoId: newVideo._id };
+            });
+        } else {
+            activeYtImports[ytId].status = 'error';
+        }
+    });
+
+    res.json({ message: "Import gestartet!", ytId });
+});
+
+app.get('/api/limtube/import-youtube/status/:ytId', isAuthenticated, (req, res) => {
+    res.json(activeYtImports[req.params.ytId] || { status: 'not_found' });
 });
 
 app.use((req, res) => {
