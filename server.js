@@ -17089,7 +17089,8 @@ const LIMO_ADS = [
     { id: 12, title: "Kopfgeldjäger gesucht", text: "Verdiene dir eine goldene Nase im Bounty Hub! Die Liste der Gesuchten wird länger.", icon: "🎯", link: "themes/wanted.html" },
     { id: 13, title: "Gründe dein Imperium", text: "Werde der Pate! Gründe eine Gang, kaufe dir Waffen und reiße Limazon an dich.", icon: "🏴‍☠️", link: "themes/gangs.html" },
     { id: 14, title: "Limipedia", text: "Du hast den Durchblick verloren? Lies das offizielle Limazon Wiki!", icon: "📖", link: "https://limipedia.any64.de" },
-    { id: 15, title: "Neues Sofa gefällig?", text: "Richte dein Traumhaus im Limea-Möbelhaus ein! Tausende Layouts im Community Store.", icon: "🪑", link: "themes/limea.html" }
+    { id: 15, title: "Neues Sofa gefällig?", text: "Richte dein Traumhaus im Limea-Möbelhaus ein! Tausende Layouts im Community Store.", icon: "🪑", link: "themes/limea.html" },
+	{ id: 16, title: "Werde berühmt!", text: "Lade jetzt deine Videos auf LimTube hoch und verdiene $5 für jeden Aufruf! Der Algorithmus liebt dich.", icon: "▶️", link: "themes/limtube.html" }
 ];
 
 app.get('/api/ads/random', async (req, res) => {
