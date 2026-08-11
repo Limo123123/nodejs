@@ -19066,6 +19066,29 @@ app.post('/api/limtube/payout', isAuthenticated, async (req, res) => {
     }
 });
 
+// Creator Stats abrufen
+app.get('/api/limtube/dashboard', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const myVideos = await limtubeVideosCollection.find({ uploaderId: userId }).toArray();
+        let totalViews = 0;
+        let unpaidViews = 0;
+        
+        myVideos.forEach(v => {
+            totalViews += (v.views || 0);
+            unpaidViews += (v.unpaidViews || 0);
+        });
+
+        res.json({
+            videoCount: myVideos.length,
+            totalViews,
+            unpaidViews
+        });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der Creator-Stats." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
