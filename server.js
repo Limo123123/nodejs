@@ -19144,6 +19144,26 @@ app.post('/api/limtube/video/:id/report', isAuthenticated, async (req, res) => {
     }
 });
 
+// Admin: Alle Limtube Videos auflisten (Fürs Admin Dashboard)
+app.get('/api/limtube/admin/videos', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const videos = await limtubeVideosCollection.find({}).sort({ createdAt: -1 }).toArray();
+        res.json({ videos });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der Videos." });
+    }
+});
+
+// Admin: Limtube Meldungen (Reports) laden
+app.get('/api/limtube/admin/reports', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const reports = await db.collection('reports').find({ type: 'limtube_report' }).sort({ createdAt: -1 }).toArray();
+        res.json({ reports });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der Meldungen." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
