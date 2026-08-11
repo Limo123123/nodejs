@@ -19066,13 +19066,43 @@ app.post('/api/limtube/payout', isAuthenticated, async (req, res) => {
     }
 });
 
-// Creator Stats abrufen
+// 1. Einzelnes Video abrufen (Für die Watch-Seite)
+app.get('/api/limtube/video/:id', isAuthenticated, async (req, res) => {
+    try {
+        const videoId = new ObjectId(req.params.id);
+        const video = await limtubeVideosCollection.findOne({ _id: videoId });
+        if (!video) return res.status(404).json({ error: "Video nicht gefunden." });
+        
+        const hasLiked = video.likes && video.likes.some(id => id.equals(new ObjectId(req.session.userId)));
+
+        res.json({
+            video: {
+                id: video._id,
+                title: video.title,
+                description: video.description,
+                uploaderName: video.uploaderName,
+                uploaderId: video.uploaderId,
+                views: video.views,
+                likesCount: video.likes ? video.likes.length : 0,
+                isLiked: hasLiked,
+                filename: video.filename,
+                comments: video.comments || [],
+                createdAt: video.createdAt
+            }
+        });
+    } catch (e) {
+        res.status(500).json({ error: "Serverfehler." });
+    }
+});
+
+// 2. Creator Dashboard
 app.get('/api/limtube/dashboard', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
     try {
-        const myVideos = await limtubeVideosCollection.find({ uploaderId: userId }).toArray();
-        let totalViews = 0;
-        let unpaidViews = 0;
+        const user = await usersCollection.findOne({ _id: userId });
+        const myVideos = await limtubeVideosCollection.find({ uploaderId: userId }).sort({createdAt: -1}).toArray();
+        
+        let totalViews = 0, unpaidViews = 0;
         
         myVideos.forEach(v => {
             totalViews += (v.views || 0);
@@ -19080,12 +19110,37 @@ app.get('/api/limtube/dashboard', isAuthenticated, async (req, res) => {
         });
 
         res.json({
+            isAdmin: user.isAdmin,
             videoCount: myVideos.length,
             totalViews,
-            unpaidViews
+            unpaidViews,
+            videos: myVideos.map(v => ({
+                id: v._id,
+                title: v.title,
+                views: v.views,
+                createdAt: v.createdAt
+            }))
         });
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Laden der Creator-Stats." });
+    }
+});
+
+// 3. Video Melden
+app.post('/api/limtube/video/:id/report', isAuthenticated, async (req, res) => {
+    const videoId = new ObjectId(req.params.id);
+    try {
+        await db.collection('reports').insertOne({
+            type: 'limtube_report',
+            videoId: videoId,
+            reportedBy: req.session.username,
+            reason: req.body.reason || "Unangemessener Inhalt",
+            status: 'open',
+            createdAt: new Date()
+        });
+        res.json({ message: "Video gemeldet! Die Admins kümmern sich darum." });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Melden." });
     }
 });
 
