@@ -19344,6 +19344,79 @@ app.get('/api/limtube/import-youtube/status/:ytId', isAuthenticated, (req, res) 
     res.json(activeYtImports[req.params.ytId] || { status: 'not_found' });
 });
 
+// 1. Random Ad für das Frontend abrufen
+app.get('/api/limtube/ads/random', async (req, res) => {
+    try {
+        // Zieht genau 1 zufälliges Video aus der Ads-Collection
+        const randomAds = await db.collection('limtubeAds').aggregate([{ $sample: { size: 1 } }]).toArray();
+        
+        if (randomAds.length > 0) {
+            // View-Counter hochzählen (optional, aber cool für Stats)
+            await db.collection('limtubeAds').updateOne({ _id: randomAds[0]._id }, { $inc: { views: 1 } });
+            res.json({ ad: randomAds[0] });
+        } else {
+            res.json({ ad: null }); // Keine Werbung im System
+        }
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der Werbung." });
+    }
+});
+
+// 2. Admin: Alle Ads anzeigen
+app.get('/api/admin/limtube/ads', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const ads = await db.collection('limtubeAds').find({}).sort({ createdAt: -1 }).toArray();
+        res.json({ ads });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der Ads." });
+    }
+});
+
+// 3. Admin: Neues Ad hochladen
+// Wir recyclen deinen multer 'uploadVideo', der speichert das MP4 in den cdn-data Ordner!
+app.post('/api/admin/limtube/ads', isAuthenticated, isAdmin, uploadVideo.single('video'), async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'Kein Video empfangen.' });
+
+    try {
+        const newAd = {
+            title: req.body.title || "Unbenannte Werbung",
+            filename: req.file.filename,
+            uploaderName: req.session.username,
+            views: 0,
+            createdAt: new Date()
+        };
+
+        await db.collection('limtubeAds').insertOne(newAd);
+        console.log(`${LOG_PREFIX_SERVER} 📺 Neue LimTube Werbung hochgeladen: ${newAd.title}`);
+        
+        res.status(201).json({ message: 'Werbe-Video erfolgreich hochgeladen!', ad: newAd });
+    } catch (err) {
+        // Falls was schief geht, Datei wieder löschen
+        if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        res.status(500).json({ error: 'Serverfehler beim Speichern der Werbung.' });
+    }
+});
+
+// 4. Admin: Ad löschen
+app.delete('/api/admin/limtube/ads/:id', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const ad = await db.collection('limtubeAds').findOne({ _id: new ObjectId(req.params.id) });
+        if (!ad) return res.status(404).json({ error: "Werbung nicht gefunden." });
+
+        // Datei vom NVMe/Server löschen
+        const filepath = path.join(CDN_DIR, ad.filename);
+        if (fs.existsSync(filepath)) {
+            fs.unlinkSync(filepath);
+        }
+
+        await db.collection('limtubeAds').deleteOne({ _id: ad._id });
+        console.log(`${LOG_PREFIX_SERVER} 🗑️ Werbung gelöscht: ${ad.title}`);
+        res.json({ message: "Werbung erfolgreich gelöscht." });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Löschen der Werbung." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
