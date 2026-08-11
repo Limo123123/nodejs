@@ -19279,7 +19279,6 @@ app.post('/api/limtube/import-youtube', isAuthenticated, async (req, res) => {
     if (!ytId || ytId.length !== 11) return res.status(400).json({ error: "Ungültige YouTube ID." });
     if (activeYtImports[ytId]) return res.status(400).json({ error: "Dieser Import läuft bereits." });
 
-    // Limit-Check (wie beim normalen Upload)
     const todayStart = new Date(); todayStart.setHours(0,0,0,0);
     const uploadedTodayCount = await limtubeVideosCollection.countDocuments({ uploaderId: userId, createdAt: { $gte: todayStart } });
     if (uploadedTodayCount >= 5 && !req.session.isAdmin) return res.status(429).json({ error: "Tageslimit für Uploads erreicht." });
@@ -19289,9 +19288,13 @@ app.post('/api/limtube/import-youtube', isAuthenticated, async (req, res) => {
 
     activeYtImports[ytId] = { progress: 0, status: 'started' };
 
+    // FIX: --force-ipv4 löst 90% der Docker-Netzwerk-Probleme
+    // FIX: best[ext=mp4] lädt direkt eine fertige Datei runter (braucht kein FFmpeg-Merge)
     const dl = spawn('yt-dlp', [
-        '-f', 'bestvideo[ext=mp4][vcodec!*=av01]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        '-f', 'best[ext=mp4]/best', 
         '-o', filePath,
+        '--force-ipv4',
+        '--no-playlist',
         '--newline',
         `https://www.youtube.com/watch?v=${ytId}`
     ]);
@@ -19301,9 +19304,13 @@ app.post('/api/limtube/import-youtube', isAuthenticated, async (req, res) => {
         if (match && match[1]) activeYtImports[ytId].progress = parseFloat(match[1]);
     });
 
+    // NEU: Damit du im Terminal (docker compose logs) siehst, warum er crasht!
+    dl.stderr.on('data', (data) => {
+        console.error(`${LOG_PREFIX_SERVER} [yt-dlp Fehler für ${ytId}]:`, data.toString().trim());
+    });
+
     dl.on('close', async (code) => {
         if (code === 0) {
-            // Metadaten holen
             exec(`yt-dlp --get-title --get-filename -o "%(uploader)s" "https://www.youtube.com/watch?v=${ytId}"`, async (e, out) => {
                 const lines = out.split('\n');
                 const title = lines[0] || `YouTube Import ${ytId}`;
@@ -19321,8 +19328,10 @@ app.post('/api/limtube/import-youtube', isAuthenticated, async (req, res) => {
                 
                 await limtubeVideosCollection.insertOne(newVideo);
                 activeYtImports[ytId] = { progress: 100, status: 'done', videoId: newVideo._id };
+                console.log(`${LOG_PREFIX_SERVER} ✅ YouTube Import abgeschlossen: ${title}`);
             });
         } else {
+            console.error(`${LOG_PREFIX_SERVER} ❌ yt-dlp ist mit Code ${code} abgestürzt.`);
             activeYtImports[ytId].status = 'error';
         }
     });
