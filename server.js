@@ -19469,31 +19469,36 @@ app.delete('/api/admin/limtube/ads/:id', isAuthenticated, isAdmin, async (req, r
 app.get('/api/limtube/channel/:username', isAuthenticated, async (req, res) => {
     try {
         const username = req.params.username;
-        const currentUsername = req.session.username;
+        const currentUserId = req.session.userId; // Wichtig für den ObjectId Check!
 
+        // 1. Videos & Playlists laden
         const videos = await db.collection('limtubeVideos').find({ uploaderName: username, status: 'active' }).sort({ createdAt: -1 }).toArray();
         const publicPlaylists = await db.collection('limtubePlaylists').find({ username: username, isPublic: true }).sort({ createdAt: -1 }).toArray();
         
-        const subsCount = await db.collection('limtubeSubscriptions').countDocuments({
-            $or: [ { channelName: username }, { uploaderName: username } ]
-        });
-        
-        // Checken, ob der aktuelle User abonniert hat
-        const isSubbed = await db.collection('limtubeSubscriptions').findOne({
-            $and: [
-                { $or: [ { subscriberName: currentUsername }, { username: currentUsername } ] },
-                { $or: [ { channelName: username }, { uploaderName: username } ] }
-            ]
-        });
+        // 2. Den Uploader in der User-Datenbank finden
+        const uploaderDoc = await db.collection('users').findOne({ username: username });
+
+        // 3. EXAKT DEINE LOGIK ZUM ZÄHLEN UND PRÜFEN DER ABONNENTEN
+        let subCount = 0;
+        let isSubscribed = false;
+
+        if (uploaderDoc) {
+            subCount = uploaderDoc.subscribers ? uploaderDoc.subscribers.length : 0;
+            
+            if (uploaderDoc.subscribers && currentUserId) {
+                isSubscribed = uploaderDoc.subscribers.some(id => id.equals(new ObjectId(currentUserId)));
+            }
+        }
 
         res.json({
             username: username,
-            subscribersCount: subsCount,
-            isSubscribed: !!isSubbed,
+            subscribersCount: subCount,
+            isSubscribed: isSubscribed,
             videos: videos,
             playlists: publicPlaylists
         });
     } catch (e) {
+        console.error("Fehler bei Kanal-Laden:", e);
         res.status(500).json({ error: "Fehler beim Laden des Kanals." });
     }
 });
