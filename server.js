@@ -19474,6 +19474,9 @@ app.get('/api/limtube/channel/:username', isAuthenticated, async (req, res) => {
         // Alle Videos dieses Uploader finden
         const videos = await db.collection('limtubeVideos').find({ uploaderName: username, status: 'active' }).sort({ createdAt: -1 }).toArray();
         
+        // Alle ÖFFENTLICHEN Playlists dieses Uploader finden
+        const publicPlaylists = await db.collection('limtubePlaylists').find({ username: username, isPublic: true }).sort({ createdAt: -1 }).toArray();
+        
         // Abonnenten zählen
         const subsCount = await db.collection('limtubeSubscriptions').countDocuments({ channelName: username });
         
@@ -19484,7 +19487,8 @@ app.get('/api/limtube/channel/:username', isAuthenticated, async (req, res) => {
             username: username,
             subscribersCount: subsCount,
             isSubscribed: !!isSubbed,
-            videos: videos
+            videos: videos,
+            playlists: publicPlaylists
         });
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Laden des Kanals." });
