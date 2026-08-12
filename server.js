@@ -18457,16 +18457,50 @@ const eventConfig = {
 
     // Das Event-Glücksrad
     wheel: {
-        costMoney: 2500, // Kostet $2.500 pro Dreh
-        prizes: [
-            { id: "gay", label: "Schwul/Lesbisch (Fabulous! +$25.000)", type: "money", amount: 25000, chance: 0.15, color: "#ff0018" },
-            { id: "bi", label: "Bisexuell (Doppeltes Chaos! +$5.000)", type: "money", amount: 5000, chance: 0.25, color: "#a855f7" },
-            { id: "pan", label: "Pansexuell (Blindflug in die Liebe! +10 Tokens)", type: "token", amount: 10, chance: 0.20, color: "#ff1b8d" },
-            { id: "ace", label: "Asexuell (Knoblauchbrot gefunden! +$10.000)", type: "money", amount: 10000, chance: 0.15, color: "#000000" },
-            { id: "hetero", label: "Hetero (Standard-Settings. Niete.)", type: "nothing", amount: 0, chance: 0.20, color: "#808080" },
-            { id: "octoling", label: "Octoling (Warte... das ist keine Sexualität! JACKPOT $100k)", type: "money", amount: 100000, chance: 0.05, color: "#00ffcc" }
-        ]
-    }
+    costMoney: 2500, // Kostet $2.500 pro Dreh
+    prizes: [
+        // Nieten & Trostpreise (Hohe Chance)
+        { id: "hetero", label: "Hetero (Standard-Settings. Niete.)", type: "nothing", amount: 0, chance: 0.20, color: "#808080" },
+        { id: "aroace", label: "Aroace (Keine Romantik, kein Sex, kein Geld)", type: "nothing", amount: 0, chance: 0.12, color: "#e38e00" },
+        { id: "demisexual", label: "Demisexuell (Erst Bindung, dann $500)", type: "money", amount: 500, chance: 0.08, color: "#6e38a2" },
+        { id: "bi", label: "Bisexuell (Doppeltes Chaos! +$1.500)", type: "money", amount: 1500, chance: 0.08, color: "#a855f7" },
+        { id: "pan", label: "Pansexuell (Liebe ist blind! +$1.500)", type: "money", amount: 1500, chance: 0.07, color: "#ff1b8d" },
+
+        // Kleine Gewinne & Einsatz zurück
+        { id: "bifemsexual", label: "Bifemsexuell (+$2.000)", type: "money", amount: 2000, chance: 0.05, color: "#d946ef" },
+        { id: "bimensexual", label: "Bimensexuell (+$2.000)", type: "money", amount: 2000, chance: 0.05, color: "#3b82f6" },
+        { id: "panmansexual", label: "Panmansexuell (+$2.500 - Einsatz zurück!)", type: "money", amount: 2500, chance: 0.04, color: "#06b6d4" },
+        { id: "panfemsexual", label: "Panfemsexuell (+$2.500 - Einsatz zurück!)", type: "money", amount: 2500, chance: 0.04, color: "#ec4899" },
+        { id: "ace", label: "Asexuell (Knoblauchbrot gefunden! +$3.000)", type: "money", amount: 3000, chance: 0.04, color: "#000000" },
+        { id: "omnisexual", label: "Omnisexuell (+$3.000)", type: "money", amount: 3000, chance: 0.03, color: "#8b5cf6" },
+        { id: "androsexual", label: "Androsexuell (+$3.000)", type: "money", amount: 3000, chance: 0.03, color: "#10b981" },
+
+        // Mittlere Gewinne
+        { id: "cupiosexual", label: "Cupiosexuell (+$3.500)", type: "money", amount: 3500, chance: 0.02, color: "#f43f5e" },
+        { id: "fraysexual", label: "Fraysexuell (+$3.500)", type: "money", amount: 3500, chance: 0.02, color: "#14b8a6" },
+        { id: "akiosexual", label: "Akiosexuell (+$3.500)", type: "money", amount: 3500, chance: 0.02, color: "#f59e0b" },
+        { id: "placiosexual", label: "Placiosexuell (+$3.500)", type: "money", amount: 3500, chance: 0.02, color: "#6366f1" },
+        { id: "idemsexual", label: "Idemsexuell (+$3.500)", type: "money", amount: 3500, chance: 0.015, color: "#84cc16" },
+        { id: "glarosexual", label: "Glarosexuell (+$4.000)", type: "money", amount: 4000, chance: 0.015, color: "#0284c7" },
+        { id: "neptunic", label: "Neptunic (+$4.000)", type: "money", amount: 4000, chance: 0.015, color: "#2563eb" },
+        { id: "saturnic", label: "Saturnic (+$4.000)", type: "money", amount: 4000, chance: 0.015, color: "#d97706" },
+        { id: "achillean", label: "Achillean (+$4.000)", type: "money", amount: 4000, chance: 0.015, color: "#059669" },
+        { id: "polyamorous", label: "Polyamorous (Mehrfachgewinn! +$5.000)", type: "money", amount: 5000, chance: 0.015, color: "#dc2626" },
+        { id: "polysexual", label: "Polysexual (+$5.000)", type: "money", amount: 5000, chance: 0.015, color: "#c026d3" },
+
+        // Frucht-Labels & Seltenere Drops
+        { id: "berrysexual", label: "Berrysexual (Beerenstark! +$5.000)", type: "money", amount: 5000, chance: 0.01, color: "#be123c" },
+        { id: "almondsexual", label: "Almondsexual (Nussig! +$5.000)", type: "money", amount: 5000, chance: 0.01, color: "#78350f" },
+        { id: "cherrysexual", label: "Cherrysexual (Süß! +$5.000)", type: "money", amount: 5000, chance: 0.01, color: "#9f1239" },
+        { id: "angled_aroace", label: "Angled Aroace (+$6.000)", type: "money", amount: 6000, chance: 0.008, color: "#475569" },
+        { id: "oriented_aroace", label: "Oriented Aroace (+$6.000)", type: "money", amount: 6000, chance: 0.008, color: "#334155" },
+
+        // Seltene Hauptgewinne & Jackpots
+        { id: "gay", label: "Schwul/Lesbisch (Fabulous! +$7.500)", type: "money", amount: 7500, chance: 0.005, color: "#ff0018" },
+        { id: "token_reward", label: "Pan (Seltenes Fundstück! +3 Tokens)", type: "token", amount: 3, chance: 0.003, color: "#ff1b8d" },
+        { id: "octoling", label: "Octoling (Keine Sexualität! JACKPOT +$10.000)", type: "money", amount: 10000, chance: 0.001, color: "#00ffcc" }
+    ]
+}
 };
 
 // 1. Config ans Frontend senden
