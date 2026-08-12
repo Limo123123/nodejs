@@ -19471,17 +19471,20 @@ app.get('/api/limtube/channel/:username', isAuthenticated, async (req, res) => {
         const username = req.params.username;
         const currentUsername = req.session.username;
 
-        // Alle Videos dieses Uploader finden
         const videos = await db.collection('limtubeVideos').find({ uploaderName: username, status: 'active' }).sort({ createdAt: -1 }).toArray();
-        
-        // Alle ÖFFENTLICHEN Playlists dieses Uploader finden
         const publicPlaylists = await db.collection('limtubePlaylists').find({ username: username, isPublic: true }).sort({ createdAt: -1 }).toArray();
         
-        // Abonnenten zählen
-        const subsCount = await db.collection('limtubeSubscriptions').countDocuments({ channelName: username });
+        const subsCount = await db.collection('limtubeSubscriptions').countDocuments({
+            $or: [ { channelName: username }, { uploaderName: username } ]
+        });
         
-        // Prüfen, ob der eingeloggte User diesen Kanal abonniert hat
-        const isSubbed = await db.collection('limtubeSubscriptions').findOne({ subscriberName: currentUsername, channelName: username });
+        // Checken, ob der aktuelle User abonniert hat
+        const isSubbed = await db.collection('limtubeSubscriptions').findOne({
+            $and: [
+                { $or: [ { subscriberName: currentUsername }, { username: currentUsername } ] },
+                { $or: [ { channelName: username }, { uploaderName: username } ] }
+            ]
+        });
 
         res.json({
             username: username,
