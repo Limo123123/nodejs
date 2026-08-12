@@ -19577,6 +19577,36 @@ app.delete('/api/limtube/playlists/:id', isAuthenticated, async (req, res) => {
     }
 });
 
+// 8. Einzelne Playlist & deren Videos abrufen (Für das Frontend)
+app.get('/api/limtube/playlists/:id', async (req, res) => {
+    try {
+        const playlist = await db.collection('limtubePlaylists').findOne({ _id: new ObjectId(req.params.id) });
+        if (!playlist) return res.status(404).json({ error: "Playlist nicht gefunden." });
+
+        // Privatsphäre-Check (Gäste oder andere User blocken, wenn privat)
+        const currentUsername = req.session ? req.session.username : null;
+        if (!playlist.isPublic && playlist.username !== currentUsername) {
+            return res.status(403).json({ error: "Diese Playlist ist privat." });
+        }
+
+        // Die Strings in ObjectIds umwandeln
+        const objectIds = playlist.videoIds.map(id => {
+            try { return new ObjectId(id); } catch(e) { return id; }
+        });
+
+        // Videos laden
+        const videos = await db.collection('limtubeVideos')
+            .find({ _id: { $in: objectIds }, status: 'active' }).toArray();
+
+        // In der Reihenfolge sortieren, wie sie hinzugefügt wurden
+        const sortedVideos = objectIds.map(id => videos.find(v => v._id.toString() === id.toString())).filter(v => v);
+
+        res.json({ playlist, videos: sortedVideos });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der Playlist." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
