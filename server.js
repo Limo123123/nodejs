@@ -18797,9 +18797,9 @@ app.post('/api/limtube/upload', isAuthenticated, async (req, res) => {
         });
 
         // Limit festlegen
-        let dailyLimit = 2; // Standard: 2 Videos pro Tag
+        let dailyLimit = 3; // Standard: 3 Videos pro Tag
         if (user.activeSubscriptions && user.activeSubscriptions.includes('prime')) {
-            dailyLimit = 5; // Prime-Nutzer: 5 Videos
+            dailyLimit = 10; // Prime-Nutzer: 10 Videos
         }
         if (user.isAdmin) {
             dailyLimit = 999; // Admins juckt das Limit nicht
