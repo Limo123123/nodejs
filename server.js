@@ -19465,6 +19465,118 @@ app.delete('/api/admin/limtube/ads/:id', isAuthenticated, isAdmin, async (req, r
     }
 });
 
+// 1. Kanal-Profil & Videos eines Creators abrufen
+app.get('/api/limtube/channel/:username', isAuthenticated, async (req, res) => {
+    try {
+        const username = req.params.username;
+        const currentUsername = req.session.username;
+
+        // Alle Videos dieses Uploader finden
+        const videos = await db.collection('limtubeVideos').find({ uploaderName: username, status: 'active' }).sort({ createdAt: -1 }).toArray();
+        
+        // Abonnenten zählen
+        const subsCount = await db.collection('limtubeSubscriptions').countDocuments({ channelName: username });
+        
+        // Prüfen, ob der eingeloggte User diesen Kanal abonniert hat
+        const isSubbed = await db.collection('limtubeSubscriptions').findOne({ subscriberName: currentUsername, channelName: username });
+
+        res.json({
+            username: username,
+            subscribersCount: subsCount,
+            isSubscribed: !!isSubbed,
+            videos: videos
+        });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden des Kanals." });
+    }
+});
+
+// 2. Playlists des Users abrufen
+app.get('/api/limtube/playlists', isAuthenticated, async (req, res) => {
+    try {
+        const playlists = await db.collection('limtubePlaylists').find({ username: req.session.username }).toArray();
+        res.json({ playlists });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der Playlists." });
+    }
+});
+
+// 3. Neue Playlist erstellen
+app.post('/api/limtube/playlists', isAuthenticated, async (req, res) => {
+    try {
+        const { title } = req.body;
+        if (!title || title.trim().length < 2) return res.status(400).json({ error: "Titel zu kurz." });
+
+        const newPlaylist = {
+            username: req.session.username,
+            title: title.trim(),
+            videoIds: [],
+            createdAt: new Date()
+        };
+
+        const result = await db.collection('limtubePlaylists').insertOne(newPlaylist);
+        newPlaylist.id = result.insertedId;
+        res.status(201).json({ message: "Playlist erstellt", playlist: newPlaylist });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Erstellen." });
+    }
+});
+
+// 4. Video zu Playlist hinzufügen
+app.post('/api/limtube/playlists/:id/add', isAuthenticated, async (req, res) => {
+    try {
+        const { videoId } = req.body;
+        await db.collection('limtubePlaylists').updateOne(
+            { _id: new ObjectId(req.params.id), username: req.session.username },
+            { $addToSet: { videoIds: videoId } }
+        );
+        res.json({ message: "Video zur Playlist hinzugefügt!" });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler." });
+    }
+});
+
+// 5. Video aus Playlist entfernen
+app.post('/api/limtube/playlists/:id/remove', isAuthenticated, async (req, res) => {
+    try {
+        const { videoId } = req.body;
+        await db.collection('limtubePlaylists').updateOne(
+            { _id: new ObjectId(req.params.id), username: req.session.username },
+            { $pull: { videoIds: videoId } }
+        );
+        res.json({ message: "Video aus Playlist entfernt." });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Entfernen." });
+    }
+});
+
+// 6. Sichtbarkeit umschalten (Privat <-> Öffentlich)
+app.post('/api/limtube/playlists/:id/visibility', isAuthenticated, async (req, res) => {
+    try {
+        const { isPublic } = req.body;
+        await db.collection('limtubePlaylists').updateOne(
+            { _id: new ObjectId(req.params.id), username: req.session.username },
+            { $set: { isPublic: !!isPublic } }
+        );
+        res.json({ message: "Sichtbarkeit aktualisiert." });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Ändern der Sichtbarkeit." });
+    }
+});
+
+// 7. Ganze Playlist löschen
+app.delete('/api/limtube/playlists/:id', isAuthenticated, async (req, res) => {
+    try {
+        await db.collection('limtubePlaylists').deleteOne({ 
+            _id: new ObjectId(req.params.id), 
+            username: req.session.username 
+        });
+        res.json({ message: "Playlist gelöscht." });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Löschen." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
