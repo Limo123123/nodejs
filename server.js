@@ -198,6 +198,7 @@ app.use('/api/bank', isNotOnStrike('bank'));
 app.use('/api/pets', isNotOnStrike('pets'));
 app.use('/api/delivery', isNotOnStrike('delivery'));
 app.use('/api/wheels', isNotOnStrike('wheels'));
+app.use('/api/limabook', isNotOnStrike('limabook'));
 
 // --- Datenbank Variablen ---
 let db;
@@ -244,6 +245,7 @@ let cartelApplicationsCollection;
 let inviteCodesCollection;
 let movementsCollection;
 let limtubeVideosCollection;
+let limabookPostsCollection, limabookCommentsCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -1347,6 +1349,8 @@ MongoClient.connect(mongoUri)
         bankTransactionsCollection = db.collection('bankTransactions');
 		cartelApplicationsCollection = db.collection('cartelApplications');
 		limtubeVideosCollection = db.collection('limtubeVideos');
+		limabookPostsCollection = db.collection('limabookPosts');
+		limabookCommentsCollection = db.collection('limabookComments');
         console.log(`${LOG_PREFIX_SERVER} ✅ MongoDB verbunden & alle Collections initialisiert.`);
         // --- 2. Indizes & Reparaturen ---
         try {
@@ -1406,6 +1410,9 @@ MongoClient.connect(mongoUri)
 			);
 			console.log(`${LOG_PREFIX_SERVER} ⏱️ TTL-Index für Activity-Logs aktiv (30 Tage).`);
 			await limtubeVideosCollection.createIndex({ createdAt: -1 });
+			await limabookPostsCollection.createIndex({ createdAt: -1 });
+			await limabookPostsCollection.createIndex({ username: 1 });
+			await limabookCommentsCollection.createIndex({ postId: 1, createdAt: 1 });
 
             if (tokenTransactionsCollection) {
                 await tokenTransactionsCollection.createIndex({ userId: 1 });
@@ -19616,6 +19623,210 @@ app.get('/api/limtube/playlists/:id', async (req, res) => {
         res.json({ playlist, videos: sortedVideos });
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Laden der Playlist." });
+    }
+});
+
+// =========================================================
+// === 📱 LIMABOOK API (SOCIAL NETWORK) ===
+// =========================================================
+const LOG_PREFIX_LIMABOOK = "[Limabook]";
+
+// 1. Neuen Beitrag erstellen (Text + Optionales Bild)
+app.post('/api/limabook/post', isAuthenticated, upload.single('image'), async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    const { content } = req.body;
+    let filename = null;
+
+    if (!content && !req.file) {
+        return res.status(400).json({ error: "Dein Beitrag darf nicht komplett leer sein." });
+    }
+
+    try {
+        // Falls ein Bild mitgesendet wurde, komprimieren und speichern
+        if (req.file) {
+            filename = `limabook_${Date.now()}_${Math.floor(Math.random() * 1000)}.webp`;
+            const filepath = path.join(CDN_DIR, filename);
+
+            await sharp(req.file.buffer)
+                .rotate() 
+                .resize({ width: 1080, withoutEnlargement: true }) // Etwas größer als CDN-Standard für gute Feed-Qualität
+                .webp({ quality: 80, effort: 4 })
+                .toFile(filepath);
+        }
+
+        const newPost = {
+            userId: userId,
+            username: req.session.username,
+            content: content ? content.trim() : "",
+            imageFilename: filename, // NUR der Dateiname! Frontend baut die URL.
+            likes: [],
+            commentsCount: 0,
+            createdAt: new Date()
+        };
+
+        const result = await limabookPostsCollection.insertOne(newPost);
+        newPost._id = result.insertedId;
+
+        // Logging für Admin-Panel
+        if (typeof logActivity === 'function') {
+            await logActivity(req, "LIMABOOK_POST", { hasImage: !!filename });
+        }
+
+        console.log(`${LOG_PREFIX_LIMABOOK} ${req.session.username} hat einen neuen Beitrag gepostet.`);
+        res.status(201).json({ message: "Beitrag online!", post: newPost });
+
+    } catch (e) {
+        console.error(`${LOG_PREFIX_LIMABOOK} Upload Fehler:`, e);
+        res.status(500).json({ error: "Fehler beim Posten." });
+    }
+});
+
+// 2. Feed abrufen (Global oder User-spezifisch)
+app.get('/api/limabook/feed', isAuthenticated, async (req, res) => {
+    const { username, limit = 20, skip = 0 } = req.query;
+    const currentUserId = new ObjectId(req.session.userId);
+    
+    let query = {};
+    if (username) {
+        query.username = { $regex: new RegExp(`^${username.trim()}$`, 'i') };
+    }
+
+    try {
+        const posts = await limabookPostsCollection.find(query)
+            .sort({ createdAt: -1 })
+            .skip(parseInt(skip))
+            .limit(parseInt(limit))
+            .toArray();
+
+        // Frontendfreundlich aufbereiten (Prüfen ob ICH geliked habe)
+        const enrichedPosts = posts.map(post => {
+            const hasLiked = post.likes && post.likes.some(id => id.equals(currentUserId));
+            return {
+                _id: post._id,
+                username: post.username,
+                content: post.content,
+                imageFilename: post.imageFilename,
+                likesCount: post.likes ? post.likes.length : 0,
+                commentsCount: post.commentsCount || 0,
+                isLiked: hasLiked,
+                createdAt: post.createdAt,
+                isOwner: post.userId.equals(currentUserId)
+            };
+        });
+
+        res.json({ posts: enrichedPosts });
+    } catch (e) {
+        res.status(500).json({ error: "Feed konnte nicht geladen werden." });
+    }
+});
+
+// 3. Beitrag Liken / Entliken
+app.post('/api/limabook/post/:id/like', isAuthenticated, async (req, res) => {
+    const postId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const post = await limabookPostsCollection.findOne({ _id: postId });
+        if (!post) return res.status(404).json({ error: "Beitrag nicht gefunden." });
+
+        const hasLiked = post.likes && post.likes.some(id => id.equals(userId));
+
+        if (hasLiked) {
+            // Unlike
+            await limabookPostsCollection.updateOne({ _id: postId }, { $pull: { likes: userId } });
+            res.json({ message: "Like entfernt", isLiked: false, likesCount: post.likes.length - 1 });
+        } else {
+            // Like
+            await limabookPostsCollection.updateOne({ _id: postId }, { $addToSet: { likes: userId } });
+            res.json({ message: "Geliked!", isLiked: true, likesCount: (post.likes ? post.likes.length : 0) + 1 });
+        }
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Liken." });
+    }
+});
+
+// 4. Kommentare abrufen
+app.get('/api/limabook/post/:id/comments', isAuthenticated, async (req, res) => {
+    const postId = new ObjectId(req.params.id);
+    try {
+        const comments = await limabookCommentsCollection.find({ postId }).sort({ createdAt: 1 }).toArray();
+        res.json({ comments });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der Kommentare." });
+    }
+});
+
+// 5. Kommentar schreiben
+app.post('/api/limabook/post/:id/comment', isAuthenticated, async (req, res) => {
+    const postId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+    const { content } = req.body;
+
+    if (!content || content.trim().length === 0) {
+        return res.status(400).json({ error: "Kommentar darf nicht leer sein." });
+    }
+
+    const session = client.startSession();
+    try {
+        let newComment;
+        await session.withTransaction(async () => {
+            const post = await limabookPostsCollection.findOne({ _id: postId }, { session });
+            if (!post) throw new Error("Beitrag nicht gefunden.");
+
+            newComment = {
+                postId: postId,
+                userId: userId,
+                username: req.session.username,
+                content: content.trim().substring(0, 500), // Max 500 Zeichen
+                createdAt: new Date()
+            };
+
+            await limabookCommentsCollection.insertOne(newComment, { session });
+            await limabookPostsCollection.updateOne({ _id: postId }, { $inc: { commentsCount: 1 } }, { session });
+        });
+
+        res.status(201).json({ message: "Kommentar gepostet!", comment: newComment });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// 6. Beitrag löschen (Nur Autor oder Admin)
+app.delete('/api/limabook/post/:id', isAuthenticated, async (req, res) => {
+    const postId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const post = await limabookPostsCollection.findOne({ _id: postId });
+        if (!post) return res.status(404).json({ error: "Beitrag nicht gefunden." });
+
+        const user = await usersCollection.findOne({ _id: userId });
+        const isOwner = post.userId.equals(userId);
+
+        if (!isOwner && !user.isAdmin) {
+            return res.status(403).json({ error: "Du darfst nur deine eigenen Beiträge löschen." });
+        }
+
+        // 1. Beitrag aus DB löschen
+        await limabookPostsCollection.deleteOne({ _id: postId });
+        
+        // 2. Alle zugehörigen Kommentare löschen
+        await limabookCommentsCollection.deleteMany({ postId: postId });
+
+        // 3. Bilddatei von der NVMe löschen (falls vorhanden)
+        if (post.imageFilename) {
+            const filepath = path.join(CDN_DIR, post.imageFilename);
+            if (fs.existsSync(filepath)) {
+                fs.unlinkSync(filepath);
+                console.log(`${LOG_PREFIX_LIMABOOK} 🗑️ Bild gelöscht: ${post.imageFilename}`);
+            }
+        }
+
+        res.json({ message: "Beitrag restlos gelöscht." });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Löschen." });
     }
 });
 
