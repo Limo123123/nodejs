@@ -19812,7 +19812,6 @@ app.post('/api/limabook/post/:id/comment', isAuthenticated, async (req, res) => 
             };
 
             await limabookCommentsCollection.insertOne(newComment, { session });
-			newComment._id = result.insertedId;
             await limabookPostsCollection.updateOne({ _id: postId }, { $inc: { commentsCount: 1 } }, { session });
         });
 
