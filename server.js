@@ -19681,14 +19681,19 @@ app.post('/api/limabook/post', isAuthenticated, upload.single('image'), async (r
     }
 });
 
-// 2. Feed abrufen (Global oder User-spezifisch)
+// 2. Feed abrufen
 app.get('/api/limabook/feed', isAuthenticated, async (req, res) => {
-    const { username, limit = 20, skip = 0 } = req.query;
+    const { username, q, limit = 50, skip = 0 } = req.query;
     const currentUserId = new ObjectId(req.session.userId);
     
     let query = {};
+    // Profil-Filter
     if (username) {
         query.username = { $regex: new RegExp(`^${username.trim()}$`, 'i') };
+    }
+    // Such-Filter (Sucht im Textinhalt)
+    if (q) {
+        query.content = { $regex: q, $options: 'i' };
     }
 
     try {
@@ -19698,7 +19703,6 @@ app.get('/api/limabook/feed', isAuthenticated, async (req, res) => {
             .limit(parseInt(limit))
             .toArray();
 
-        // Frontendfreundlich aufbereiten (Prüfen ob ICH geliked habe)
         const enrichedPosts = posts.map(post => {
             const hasLiked = post.likes && post.likes.some(id => id.equals(currentUserId));
             return {
@@ -19717,6 +19721,32 @@ app.get('/api/limabook/feed', isAuthenticated, async (req, res) => {
         res.json({ posts: enrichedPosts });
     } catch (e) {
         res.status(500).json({ error: "Feed konnte nicht geladen werden." });
+    }
+});
+
+// 2b. Einzelnen Beitrag abrufen (Für Detail-Ansicht / Teilen-Link)
+app.get('/api/limabook/post/:id', isAuthenticated, async (req, res) => {
+    const postId = new ObjectId(req.params.id);
+    const currentUserId = new ObjectId(req.session.userId);
+
+    try {
+        const post = await limabookPostsCollection.findOne({ _id: postId });
+        if (!post) return res.status(404).json({ error: "Beitrag nicht gefunden." });
+
+        const hasLiked = post.likes && post.likes.some(id => id.equals(currentUserId));
+        res.json({ post: {
+            _id: post._id,
+            username: post.username,
+            content: post.content,
+            imageFilename: post.imageFilename,
+            likesCount: post.likes ? post.likes.length : 0,
+            commentsCount: post.commentsCount || 0,
+            isLiked: hasLiked,
+            createdAt: post.createdAt,
+            isOwner: post.userId.equals(currentUserId)
+        }});
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden des Beitrags." });
     }
 });
 
@@ -19790,6 +19820,37 @@ app.post('/api/limabook/post/:id/comment', isAuthenticated, async (req, res) => 
         res.status(400).json({ error: e.message });
     } finally {
         await session.endSession();
+    }
+});
+
+// 5b. Kommentar löschen (Nur eigener Kommentar, Post-Inhaber oder Admin)
+app.delete('/api/limabook/post/:postId/comment/:commentId', isAuthenticated, async (req, res) => {
+    const postId = new ObjectId(req.params.postId);
+    const commentId = new ObjectId(req.params.commentId);
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const post = await limabookPostsCollection.findOne({ _id: postId });
+        const user = await usersCollection.findOne({ _id: userId });
+        const comment = await limabookCommentsCollection.findOne({ _id: commentId });
+        
+        if (!comment) return res.status(404).json({ error: "Kommentar nicht gefunden." });
+
+        // Darf löschen wenn: Eigenes Kommentar, oder Inhaber des Beitrags, oder Server-Admin
+        const isCommentOwner = comment.userId.equals(userId);
+        const isPostOwner = post && post.userId.equals(userId);
+
+        if (!isCommentOwner && !isPostOwner && !user.isAdmin) {
+            return res.status(403).json({ error: "Keine Berechtigung diesen Kommentar zu löschen." });
+        }
+
+        await limabookCommentsCollection.deleteOne({ _id: commentId });
+        // Zähler wieder reduzieren
+        await limabookPostsCollection.updateOne({ _id: postId }, { $inc: { commentsCount: -1 } });
+
+        res.json({ message: "Kommentar gelöscht." });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Löschen des Kommentars." });
     }
 });
 
