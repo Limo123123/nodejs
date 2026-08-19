@@ -790,6 +790,83 @@ async function seedTokenCardProducts() {
     else console.log(`${LOG_PREFIX_SERVER}    Keine neuen Token-Karten Produkte zu seeden (oder bereits vorhanden).`);
 }
 
+async function syncExistingAdsToLimTube() {
+    console.log(`${LOG_PREFIX_SERVER} 🔄 Starte Sync für bestehende Werbevideos...`);
+    try {
+        // 1. Alle Ads aus der Datenbank holen
+        const ads = await db.collection('limtubeAds').find({}).toArray();
+        if (ads.length === 0) return;
+
+        const universeAccount = await usersCollection.findOne({ username: 'limazon_universe' });
+        if (!universeAccount) {
+            console.log(`${LOG_PREFIX_SERVER} ⚠️ Warnung: Account 'limazon_universe' existiert nicht. Sync abgebrochen.`);
+            return;
+        }
+
+        const playlistVideoIds = [];
+        const { exec } = require('child_process');
+
+        for (const ad of ads) {
+            // 2. Prüfen, ob für diese Werbung schon ein LimTube-Video existiert (Anhand des Dateinamens)
+            const existingVideo = await limtubeVideosCollection.findOne({ filename: ad.filename });
+            
+            if (!existingVideo) {
+                const thumbFilename = ad.filename.replace('.mp4', '.jpg');
+                const thumbPath = path.join(CDN_DIR, thumbFilename);
+
+                // 3. Thumbnail nachträglich generieren, falls es auf der Festplatte fehlt
+                if (!fs.existsSync(thumbPath)) {
+                    exec(`ffmpeg -i "${path.join(CDN_DIR, ad.filename)}" -ss 00:00:01 -vframes 1 "${thumbPath}"`, (err) => {
+                        if (err) console.error(`${LOG_PREFIX_SERVER} Thumbnail-Fehler beim Sync:`, err.message);
+                    });
+                }
+
+                // 4. LimTube-Eintrag für das alte Video erstellen
+                const newLimtubeVideo = {
+                    title: ad.title,
+                    description: "Offizieller Werbespot von Limazon.",
+                    filename: ad.filename,
+                    thumbnail: thumbFilename,
+                    visibility: 'unlisted', // Direkt versteckt
+                    uploaderId: universeAccount._id,
+                    uploaderName: 'limazon_universe',
+                    views: ad.views || 0,
+                    unpaidViews: 0,
+                    likes: [],
+                    comments: [],
+                    createdAt: ad.createdAt || new Date(),
+                    status: 'active',
+                    adId: ad._id // Verknüpfung für das Lösch-Skript
+                };
+
+                const result = await limtubeVideosCollection.insertOne(newLimtubeVideo);
+                playlistVideoIds.push(result.insertedId.toString());
+                console.log(`${LOG_PREFIX_SERVER} 📺 Altes Werbevideo migriert: ${ad.title}`);
+            } else {
+                // Wenn es schon existiert, merken wir uns trotzdem die ID für die Playlist
+                playlistVideoIds.push(existingVideo._id.toString());
+            }
+        }
+
+        // 5. Alle gesammelten IDs der Playlist hinzufügen
+        if (playlistVideoIds.length > 0) {
+            await db.collection('limtubePlaylists').updateOne(
+                { username: 'limazon_universe', title: 'Offizielle Limazon Werbespots' },
+                { 
+                    $set: { isPublic: true },
+                    $addToSet: { videoIds: { $each: playlistVideoIds } },
+                    $setOnInsert: { createdAt: new Date() }
+                },
+                { upsert: true }
+            );
+            console.log(`${LOG_PREFIX_SERVER} 📺 Auto-Playlist 'Offizielle Limazon Werbespots' aktualisiert.`);
+        }
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Sync bestehender Ads:`, err);
+    }
+}
+
 // Hilfsfunktion: Geld auf 2 Nachkommastellen runden (kaufmännisch)
 function roundMoney(amount) {
     return Math.round((amount + Number.EPSILON) * 100) / 100;
@@ -1504,6 +1581,8 @@ MongoClient.connect(mongoUri)
         // --- 4. Automatisierte Checks & Jobs ---
         console.log(`${LOG_PREFIX_SERVER} 🚀 Führe initiale Datenintegritäts-Prüfung aus...`);
         await runAutomatedSecurityChecks();
+	
+		await syncExistingAdsToLimTube();
 
         const SECURITY_CHECK_INTERVAL_MS = 60 * 60 * 1000;
         if (cluster.isPrimary) {
@@ -19477,26 +19556,72 @@ app.get('/api/admin/limtube/ads', isAuthenticated, isAdmin, async (req, res) => 
 });
 
 // 3. Admin: Neues Ad hochladen
-// Wir recyclen deinen multer 'uploadVideo', der speichert das MP4 in den cdn-data Ordner!
 app.post('/api/admin/limtube/ads', isAuthenticated, isAdmin, uploadVideo.single('video'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'Kein Video empfangen.' });
 
+    const title = req.body.title || "Unbenannte Werbung";
+    const filename = req.file.filename;
+
+    // Thumbnail generieren (wie beim normalen LimTube Upload)
+    const thumbFilename = filename.replace('.mp4', '.jpg');
+    const thumbPath = path.join(CDN_DIR, thumbFilename);
+    const { exec } = require('child_process');
+    exec(`ffmpeg -i "${req.file.path}" -ss 00:00:01 -vframes 1 "${thumbPath}"`, (err) => {
+        if (err) console.error(`${LOG_PREFIX_SERVER} Thumbnail-Fehler (Ad):`, err.message);
+    });
+
     try {
+        // 1. Die echte Werbung in limtubeAds speichern (wie bisher)
         const newAd = {
-            title: req.body.title || "Unbenannte Werbung",
-            filename: req.file.filename,
+            title: title,
+            filename: filename,
             uploaderName: req.session.username,
             views: 0,
             createdAt: new Date()
         };
+        const adResult = await db.collection('limtubeAds').insertOne(newAd);
 
-        await db.collection('limtubeAds').insertOne(newAd);
-        console.log(`${LOG_PREFIX_SERVER} 📺 Neue LimTube Werbung hochgeladen: ${newAd.title}`);
-        
+        // 2. Den limazon_universe Account in der DB suchen, um seine ID zu nutzen
+        const universeAccount = await usersCollection.findOne({ username: 'limazon_universe' });
+        const universeId = universeAccount ? universeAccount._id : new ObjectId(req.session.userId);
+
+        // 3. Das Video als "unlisted" für LimTube erstellen (verknüpft mit der adId)
+        const newLimtubeVideo = {
+            title: title,
+            description: "Offizieller Werbespot von Limazon.",
+            filename: filename,
+            thumbnail: thumbFilename,
+            visibility: 'unlisted', // <--- Nicht gelistet!
+            uploaderId: universeId,
+            uploaderName: 'limazon_universe',
+            views: 0,
+            unpaidViews: 0,
+            likes: [],
+            comments: [],
+            createdAt: new Date(),
+            status: 'active',
+            adId: adResult.insertedId // Wichtig, um es beim Löschen der Werbung wiederzufinden
+        };
+        const videoResult = await limtubeVideosCollection.insertOne(newLimtubeVideo);
+
+        // 4. Das Video automatisch in die Werbe-Playlist von limazon_universe pushen
+        await db.collection('limtubePlaylists').updateOne(
+            { username: 'limazon_universe', title: 'Offizielle Limazon Werbespots' },
+            { 
+                $set: { isPublic: true },
+                $addToSet: { videoIds: videoResult.insertedId.toString() },
+                $setOnInsert: { createdAt: new Date() }
+            },
+            { upsert: true }
+        );
+
+        console.log(`${LOG_PREFIX_SERVER} 📺 Neue LimTube Werbung hochgeladen & in Playlist eingefügt: ${title}`);
         res.status(201).json({ message: 'Werbe-Video erfolgreich hochgeladen!', ad: newAd });
+
     } catch (err) {
         // Falls was schief geht, Datei wieder löschen
         if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Speichern der Werbung:`, err);
         res.status(500).json({ error: 'Serverfehler beim Speichern der Werbung.' });
     }
 });
@@ -19504,7 +19629,8 @@ app.post('/api/admin/limtube/ads', isAuthenticated, isAdmin, uploadVideo.single(
 // 4. Admin: Ad löschen
 app.delete('/api/admin/limtube/ads/:id', isAuthenticated, isAdmin, async (req, res) => {
     try {
-        const ad = await db.collection('limtubeAds').findOne({ _id: new ObjectId(req.params.id) });
+        const adId = new ObjectId(req.params.id);
+        const ad = await db.collection('limtubeAds').findOne({ _id: adId });
         if (!ad) return res.status(404).json({ error: "Werbung nicht gefunden." });
 
         // Datei vom NVMe/Server löschen
@@ -19512,11 +19638,36 @@ app.delete('/api/admin/limtube/ads/:id', isAuthenticated, isAdmin, async (req, r
         if (fs.existsSync(filepath)) {
             fs.unlinkSync(filepath);
         }
+        
+        // Thumbnail ebenfalls löschen
+        const thumbPath = path.join(CDN_DIR, ad.filename.replace('.mp4', '.jpg'));
+        if (fs.existsSync(thumbPath)) {
+            fs.unlinkSync(thumbPath);
+        }
 
+        // 1. Aus der Werbe-Datenbank löschen
         await db.collection('limtubeAds').deleteOne({ _id: ad._id });
-        console.log(`${LOG_PREFIX_SERVER} 🗑️ Werbung gelöscht: ${ad.title}`);
-        res.json({ message: "Werbung erfolgreich gelöscht." });
+
+        // 2. Suche das geklonte LimTube-Video über die verknüpfte adId oder den Dateinamen
+        const linkedVideo = await limtubeVideosCollection.findOne({ 
+            $or: [ { adId: ad._id }, { filename: ad.filename, uploaderName: 'limazon_universe' } ] 
+        });
+
+        if (linkedVideo) {
+            // Video aus der LimTube-Datenbank löschen
+            await limtubeVideosCollection.deleteOne({ _id: linkedVideo._id });
+            
+            // Video aus der Playlist entfernen
+            await db.collection('limtubePlaylists').updateOne(
+                { username: 'limazon_universe', title: 'Offizielle Limazon Werbespots' },
+                { $pull: { videoIds: linkedVideo._id.toString() } }
+            );
+        }
+
+        console.log(`${LOG_PREFIX_SERVER} 🗑️ Werbung (und LimTube-Kopie) gelöscht: ${ad.title}`);
+        res.json({ message: "Werbung und Playlist-Eintrag erfolgreich gelöscht." });
     } catch (e) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Löschen der Werbung:`, e);
         res.status(500).json({ error: "Fehler beim Löschen der Werbung." });
     }
 });
