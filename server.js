@@ -20147,16 +20147,17 @@ app.post('/api/investors/pitch', isAuthenticated, async (req, res) => {
             Ein User pitcht gerade sein Startup.
             
             Die Jury besteht aus 3 Löwen:
-            1. Frank Limo: Ein knallharter, zynischer Milliardär. Findet fast alles schlecht und beleidigt Ideen gerne als "Kinderzimmer-Projekte".
-            2. Barbara: Etwas mütterlich, aber sie findet IMMER einen völlig absurden, persönlichen oder unlogischen Grund, um auszusteigen. Ihr Markenzeichen: Sie beendet ihren Satz IMMER mit "...und aus diesem Grund bin ich raus."
-            3. Carsten: Der "Sales"-Typ. Redet gerne von Skalierbarkeit, Margen und B2B. ABER: Auch er ist knallhart. Wenn die Idee Schrott ist, schmeißt auch er den Gründer raus!
+            1. Frank Limo: Ein knallharter, zynischer Milliardär. Er hasst fast alles und nennt es "Kinderzimmer-Projekt". Er investiert nur, wenn die Idee absolut verrückt und genial ist.
+            2. Barbara: Etwas mütterlich, aber sie findet IMMER einen völlig absurden, persönlichen Grund, um auszusteigen. Ihr Markenzeichen: Sie beendet ihren Satz IMMER mit "...und aus diesem Grund bin ich raus."
+            3. Carsten: Der "Sales"-Typ. Er liebt die Wörter "Skalierbarkeit", "B2B" und "Margen". 
+            WICHTIG: Wenn der Pitch objektiv ein lukratives Geschäftsmodell mit extrem hoher Marge ist, KANN Carsten investieren! Er ist gierig nach Geld.
 
             Deine Aufgabe:
             Lass die drei Löwen in einem kurzen Dialog (1-2 Sätze pro Löwe) auf den Pitch reagieren. 
-            Am Ende müssen sie eine Entscheidung fällen. Entweder ALLE lehnen ab, oder EINER der Löwen macht den Deal.
+            Am Ende müssen sie eine Entscheidung fällen.
             
             WICHTIGE REGEL ZUR ENTSCHEIDUNG:
-            Sei extrem kritisch! Lehne die meisten Pitches gnadenlos ab. Investiere nur, wenn die Idee WIRKLICH originell, extrem witzig oder unverschämt genial ist. Wenn alle ablehnen, muss "invested": false sein!
+            Sei hart, aber fair! Ist die Idee unrealistischer Schrott -> Alle lehnen ab. Ist die Idee ein genialer Cashgrab, ein mega Scam für reiche Leute oder hat krasses B2B-Potenzial -> Carsten (oder Frank) macht den Deal!
             ABSULUTES LIMIT: Wenn jemand investiert, darf die Summe NIEMALS $${MAX_INVESTMENT} übersteigen!
             
             Du MUSST deine Antwort als gültiges JSON formatieren.
@@ -20165,7 +20166,7 @@ app.post('/api/investors/pitch', isAuthenticated, async (req, res) => {
             {
               "invested": true oder false,
               "investment_amount": Zahl (0 wenn false, max ${MAX_INVESTMENT}),
-              "feedback": "Der Dialog der Löwen. Drücke niemals die Enter-Taste, sondern benutze [BR] als Zeilenumbruch. Beispiel: 'Frank: Euer Pitch ist eine absolute Beleidigung für mein Bankkonto.[BR]Barbara: Meine Zimmerpflanze mag das Produkt nicht... und aus diesem Grund bin ich raus.[BR]Carsten: Keine Marge, keine Skalierbarkeit. Ich bin auch raus.'"
+              "feedback": "Der Dialog der Löwen. Drücke niemals die Enter-Taste, sondern benutze [BR] als Zeilenumbruch. Beispiel: 'Frank: Text...[BR]Barbara: Text...[BR]Carsten: Text...'"
             }
             `;
 
