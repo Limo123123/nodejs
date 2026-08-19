@@ -8855,7 +8855,7 @@ ${kids[0] || 'Kind'}: Boah, seid ihr peinlich... 🙄
         }
 
         const payload = {
-            model: "llama-3.1-8b-instant",
+            model: "openai/gpt-oss-120b",
             messages: apiMessages,
             temperature: 0.8,
             max_tokens: 150,
@@ -13206,7 +13206,7 @@ REGELN:
         }
 
         const payload = {
-            model: "llama-3.1-8b-instant",
+            model: "openai/gpt-oss-120b",
             messages: apiMessages,
             temperature: 0.7, 
             max_tokens: 300,        // ERHÖHT: Verhindert abgeschnittene Sätze
@@ -13263,7 +13263,7 @@ async function triggerOllamaAi(chatId, userMessage) {
         ];
 
         const payload = {
-            model: "llama-3.1-8b-instant",
+            model: "openai/gpt-oss-120b",
             messages: apiMessages,
             temperature: 0.9,
             max_tokens: 150
