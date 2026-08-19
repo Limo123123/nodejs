@@ -20163,7 +20163,7 @@ app.post('/api/investors/pitch', isAuthenticated, async (req, res) => {
             {
               "invested": true oder false,
               "investment_amount": Zahl (0 wenn false, max ${MAX_INVESTMENT}),
-              "feedback": "Der Dialog der Löwen. Nutze Zeilenumbrüche (\\n) zwischen den Sprechern. Beispiel: 'Frank: Das ist Müll.\\nBarbara: Deine Nase ist zu groß, und aus diesem Grund bin ich raus.\\nCarsten: Ich biete dir 1000 Dollar.'"
+              "feedback": "Der Dialog der Löwen. Drücke niemals die Enter-Taste, sondern benutze [BR] als Zeilenumbruch zwischen den Sprechern. Beispiel: 'Frank: Das ist Müll.[BR]Barbara: Ich bin raus.[BR]Carsten: Deal.'"
             }
             `;
 
@@ -20186,8 +20186,8 @@ app.post('/api/investors/pitch', isAuthenticated, async (req, res) => {
 
             // 5. KI-Antwort bereinigen und parsen
             let aiText = aiRes.data.choices[0].message.content;
+            
             aiText = aiText.replace(/```json/gi, '').replace(/```/g, '').trim();
-            aiText = aiText.replace(/\n/g, "\\n").replace(/\r/g, "");
 
             let decision;
             try {
