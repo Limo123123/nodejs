@@ -20099,6 +20099,150 @@ app.delete('/api/limabook/post/:id', isAuthenticated, async (req, res) => {
     }
 });
 
+// =========================================================
+// === 🦈 DIE HÖHLE DER LÖWEN (KI INVESTOREN-PITCH) ===
+// =========================================================
+const LOG_PREFIX_SHARKS = "[SharkTank API]";
+const PITCH_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 1 Pitch pro 24 Stunden
+const MAX_INVESTMENT = 50000; // Harte Grenze für die KI, um die Wirtschaft zu schützen
+
+app.post('/api/investors/pitch', isAuthenticated, async (req, res) => {
+    const { startupName, pitchDescription, requestedAmount } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const username = req.session.username;
+
+    // 1. Validierung
+    if (!startupName || startupName.trim().length < 3 || startupName.length > 50) {
+        return res.status(400).json({ error: "Dein Startup braucht einen vernünftigen Namen (3-50 Zeichen)." });
+    }
+    if (!pitchDescription || pitchDescription.trim().length < 20 || pitchDescription.length > 1000) {
+        return res.status(400).json({ error: "Dein Pitch muss überzeugend sein (20-1000 Zeichen)." });
+    }
+    const requestedAmountNum = parseInt(requestedAmount);
+    if (isNaN(requestedAmountNum) || requestedAmountNum <= 0) {
+        return res.status(400).json({ error: "Wie viel Geld willst du? Gib eine gültige Summe an." });
+    }
+
+    const session = client.startSession();
+    try {
+        let responseData = {};
+
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+
+            // 2. Cooldown prüfen (Verhindert Spamming für unendlich Geld)
+            const now = Date.now();
+            const lastPitch = user.lastPitchAt ? new Date(user.lastPitchAt).getTime() : 0;
+            if (now - lastPitch < PITCH_COOLDOWN_MS) {
+                const hoursLeft = Math.ceil((PITCH_COOLDOWN_MS - (now - lastPitch)) / (1000 * 60 * 60));
+                throw new Error(`Die Investoren haben heute genug von dir gehört. Komm in ${hoursLeft} Stunden mit einer besseren Idee wieder.`);
+            }
+
+            // 3. Den Groq-System-Prompt aufbauen
+            const GROQ_API_KEY = process.env.GROQ_API_KEY;
+            if (!GROQ_API_KEY) throw new Error("Investoren sind aktuell im Urlaub (API Key fehlt).");
+
+            const systemPrompt = `
+            Du bist "Frank Limo", ein extrem reicher, knallharter, zynischer, aber humorvoller Investor im "Limazon"-Universum.
+            Ein User stellt dir gerade seine Startup-Idee vor. 
+            
+            Deine Aufgabe:
+            1. Bewerte die Idee. Ist sie kreativ, absurd, witzig oder genial? -> INVESTIERE!
+            2. Ist sie langweilig, faul, schlecht geschrieben oder unverschämt? -> LEHNE AB und zerreiß ihn verbal in der Luft.
+            3. Der User will $${requestedAmountNum.toLocaleString()}. Du kannst ihm diese Summe geben, ihn runterhandeln, oder ihm sogar mehr geben, wenn die Idee ein Meisterwerk ist. 
+            4. ABSOLUTES LIMIT: Du darfst NIEMALS mehr als $${MAX_INVESTMENT} investieren!
+            5. Dein Tonfall ist überheblich, sarkastisch, wie ein genervter Milliardär im Fernsehen.
+
+            Du MUSST deine Antwort als gültiges JSON formatieren, OHNE zusätzlichen Text davor oder danach!
+            
+            JSON-Format:
+            {
+              "invested": true oder false,
+              "investment_amount": Zahl (0 wenn false, max ${MAX_INVESTMENT}),
+              "feedback": "Dein knallhartes, sarkastisches Feedback als String."
+            }
+            `;
+
+            const userPrompt = `Startup-Name: "${startupName}"\nPitch: "${pitchDescription}"\nGewünschtes Investment: $${requestedAmountNum}`;
+
+            // 4. KI-Anfrage senden
+            const payload = {
+                model: "openai/gpt-oss-120b",
+                messages: [
+                    { role: "system", content: systemPrompt },
+                    { role: "user", content: userPrompt }
+                ],
+                temperature: 0.8,
+                max_tokens: 250
+            };
+
+            const aiRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', payload, {
+                headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' }
+            });
+
+            // 5. KI-Antwort bereinigen und parsen (Exakt wie bei deinem LNN-Bot)
+            let aiText = aiRes.data.choices[0].message.content;
+            aiText = aiText.replace(/\`\`\`json/g, '').replace(/\`\`\`/g, '').trim();
+            
+            const decision = JSON.parse(aiText);
+
+            // Sicherheits-Capping, falls die KI halluziniert
+            let actualPayout = 0;
+            if (decision.invested) {
+                actualPayout = Math.floor(decision.investment_amount);
+                if (actualPayout > MAX_INVESTMENT) actualPayout = MAX_INVESTMENT;
+                if (actualPayout < 0) actualPayout = 0;
+            }
+
+            // 6. Datenbank-Updates
+            const updateOps = { $set: { lastPitchAt: new Date() } };
+            if (actualPayout > 0) {
+                updateOps.$inc = { balance: actualPayout };
+            }
+
+            await usersCollection.updateOne({ _id: userId }, updateOps, { session });
+
+            // 7. Bei mega Deals (über $25.000) LNN News triggern
+            if (actualPayout >= 25000) {
+                await newsCollection.insertOne({
+                    headline: `MEGA-DEAL IN DER HÖHLE DER LÖWEN! 🦈`,
+                    content: `${username} hat die Investoren mit dem Startup "${startupName}" komplett umgehauen und ein Investment von $${actualPayout.toLocaleString()} eingesackt!`,
+                    author: "LNN Wirtschaft",
+                    category: "Wirtschaft",
+                    createdAt: new Date(),
+                    likes: 0
+                }, { session });
+                if (typeof updateDataVersion === 'function') updateDataVersion('news');
+            }
+
+            // Logging
+            if (typeof logActivity === 'function') {
+                await logActivity(req, "STARTUP_PITCH", { startupName, requested: requestedAmountNum, invested: decision.invested, amount: actualPayout });
+            }
+
+            responseData = {
+                success: true,
+                invested: decision.invested,
+                payout: actualPayout,
+                feedback: decision.feedback
+            };
+        });
+
+        const updatedUser = await usersCollection.findOne({ _id: userId }, { projection: { balance: 1 } });
+        res.json({ ...responseData, newBalance: updatedUser.balance });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SHARKS} Fehler beim Pitch von ${username}:`, err.message);
+        // Falls das JSON-Parsing fehlschlägt, fangen wir das hier sicher ab
+        if (err.message.includes("Unexpected token")) {
+            return res.status(500).json({ error: "Die Investoren sind gerade in einer hitzigen Diskussion und haben dir keine klare Antwort gegeben. Versuch es nochmal." });
+        }
+        res.status(400).json({ error: err.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
