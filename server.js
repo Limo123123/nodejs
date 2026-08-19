@@ -20257,6 +20257,31 @@ app.post('/api/investors/pitch', isAuthenticated, async (req, res) => {
     }
 });
 
+// GET: Die fettesten Deals aus der Höhle der Löwen
+app.get('/api/investors/leaderboard', isAuthenticated, async (req, res) => {
+    try {
+        // Wir suchen in den Activity-Logs nach erfolgreichen Pitches
+        const topDeals = await db.collection('activityLogs').aggregate([
+            { $match: { action: "STARTUP_PITCH", "details.invested": true } },
+            // Nach Investment-Summe absteigend sortieren
+            { $sort: { "details.amount": -1, timestamp: -1 } },
+            { $limit: 10 },
+            { $project: {
+                _id: 0,
+                username: 1,
+                startupName: "$details.startupName",
+                amount: "$details.amount",
+                timestamp: 1
+            }}
+        ]).toArray();
+
+        res.json({ leaderboard: topDeals });
+    } catch (e) {
+        console.error(`${LOG_PREFIX_SHARKS} Fehler beim Laden des Leaderboards:`, e);
+        res.status(500).json({ error: "Fehler beim Laden der Top-Deals." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
