@@ -20149,12 +20149,14 @@ app.post('/api/investors/pitch', isAuthenticated, async (req, res) => {
             Die Jury besteht aus 3 Löwen:
             1. Frank Limo: Ein knallharter, zynischer Milliardär. Findet fast alles schlecht und beleidigt Ideen gerne als "Kinderzimmer-Projekte".
             2. Barbara: Etwas mütterlich, aber sie findet IMMER einen völlig absurden, persönlichen oder unlogischen Grund, um auszusteigen. Ihr Markenzeichen: Sie beendet ihren Satz IMMER mit "...und aus diesem Grund bin ich raus."
-            3. Carsten: Der "Sales"-Typ. Redet immer von Skalierbarkeit, Margen und B2B, auch wenn die Idee völlig bescheuert ist.
+            3. Carsten: Der "Sales"-Typ. Redet gerne von Skalierbarkeit, Margen und B2B. ABER: Auch er ist knallhart. Wenn die Idee Schrott ist, schmeißt auch er den Gründer raus!
 
             Deine Aufgabe:
-            Lass die drei Löwen in einem kurzen Dialog (2-4 Sätze pro Löwe) auf den Pitch reagieren. 
-            Am Ende müssen sie eine Entscheidung fällen. Entweder ALLE lehnen ab, oder EINER der Löwen (meist Frank oder Carsten) macht den Deal.
+            Lass die drei Löwen in einem kurzen Dialog (1-2 Sätze pro Löwe) auf den Pitch reagieren. 
+            Am Ende müssen sie eine Entscheidung fällen. Entweder ALLE lehnen ab, oder EINER der Löwen macht den Deal.
             
+            WICHTIGE REGEL ZUR ENTSCHEIDUNG:
+            Sei extrem kritisch! Lehne die meisten Pitches gnadenlos ab. Investiere nur, wenn die Idee WIRKLICH originell, extrem witzig oder unverschämt genial ist. Wenn alle ablehnen, muss "invested": false sein!
             ABSULUTES LIMIT: Wenn jemand investiert, darf die Summe NIEMALS $${MAX_INVESTMENT} übersteigen!
             
             Du MUSST deine Antwort als gültiges JSON formatieren.
@@ -20163,7 +20165,7 @@ app.post('/api/investors/pitch', isAuthenticated, async (req, res) => {
             {
               "invested": true oder false,
               "investment_amount": Zahl (0 wenn false, max ${MAX_INVESTMENT}),
-              "feedback": "Der Dialog der Löwen. Drücke niemals die Enter-Taste, sondern benutze [BR] als Zeilenumbruch zwischen den Sprechern. Beispiel: 'Frank: Das ist Müll.[BR]Barbara: Ich bin raus.[BR]Carsten: Deal.'"
+              "feedback": "Der Dialog der Löwen. Drücke niemals die Enter-Taste, sondern benutze [BR] als Zeilenumbruch. Beispiel: 'Frank: Euer Pitch ist eine absolute Beleidigung für mein Bankkonto.[BR]Barbara: Meine Zimmerpflanze mag das Produkt nicht... und aus diesem Grund bin ich raus.[BR]Carsten: Keine Marge, keine Skalierbarkeit. Ich bin auch raus.'"
             }
             `;
 
