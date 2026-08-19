@@ -18794,23 +18794,17 @@ app.post('/api/limtube/upload', isAuthenticated, async (req, res) => {
     try {
         const user = await usersCollection.findOne({ _id: userId }, { projection: { isAdmin: 1, activeSubscriptions: 1 } });
         
-        // Wie viele Videos heute schon?
         const todayStart = new Date();
-        todayStart.setHours(0, 0, 0, 0); // Start des heutigen Tages (00:00 Uhr)
+        todayStart.setHours(0, 0, 0, 0);
 
         const uploadedTodayCount = await limtubeVideosCollection.countDocuments({
             uploaderId: userId,
             createdAt: { $gte: todayStart }
         });
 
-        // Limit festlegen
-        let dailyLimit = 3; // Standard: 3 Videos pro Tag
-        if (user.activeSubscriptions && user.activeSubscriptions.includes('prime')) {
-            dailyLimit = 10; // Prime-Nutzer: 10 Videos
-        }
-        if (user.isAdmin) {
-            dailyLimit = 999; // Admins juckt das Limit nicht
-        }
+        let dailyLimit = 3; 
+        if (user.activeSubscriptions && user.activeSubscriptions.includes('prime')) dailyLimit = 10;
+        if (user.isAdmin) dailyLimit = 999;
 
         if (uploadedTodayCount >= dailyLimit) {
             return res.status(429).json({ error: `Upload-Limit erreicht! Du darfst nur ${dailyLimit} Videos pro Tag hochladen.` });
@@ -18819,7 +18813,6 @@ app.post('/api/limtube/upload', isAuthenticated, async (req, res) => {
         return res.status(500).json({ error: "Fehler beim Prüfen der Upload-Limits." });
     }
 
-    // Erst wenn das Limit NICHT erreicht ist, rufen wir multer auf und starten den Upload
     uploadVideo.single('video')(req, res, async (err) => {
         if (err) {
             console.error(`${LOG_PREFIX_SERVER} Video-Upload Fehler:`, err);
@@ -18828,12 +18821,16 @@ app.post('/api/limtube/upload', isAuthenticated, async (req, res) => {
 
         if (!req.file) return res.status(400).json({ error: 'Kein Video empfangen.' });
         
-        const { title, description } = req.body;
+        // visibility aus dem Frontend holen
+        const { title, description, visibility } = req.body;
         
         if (!title || title.trim().length < 5) {
             fs.unlinkSync(req.file.path);
             return res.status(400).json({ error: 'Ein Titel (min. 5 Zeichen) ist Pflicht!' });
         }
+
+        // Sichtbarkeit setzen (Standard ist public, wenn nichts gesendet wird)
+        const finalVisibility = ['public', 'unlisted', 'private'].includes(visibility) ? visibility : 'public';
 
         const thumbFilename = req.file.filename.replace('.mp4', '.jpg');
         const thumbPath = path.join(CDN_DIR, thumbFilename);
@@ -18848,7 +18845,8 @@ app.post('/api/limtube/upload', isAuthenticated, async (req, res) => {
                 title: title.trim(),
                 description: description ? description.trim().substring(0, 500) : "",
                 filename: req.file.filename,
-                thumbnail: thumbFilename, // <--- NEU
+                thumbnail: thumbFilename,
+                visibility: finalVisibility, // <--- NEU GESPEICHERT
                 uploaderId: userId,
                 uploaderName: req.session.username,
                 views: 0,
@@ -18860,9 +18858,9 @@ app.post('/api/limtube/upload', isAuthenticated, async (req, res) => {
             };
 
             await limtubeVideosCollection.insertOne(newVideo);
-            await logActivity(req, "LIMTUBE_UPLOAD", { title: newVideo.title });
+            await logActivity(req, "LIMTUBE_UPLOAD", { title: newVideo.title, visibility: finalVisibility });
 
-            console.log(`${LOG_PREFIX_SERVER} 🎬 Limtube: ${req.session.username} hat "${newVideo.title}" hochgeladen.`);
+            console.log(`${LOG_PREFIX_SERVER} 🎬 Limtube: ${req.session.username} hat "${newVideo.title}" hochgeladen (${finalVisibility}).`);
             res.status(201).json({ message: 'Video erfolgreich hochgeladen!', video: newVideo });
 
         } catch (dbErr) {
@@ -18876,25 +18874,33 @@ app.post('/api/limtube/upload', isAuthenticated, async (req, res) => {
 // --- Limtube Such-Route (Feed filtern) ---
 app.get('/api/limtube/feed', isAuthenticated, async (req, res) => {
     const { q, u } = req.query; // q = Suchbegriff, u = Uploader
-    const query = { status: 'active' };
+    
+    // Grundfilter - Nur aktive UND öffentliche Videos (oder alte Videos ohne das Feld)
+    const baseFilter = {
+        status: 'active',
+        $or: [{ visibility: 'public' }, { visibility: { $exists: false } }]
+    };
+
+    const query = { $and: [baseFilter] };
 
     if (q) {
-        // Case-Insensitive Suche im Titel oder beim Uploader
-        query.$or = [
-            { title: { $regex: q, $options: 'i' } },
-            { uploaderName: { $regex: q, $options: 'i' } }
-        ];
+        query.$and.push({
+            $or: [
+                { title: { $regex: q, $options: 'i' } },
+                { uploaderName: { $regex: q, $options: 'i' } }
+            ]
+        });
     }
+    
     if (u) {
-        // Nur Videos von einem bestimmten Uploader
-        query.uploaderName = u;
+        query.$and.push({ uploaderName: u });
     }
 
     try {
         const videos = await limtubeVideosCollection.find(query).sort({ createdAt: -1 }).limit(50).toArray();
         res.json({ videos });
     } catch (e) {
-        res.status(500).json({ error: "Fehler beim Laden." });
+        res.status(500).json({ error: "Fehler beim Laden des Feeds." });
     }
 });
 
@@ -19128,20 +19134,30 @@ app.get('/api/limtube/video/:id', isAuthenticated, async (req, res) => {
         }
 
         const video = await limtubeVideosCollection.findOne(query);
-		const uploaderDoc = await usersCollection.findOne({ _id: video.uploaderId }, { projection: { subscribers: 1 } });
-		const subCount = uploaderDoc && uploaderDoc.subscribers ? uploaderDoc.subscribers.length : 0;
-		const isSubscribed = uploaderDoc && uploaderDoc.subscribers && uploaderDoc.subscribers.some(id => id.equals(new ObjectId(req.session.userId)));
-		const hasDisliked = video.dislikes && video.dislikes.some(id => id.equals(new ObjectId(req.session.userId)));
         if (!video) return res.status(404).json({ error: "Video nicht gefunden." });
+
+        const currentUserId = req.session.userId;
+        const isOwner = currentUserId && video.uploaderId.toString() === currentUserId.toString();
         
-        const hasLiked = video.likes && video.likes.some(id => id.equals(new ObjectId(req.session.userId)));
+        // Prüfe auf Private-Sperre
+        if (video.visibility === 'private' && !isOwner && !req.session.isAdmin) {
+            return res.status(403).json({ error: "Dieses Video ist privat und kann nur vom Besitzer angesehen werden." });
+        }
+
+        const uploaderDoc = await usersCollection.findOne({ _id: video.uploaderId }, { projection: { subscribers: 1 } });
+        const subCount = uploaderDoc && uploaderDoc.subscribers ? uploaderDoc.subscribers.length : 0;
+        const isSubscribed = uploaderDoc && uploaderDoc.subscribers && currentUserId && uploaderDoc.subscribers.some(id => id.equals(new ObjectId(currentUserId)));
+        
+        const hasLiked = video.likes && currentUserId && video.likes.some(id => id.equals(new ObjectId(currentUserId)));
+        const hasDisliked = video.dislikes && currentUserId && video.dislikes.some(id => id.equals(new ObjectId(currentUserId)));
 
         res.json({
             video: {
-                id: video._id || video.id, // Fallback für Frontend
+                id: video._id || video.id,
                 title: video.title,
                 description: video.description,
-                uploaderName: video.uploaderName || video.uploader || "Unbekannt", // Fallback für alte Videos!
+                visibility: video.visibility || 'public', // <--- NEU
+                uploaderName: video.uploaderName || video.uploader || "Unbekannt",
                 uploaderId: video.uploaderId,
                 views: video.views || 0,
                 likesCount: video.likes ? video.likes.length : 0,
@@ -19149,10 +19165,10 @@ app.get('/api/limtube/video/:id', isAuthenticated, async (req, res) => {
                 filename: video.filename,
                 comments: video.comments || [],
                 createdAt: video.createdAt,
-				dislikesCount: video.dislikes ? video.dislikes.length : 0,
-				isDisliked: hasDisliked,
-				subscribersCount: subCount,
-				isSubscribed: isSubscribed
+                dislikesCount: video.dislikes ? video.dislikes.length : 0,
+                isDisliked: hasDisliked,
+                subscribersCount: subCount,
+                isSubscribed: isSubscribed
             }
         });
     } catch (e) {
@@ -19188,11 +19204,44 @@ app.get('/api/limtube/dashboard', isAuthenticated, async (req, res) => {
                 origin: v.origin,
                 filename: v.filename,
                 thumbnail: v.thumbnail,
-                ytId: v.ytId
+                ytId: v.ytId,
+                visibility: v.visibility || 'public' // <--- NEU FÜRS FRONTEND!
             }))
         });
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Laden der Creator-Stats." });
+    }
+});
+
+// Sichtbarkeit nachträglich ändern
+app.patch('/api/limtube/video/:id/visibility', isAuthenticated, async (req, res) => {
+    const videoId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+    const { visibility } = req.body;
+
+    if (!['public', 'unlisted', 'private'].includes(visibility)) {
+        return res.status(400).json({ error: "Ungültiger Sichtbarkeits-Status." });
+    }
+
+    try {
+        const video = await limtubeVideosCollection.findOne({ _id: videoId });
+        if (!video) return res.status(404).json({ error: "Video nicht gefunden." });
+
+        const user = await usersCollection.findOne({ _id: userId });
+        const isOwner = video.uploaderId.equals(userId);
+
+        if (!isOwner && !user.isAdmin) {
+            return res.status(403).json({ error: "Du bist nicht der Besitzer dieses Videos." });
+        }
+
+        await limtubeVideosCollection.updateOne(
+            { _id: videoId },
+            { $set: { visibility: visibility } }
+        );
+
+        res.json({ message: `Video ist nun auf '${visibility}' gestellt!` });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Aktualisieren der Sichtbarkeit." });
     }
 });
 
@@ -19476,22 +19525,29 @@ app.delete('/api/admin/limtube/ads/:id', isAuthenticated, isAdmin, async (req, r
 app.get('/api/limtube/channel/:username', isAuthenticated, async (req, res) => {
     try {
         const username = req.params.username;
-        const currentUserId = req.session.userId; // Wichtig für den ObjectId Check!
+        const currentUserId = req.session.userId;
 
-        // 1. Videos & Playlists laden
-        const videos = await db.collection('limtubeVideos').find({ uploaderName: username, status: 'active' }).sort({ createdAt: -1 }).toArray();
-        const publicPlaylists = await db.collection('limtubePlaylists').find({ username: username, isPublic: true }).sort({ createdAt: -1 }).toArray();
+        const uploaderDoc = await db.collection('users').findOne({ username: { $regex: new RegExp(`^${username}$`, 'i') } });
         
-        // 2. Den Uploader in der User-Datenbank finden
-        const uploaderDoc = await db.collection('users').findOne({ username: username });
+        // Gehört der Kanal demjenigen, der ihn gerade ansieht?
+        const isOwner = uploaderDoc && currentUserId && uploaderDoc._id.toString() === currentUserId.toString();
 
-        // 3. EXAKT DEINE LOGIK ZUM ZÄHLEN UND PRÜFEN DER ABONNENTEN
+        // Video Query bauen
+        const videoQuery = { uploaderName: { $regex: new RegExp(`^${username}$`, 'i') }, status: 'active' };
+        
+        // Wenn man NICHT der Besitzer ist, darf man nur 'public' Videos sehen
+        if (!isOwner) {
+            videoQuery.$or = [{ visibility: 'public' }, { visibility: { $exists: false } }];
+        }
+
+        const videos = await db.collection('limtubeVideos').find(videoQuery).sort({ createdAt: -1 }).toArray();
+        const publicPlaylists = await db.collection('limtubePlaylists').find({ username: { $regex: new RegExp(`^${username}$`, 'i') }, isPublic: true }).sort({ createdAt: -1 }).toArray();
+        
         let subCount = 0;
         let isSubscribed = false;
 
         if (uploaderDoc) {
             subCount = uploaderDoc.subscribers ? uploaderDoc.subscribers.length : 0;
-            
             if (uploaderDoc.subscribers && currentUserId) {
                 isSubscribed = uploaderDoc.subscribers.some(id => id.equals(new ObjectId(currentUserId)));
             }
@@ -19502,7 +19558,8 @@ app.get('/api/limtube/channel/:username', isAuthenticated, async (req, res) => {
             subscribersCount: subCount,
             isSubscribed: isSubscribed,
             videos: videos,
-            playlists: publicPlaylists
+            playlists: publicPlaylists,
+            isOwner: isOwner
         });
     } catch (e) {
         console.error("Fehler bei Kanal-Laden:", e);
