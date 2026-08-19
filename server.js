@@ -20177,18 +20177,25 @@ app.post('/api/investors/pitch', isAuthenticated, async (req, res) => {
                     { role: "user", content: userPrompt }
                 ],
                 temperature: 0.8,
-                max_tokens: 250
+                max_tokens: 1000
             };
 
             const aiRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', payload, {
                 headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' }
             });
 
-            // 5. KI-Antwort bereinigen und parsen (Exakt wie bei deinem LNN-Bot)
+            // 5. KI-Antwort bereinigen und parsen
             let aiText = aiRes.data.choices[0].message.content;
-            aiText = aiText.replace(/\`\`\`json/g, '').replace(/\`\`\`/g, '').trim();
-            
-            const decision = JSON.parse(aiText);
+            aiText = aiText.replace(/```json/gi, '').replace(/```/g, '').trim();
+            aiText = aiText.replace(/\n/g, "\\n").replace(/\r/g, "");
+
+            let decision;
+            try {
+                decision = JSON.parse(aiText);
+            } catch (parseError) {
+                console.error(`${LOG_PREFIX_SHARKS} JSON Parse Error. Roher Text war:`, aiText);
+                throw new Error("Die Investoren haben wild durcheinander geredet. Bitte versuche es nochmal!");
+            }
 
             // Sicherheits-Capping, falls die KI halluziniert
             let actualPayout = 0;
