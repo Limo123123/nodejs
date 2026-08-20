@@ -19471,14 +19471,13 @@ app.post('/api/limtube/import-youtube', isAuthenticated, async (req, res) => {
 
     activeYtImports[ytId] = { progress: 0, status: 'started' };
 
-    // FIX: --force-ipv4 löst 90% der Docker-Netzwerk-Probleme
-    // FIX: best[ext=mp4] lädt direkt eine fertige Datei runter (braucht kein FFmpeg-Merge)
     const dl = spawn('yt-dlp', [
         '-f', 'best[ext=mp4]/best', 
         '-o', filePath,
         '--force-ipv4',
         '--no-playlist',
         '--newline',
+        '--js-runtimes', 'node',
         `https://www.youtube.com/watch?v=${ytId}`
     ]);
 
@@ -19487,14 +19486,14 @@ app.post('/api/limtube/import-youtube', isAuthenticated, async (req, res) => {
         if (match && match[1]) activeYtImports[ytId].progress = parseFloat(match[1]);
     });
 
-    // NEU: Damit du im Terminal (docker compose logs) siehst, warum er crasht!
     dl.stderr.on('data', (data) => {
         console.error(`${LOG_PREFIX_SERVER} [yt-dlp Fehler für ${ytId}]:`, data.toString().trim());
     });
 
     dl.on('close', async (code) => {
         if (code === 0) {
-            exec(`yt-dlp --get-title --get-filename -o "%(uploader)s" "https://www.youtube.com/watch?v=${ytId}"`, async (e, out) => {
+            // Auch beim Titel-Abfragen müssen wir den JS-Runtime Parameter mitgeben!
+            exec(`yt-dlp --js-runtimes node --get-title --get-filename -o "%(uploader)s" "https://www.youtube.com/watch?v=${ytId}"`, async (e, out) => {
                 const lines = out.split('\n');
                 const title = lines[0] || `YouTube Import ${ytId}`;
                 const originalUploader = lines[1] || 'YouTube';
