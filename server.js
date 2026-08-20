@@ -790,6 +790,48 @@ async function seedTokenCardProducts() {
     else console.log(`${LOG_PREFIX_SERVER}    Keine neuen Token-Karten Produkte zu seeden (oder bereits vorhanden).`);
 }
 
+// =========================================================
+// === 🛠️ AUTO-UPDATE FÜR YT-DLP (Gegen YouTube 403 Fehler) ===
+// =========================================================
+function updateYtDlp() {
+    console.log(`${LOG_PREFIX_SERVER} 🔄 Lade neueste yt-dlp Version von GitHub herunter...`);
+    
+    // Wir laden die Linux-Executable direkt vom offiziellen GitHub-Release und machen sie ausführbar.
+    // /usr/local/bin/yt-dlp wird standardmäßig vom System priorisiert.
+    const updateCmd = `curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && chmod a+rx /usr/local/bin/yt-dlp`;
+    
+    const { exec } = require('child_process');
+    exec(updateCmd, (error, stdout, stderr) => {
+        if (error) {
+            console.error(`${LOG_PREFIX_SERVER} ❌ Fehler beim Herunterladen von yt-dlp via curl:`, error.message);
+            
+            // Fallback: Versuchen wir den eingebauten Updater (falls curl fehlen sollte)
+            exec('yt-dlp -U', (errU, outU, errOutU) => {
+                if (!errU) {
+                    console.log(`${LOG_PREFIX_SERVER} ✅ yt-dlp via eingebautem Updater aktualisiert.`);
+                } else {
+                    console.error(`${LOG_PREFIX_SERVER} ❌ Auch Fallback-Update fehlgeschlagen.`);
+                }
+            });
+            return;
+        }
+        
+        // Prüfen, welche Version wir jetzt haben
+        exec('yt-dlp --version', (errV, outV) => {
+            console.log(`${LOG_PREFIX_SERVER} ✅ yt-dlp erfolgreich aktualisiert! Neue Version: ${outV.trim()}`);
+        });
+    });
+}
+
+// Führe das Update NUR auf dem Hauptprozess aus, damit nicht 8 Kerne gleichzeitig die Datei überschreiben
+if (cluster.isPrimary) {
+    // 1. Einmal kurz nach dem Start (5 Sekunden Verzögerung, damit der Server erst hochfährt)
+    setTimeout(updateYtDlp, 5000);
+    
+    // 2. Danach alle 24 Stunden
+    setInterval(updateYtDlp, 24 * 60 * 60 * 1000);
+}
+
 async function syncExistingAdsToLimTube() {
     console.log(`${LOG_PREFIX_SERVER} 🔄 Starte Sync für bestehende Werbevideos...`);
     try {
