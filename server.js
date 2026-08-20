@@ -19514,7 +19514,8 @@ app.post('/api/limtube/import-youtube', isAuthenticated, async (req, res) => {
     activeYtImports[ytId] = { progress: 0, status: 'started' };
 
     const dl = spawn('yt-dlp', [
-        '-f', 'best[ext=mp4]/best', 
+        '-f', 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b'
+        '--merge-output-format', 'mp4',
         '-o', filePath,
         '--force-ipv4',
         '--no-playlist',
