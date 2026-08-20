@@ -19225,10 +19225,10 @@ app.get('/api/limtube/video/:id', isAuthenticated, async (req, res) => {
 
         const uploaderDoc = await usersCollection.findOne({ _id: video.uploaderId }, { projection: { subscribers: 1 } });
         const subCount = uploaderDoc && uploaderDoc.subscribers ? uploaderDoc.subscribers.length : 0;
-        const isSubscribed = uploaderDoc && uploaderDoc.subscribers && currentUserId && uploaderDoc.subscribers.some(id => id.equals(new ObjectId(currentUserId)));
+        const isSubscribed = uploaderDoc && uploaderDoc.subscribers && currentUserId && uploaderDoc.subscribers.some(id => String(id) === String(currentUserId));
         
-        const hasLiked = video.likes && currentUserId && video.likes.some(id => id.equals(new ObjectId(currentUserId)));
-        const hasDisliked = video.dislikes && currentUserId && video.dislikes.some(id => id.equals(new ObjectId(currentUserId)));
+        const hasLiked = video.likes && currentUserId && video.likes.some(id => String(id) === String(currentUserId));
+        const hasDisliked = video.dislikes && currentUserId && video.dislikes.some(id => String(id) === String(currentUserId));
 
         res.json({
             video: {
