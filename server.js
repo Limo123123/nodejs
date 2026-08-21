@@ -20343,6 +20343,194 @@ app.get('/api/investors/leaderboard', isAuthenticated, async (req, res) => {
     }
 });
 
+// =========================================================
+// === 🖨️ 3D-DRUCK STUDIO API ===
+// =========================================================
+const LOG_PREFIX_3D = "[3D-Print API]";
+
+// Die Baupläne, die der User drucken kann
+const PRINTABLE_MODELS = [
+    { 
+        id: 'print_gardena', name: 'Gardena Schlauch-Adapter', 
+        requiredFilament: 'fil_petg', filamentCost: 1, 
+        printTimeMinutes: 60, successChance: 0.95, 
+        icon: '💦', desc: 'Ein extrem stabiles Funktionsteil für den Garten.' 
+    },
+    { 
+        id: 'print_lego_vase', name: 'Vase für Lego-Blumen', 
+        requiredFilament: 'fil_pla', filamentCost: 2, 
+        printTimeMinutes: 240, successChance: 0.85, 
+        icon: '🏺', desc: 'Eine stilvolle, geometrische Vase. Mit OpenSCAD generiert.' 
+    },
+    { 
+        id: 'print_flexi_dragon', name: 'Flexi Drache (Gelenkig)', 
+        requiredFilament: 'fil_silk', filamentCost: 3, 
+        printTimeMinutes: 480, successChance: 0.70, 
+        icon: '🐉', desc: 'Ein hochkomplexer, beweglicher Drache. Sieht in Rainbow Silk unglaublich aus!' 
+    },
+    { 
+        id: 'print_pi5_case', name: 'Raspberry Pi 5 Gehäuse (NVMe)', 
+        requiredFilament: 'fil_petg', filamentCost: 4, 
+        printTimeMinutes: 360, successChance: 0.80, 
+        icon: '🍓', desc: 'Spezialgehäuse mit extra Platz für den NVMe Hat und aktive Kühlung. Ein Muss für Heimserver.' 
+    },
+    { 
+        id: 'print_cookie_stamp', name: 'Keks-Stempel (Custom)', 
+        requiredFilament: 'fil_pla', filamentCost: 1, 
+        printTimeMinutes: 45, successChance: 0.98, 
+        icon: '🍪', desc: 'Ein personalisierter Stempel. Druckt sich schnell und einfach.' 
+    },
+    { 
+        id: 'print_mandalorian', name: 'Mandalorian Helm (1:1)', 
+        requiredFilament: 'fil_pla', filamentCost: 15, 
+        printTimeMinutes: 2880, successChance: 0.40, 
+        icon: '🪖', desc: '48 Stunden Druckzeit! Extrem hohes Risiko für Warping oder Spaghetti, aber der absolute Flex.' 
+    },
+	{ 
+        id: 'print_math_stamp', name: 'Geg. und Ges. Stempel', 
+        requiredFilament: 'fil_pla', filamentCost: 2, 
+        printTimeMinutes: 60, successChance: 0.95, 
+        icon: '🕹', desc: '60 Minuten Druckzeit! Kleines Risiko für einen Fehldruck, und man kann damit sehr gut Flexen' 
+    },
+];
+
+// 1. Status des Druckers abrufen
+app.get('/api/3dprint/status', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    
+    try {
+        const user = await usersCollection.findOne({ _id: userId }, { projection: { activePrintJob: 1 } });
+        
+        // Hat der User überhaupt einen Drucker im Inventar?
+        const hasPrinter = await inventoriesCollection.findOne({ userId, productId: 'printer_k1c', quantityOwned: { $gt: 0 } });
+        
+        if (!hasPrinter) {
+            return res.json({ hasPrinter: false, message: "Du besitzt keinen 3D-Drucker. Kaufe einen im Shop!" });
+        }
+
+        // Zeige den aktuellen Job oder die Liste der Baupläne
+        res.json({
+            hasPrinter: true,
+            activeJob: user.activePrintJob || null,
+            availableModels: PRINTABLE_MODELS
+        });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden des 3D-Druckers." });
+    }
+});
+
+// 2. Druckjob starten
+app.post('/api/3dprint/start', isAuthenticated, async (req, res) => {
+    const { modelId } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    const model = PRINTABLE_MODELS.find(m => m.id === modelId);
+    if (!model) return res.status(400).json({ error: "Diesen Bauplan gibt es nicht in deinem Slicer." });
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            if (user.activePrintJob) throw new Error("Der Drucker läuft bereits!");
+
+            // Filament prüfen und abziehen
+            const filamentInv = await inventoriesCollection.findOne({ userId, productId: model.requiredFilament }, { session });
+            if (!filamentInv || filamentInv.quantityOwned < model.filamentCost) {
+                throw new Error(`Nicht genug Material! Du brauchst ${model.filamentCost}x ${model.requiredFilament}.`);
+            }
+
+            await inventoriesCollection.updateOne(
+                { _id: filamentInv._id },
+                { $inc: { quantityOwned: -model.filamentCost } },
+                { session }
+            );
+
+            // Job anlegen
+            const now = new Date();
+            const finishTime = new Date(now.getTime() + model.printTimeMinutes * 60 * 1000);
+            
+            // Vorab auswürfeln, ob der Druck fehlschlägt (wird erst beim Einsammeln verraten!)
+            const isSuccess = Math.random() < model.successChance;
+
+            const printJob = {
+                modelId: model.id,
+                modelName: model.name,
+                icon: model.icon,
+                startTime: now,
+                finishTime: finishTime,
+                isSuccess: isSuccess
+            };
+
+            await usersCollection.updateOne({ _id: userId }, { $set: { activePrintJob: printJob } }, { session });
+        });
+
+        res.json({ message: `Die Düse heizt auf. Druck von "${model.name}" gestartet!` });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// 3. Fertigen Druck vom Heizbett nehmen
+app.post('/api/3dprint/claim', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+
+    const session = client.startSession();
+    try {
+        let resultMsg = "";
+        let isSuccess = false;
+
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            const job = user.activePrintJob;
+
+            if (!job) throw new Error("Es läuft aktuell kein Druckjob.");
+            
+            if (new Date() < new Date(job.finishTime)) {
+                throw new Error("Der Druck ist noch nicht fertig! Lass die Tür geschlossen, sonst gibt es Warping.");
+            }
+
+            // Job aus dem Profil löschen
+            await usersCollection.updateOne({ _id: userId }, { $unset: { activePrintJob: "" } }, { session });
+
+            if (job.isSuccess) {
+                isSuccess = true;
+                resultMsg = `Perfekter First Layer! Du hast ${job.icon} "${job.modelName}" erfolgreich gedruckt.`;
+                
+                // Item (oder ein Platzhalter) ins Inventar legen
+                await inventoriesCollection.updateOne(
+                    { userId, productId: job.modelId },
+                    { 
+                        $inc: { quantityOwned: 1 },
+                        $setOnInsert: { name: job.modelName, icon: job.icon, type: 'printed_item' }
+                    },
+                    { upsert: true, session }
+                );
+            } else {
+                isSuccess = false;
+                resultMsg = `Oh nein! Der Druck hat sich vom Bett gelöst. Du findest morgens nur einen riesigen Haufen Spaghetti-Salat.`;
+                
+                // Schrott ins Inventar legen
+                await inventoriesCollection.updateOne(
+                    { userId, productId: 'spaghetti_trash' },
+                    { 
+                        $inc: { quantityOwned: 1 },
+                        $setOnInsert: { name: 'Spaghetti-Salat', icon: '🍝', type: 'trash' }
+                    },
+                    { upsert: true, session }
+                );
+            }
+        });
+
+        res.json({ success: isSuccess, message: resultMsg });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
