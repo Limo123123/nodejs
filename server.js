@@ -2577,11 +2577,42 @@ app.get('/api/inventory', isAuthenticated, async (req, res) => {
     try {
         const userInvItems = await inventoriesCollection.find({ userId: userId, quantityOwned: { $gt: 0 } }).toArray();
         const prodIds = userInvItems.map(item => item.productId);
+        
+        // Normale Shop-Produkte holen
         const prodDetails = await productsCollection.find({ id: { $in: prodIds }, isTokenCard: { $ne: true } }, { projection: { name: 1, image_url: 1, price: 1, currentPrice: 1, basePrice: 1, id: 1, _id: 0 } }).toArray();
         const prodMap = new Map(prodDetails.map(p => [p.id, p]));
-        const populatedInv = userInvItems.filter(item => prodMap.has(item.productId)).map(item => ({ ...item, productDetails: prodMap.get(item.productId) }));
+        
+        const populatedInv = userInvItems.map(item => {
+            let details = null;
+
+            // 1. Ist es ein normales Shop-Produkt?
+            if (prodMap.has(item.productId)) {
+                details = prodMap.get(item.productId);
+            } 
+            else {
+                const printModel = PRINTABLE_MODELS.find(m => m.id === item.productId) || 
+                                  (item.productId === SPAGHETTI_ITEM_ID ? { name: 'Spaghetti-Salat', icon: '🍝' } : null);
+                if (printModel) {
+                    details = {
+                        name: printModel.name,
+                        // Erzeugt ein Fake-Bildchen mit dem Emoji
+                        image_url: `https://placehold.co/150/1e1e24/00ffcc?text=${encodeURIComponent(printModel.icon)}`, 
+                        currentPrice: 0, // 3D-Drucke können nicht einfach an die Bank verkauft werden
+                        basePrice: 0
+                    };
+                }
+            }
+            if (details) {
+                return { ...item, productDetails: details };
+            }
+            return null;
+        }).filter(item => item !== null);
+
         res.json({ inventory: populatedInv });
-    } catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler Laden Inventar ${req.session.username}:`, err); res.status(500).json({ error: "Fehler Laden Inventar." }); }
+    } catch (err) { 
+        console.error(`${LOG_PREFIX_SERVER} Fehler Laden Inventar ${req.session.username}:`, err); 
+        res.status(500).json({ error: "Fehler Laden Inventar." }); 
+    }
 });
 
 // ADMIN ACTIONS
@@ -15128,10 +15159,9 @@ if (cluster.isPrimary) {
 // === 🚚 LIMO LOGISTICS API (LIEFERSERVICE) ===
 // =========================================================
 
-// 1. Inventar für das Dropdown-Menü abrufen (FIXED: Mit Namen und Kategorien!)
+// 1. Inventar für das Dropdown-Menü abrufen (Logistik)
 app.get('/api/delivery/inventory', isAuthenticated, async (req, res) => {
     try {
-        // A) Rohes Inventar laden (nur IDs und Mengen)
         const rawInventory = await inventoriesCollection.find({ 
             userId: new ObjectId(req.session.userId), 
             quantityOwned: { $gt: 0 } 
@@ -15139,12 +15169,10 @@ app.get('/api/delivery/inventory', isAuthenticated, async (req, res) => {
 
         if (rawInventory.length === 0) return res.json([]);
 
-        // B) Alle echten Shop-Produkte aus der Datenbank holen
         const productIds = rawInventory.map(item => item.productId);
         const dbProducts = await productsCollection.find({ id: { $in: productIds } }).toArray();
         const dbProductMap = new Map(dbProducts.map(p => [p.id, p]));
 
-        // C) Daten anreichern und kategorisieren
         const enrichedItems = rawInventory.map(item => {
             let name = "Unbekanntes Item";
             let icon = "📦";
@@ -15158,13 +15186,24 @@ app.get('/api/delivery/inventory', isAuthenticated, async (req, res) => {
                 category = "Produkte";
             } 
             // Check 2: Ist es ein Möbelstück aus Limea?
-            else {
+            else if (typeof LIMEA_CATALOG !== 'undefined' && LIMEA_CATALOG.find(l => l.id === item.productId)) {
                 const limeaItem = LIMEA_CATALOG.find(l => l.id === item.productId);
-                if (limeaItem) {
-                    name = limeaItem.name;
-                    icon = limeaItem.icon;
-                    category = "Möbel";
-                }
+                name = limeaItem.name;
+                icon = limeaItem.icon;
+                category = "Möbel";
+            }
+            // Check 3: Ist es ein 3D-Druck?
+            else if (typeof PRINTABLE_MODELS !== 'undefined' && PRINTABLE_MODELS.find(m => m.id === item.productId)) {
+                const printModel = PRINTABLE_MODELS.find(m => m.id === item.productId);
+                name = printModel.name;
+                icon = printModel.icon;
+                category = "3D-Drucke";
+            }
+            // Check 4: Der legendäre Spaghetti-Salat
+            else if (item.productId === SPAGHETTI_ITEM_ID) {
+                name = "Spaghetti-Salat";
+                icon = "🍝";
+                category = "Müll";
             }
 
             return {
