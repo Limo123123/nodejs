@@ -654,6 +654,42 @@ async function seedDatabaseFromLocalJson() {
     }
 }
 
+async function seed3DPrintItems() {
+    const printItems = [
+        { id: 608297, name: "Limality K1C 3D-Drucker", price: "$5,000.00", image_url: "https://placehold.co/150/333/0ff?text=K1C", stock: 100, default_stock: 100, isTokenCard: false },
+        { id: 577019, name: "1kg Rolle PLA (Schwarz)", price: "$25.00", image_url: "https://placehold.co/150/111/fff?text=PLA", stock: 500, default_stock: 500, isTokenCard: false },
+        { id: 370827, name: "1kg Rolle Silk PLA (Rainbow)", price: "$45.00", image_url: "https://placehold.co/150/f0f/fff?text=SILK", stock: 200, default_stock: 200, isTokenCard: false },
+        { id: 867480, name: "1kg Rolle PETG (Transparent)", price: "$35.00", image_url: "https://placehold.co/150/ddd/000?text=PETG", stock: 300, default_stock: 300, isTokenCard: false },
+        { id: 498667, name: "Spaghetti-Salat", price: "$0.00", image_url: "https://placehold.co/150/ffaa00/000?text=FAIL", stock: 0, default_stock: 0, isTokenCard: false }
+    ];
+
+    let seededCount = 0;
+    for (const item of printItems) {
+        try {
+            const existing = await productsCollection.findOne({ id: item.id });
+            if (!existing) {
+                const numericPrice = parseFloat(item.price.replace(/[^0-9.]/g, '')) || 0;
+                await productsCollection.insertOne({
+                    ...item,
+                    currentPrice: numericPrice,
+                    basePrice: numericPrice,
+                    priceHistory: [{ price: numericPrice, timestamp: new Date() }],
+                    buysLastInterval: 0,
+                    sellsLastInterval: 0
+                });
+                seededCount++;
+                console.log(`${LOG_PREFIX_SERVER} 🌱 3D-Druck Item "${item.name}" geseedet.`);
+            }
+        } catch (err) {
+            console.error(`${LOG_PREFIX_SERVER} ❌ Fehler beim Seeden von ${item.name}:`, err.message);
+        }
+    }
+    
+    if (seededCount > 0) {
+        console.log(`${LOG_PREFIX_SERVER} ✅ ${seededCount} 3D-Druck Items erfolgreich geseedet.`);
+    }
+}
+
 async function resetProductStock() {
     console.log(`${LOG_PREFIX_SERVER} ♻️ Setze Lagerbestand regulärer Produkte auf Standard zurück...`);
     try {
@@ -1622,6 +1658,7 @@ MongoClient.connect(mongoUri)
         } catch (seedErr) { console.error(`${LOG_PREFIX_SERVER}    Fehler beim Produkt-Seeding:`, seedErr); }
 
         await seedTokenCardProducts();
+		await seed3DPrintItems();
         await seedDefaultPublicWheel();
 
         // WICHTIG: Human Grades Defaults laden (hier an der richtigen Stelle!)
@@ -20348,47 +20385,50 @@ app.get('/api/investors/leaderboard', isAuthenticated, async (req, res) => {
 // =========================================================
 const LOG_PREFIX_3D = "[3D-Print API]";
 
+const PRINTER_ITEM_ID = 608297;
+const SPAGHETTI_ITEM_ID = 498667;
+
 // Die Baupläne, die der User drucken kann
 const PRINTABLE_MODELS = [
     { 
         id: 'print_gardena', name: 'Gardena Schlauch-Adapter', 
-        requiredFilament: 'fil_petg', filamentCost: 1, 
+        requiredFilamentId: 867480, filamentName: 'PETG', filamentCost: 1, 
         printTimeMinutes: 60, successChance: 0.95, 
         icon: '💦', desc: 'Ein extrem stabiles Funktionsteil für den Garten.' 
     },
     { 
         id: 'print_lego_vase', name: 'Vase für Lego-Blumen', 
-        requiredFilament: 'fil_pla', filamentCost: 2, 
+        requiredFilamentId: 577019, filamentName: 'PLA Schwarz', filamentCost: 2, 
         printTimeMinutes: 240, successChance: 0.85, 
         icon: '🏺', desc: 'Eine stilvolle, geometrische Vase. Mit OpenSCAD generiert.' 
     },
     { 
         id: 'print_flexi_dragon', name: 'Flexi Drache (Gelenkig)', 
-        requiredFilament: 'fil_silk', filamentCost: 3, 
+        requiredFilamentId: 370827, filamentName: 'PLA Silk', filamentCost: 3, 
         printTimeMinutes: 480, successChance: 0.70, 
         icon: '🐉', desc: 'Ein hochkomplexer, beweglicher Drache. Sieht in Rainbow Silk unglaublich aus!' 
     },
     { 
         id: 'print_pi5_case', name: 'Raspberry Pi 5 Gehäuse (NVMe)', 
-        requiredFilament: 'fil_petg', filamentCost: 4, 
+        requiredFilamentId: 867480, filamentName: 'PETG', filamentCost: 4, 
         printTimeMinutes: 360, successChance: 0.80, 
         icon: '🍓', desc: 'Spezialgehäuse mit extra Platz für den NVMe Hat und aktive Kühlung. Ein Muss für Heimserver.' 
     },
     { 
         id: 'print_cookie_stamp', name: 'Keks-Stempel (Custom)', 
-        requiredFilament: 'fil_pla', filamentCost: 1, 
+        requiredFilamentId: 577019, filamentName: 'PLA Schwarz', filamentCost: 1, 
         printTimeMinutes: 45, successChance: 0.98, 
         icon: '🍪', desc: 'Ein personalisierter Stempel. Druckt sich schnell und einfach.' 
     },
     { 
         id: 'print_mandalorian', name: 'Mandalorian Helm (1:1)', 
-        requiredFilament: 'fil_pla', filamentCost: 15, 
+        requiredFilamentId: 577019, filamentName: 'PLA Schwarz', filamentCost: 15, 
         printTimeMinutes: 2880, successChance: 0.40, 
         icon: '🪖', desc: '48 Stunden Druckzeit! Extrem hohes Risiko für Warping oder Spaghetti, aber der absolute Flex.' 
     },
 	{ 
         id: 'print_math_stamp', name: 'Geg. und Ges. Stempel', 
-        requiredFilament: 'fil_pla', filamentCost: 2, 
+        requiredFilamentId: 577019, filamentName: 'PLA Schwarz', filamentCost: 1, 
         printTimeMinutes: 60, successChance: 0.95, 
         icon: '🕹', desc: '60 Minuten Druckzeit! Kleines Risiko für einen Fehldruck, und man kann damit sehr gut Flexen' 
     },
@@ -20401,14 +20441,13 @@ app.get('/api/3dprint/status', isAuthenticated, async (req, res) => {
     try {
         const user = await usersCollection.findOne({ _id: userId }, { projection: { activePrintJob: 1 } });
         
-        // Hat der User überhaupt einen Drucker im Inventar?
-        const hasPrinter = await inventoriesCollection.findOne({ userId, productId: 'printer_k1c', quantityOwned: { $gt: 0 } });
+        // Nutzt jetzt die numerische ID für den Drucker
+        const hasPrinter = await inventoriesCollection.findOne({ userId, productId: PRINTER_ITEM_ID, quantityOwned: { $gt: 0 } });
         
         if (!hasPrinter) {
             return res.json({ hasPrinter: false, message: "Du besitzt keinen 3D-Drucker. Kaufe einen im Shop!" });
         }
 
-        // Zeige den aktuellen Job oder die Liste der Baupläne
         res.json({
             hasPrinter: true,
             activeJob: user.activePrintJob || null,
@@ -20433,10 +20472,10 @@ app.post('/api/3dprint/start', isAuthenticated, async (req, res) => {
             const user = await usersCollection.findOne({ _id: userId }, { session });
             if (user.activePrintJob) throw new Error("Der Drucker läuft bereits!");
 
-            // Filament prüfen und abziehen
-            const filamentInv = await inventoriesCollection.findOne({ userId, productId: model.requiredFilament }, { session });
+            // Nutzt jetzt die numerische Filament ID
+            const filamentInv = await inventoriesCollection.findOne({ userId, productId: model.requiredFilamentId }, { session });
             if (!filamentInv || filamentInv.quantityOwned < model.filamentCost) {
-                throw new Error(`Nicht genug Material! Du brauchst ${model.filamentCost}x ${model.requiredFilament}.`);
+                throw new Error(`Nicht genug Material! Du brauchst ${model.filamentCost}x ${model.filamentName}.`);
             }
 
             await inventoriesCollection.updateOne(
@@ -20445,11 +20484,8 @@ app.post('/api/3dprint/start', isAuthenticated, async (req, res) => {
                 { session }
             );
 
-            // Job anlegen
             const now = new Date();
             const finishTime = new Date(now.getTime() + model.printTimeMinutes * 60 * 1000);
-            
-            // Vorab auswürfeln, ob der Druck fehlschlägt (wird erst beim Einsammeln verraten!)
             const isSuccess = Math.random() < model.successChance;
 
             const printJob = {
@@ -20491,14 +20527,12 @@ app.post('/api/3dprint/claim', isAuthenticated, async (req, res) => {
                 throw new Error("Der Druck ist noch nicht fertig! Lass die Tür geschlossen, sonst gibt es Warping.");
             }
 
-            // Job aus dem Profil löschen
             await usersCollection.updateOne({ _id: userId }, { $unset: { activePrintJob: "" } }, { session });
 
             if (job.isSuccess) {
                 isSuccess = true;
                 resultMsg = `Perfekter First Layer! Du hast ${job.icon} "${job.modelName}" erfolgreich gedruckt.`;
                 
-                // Item (oder ein Platzhalter) ins Inventar legen
                 await inventoriesCollection.updateOne(
                     { userId, productId: job.modelId },
                     { 
@@ -20511,9 +20545,9 @@ app.post('/api/3dprint/claim', isAuthenticated, async (req, res) => {
                 isSuccess = false;
                 resultMsg = `Oh nein! Der Druck hat sich vom Bett gelöst. Du findest morgens nur einen riesigen Haufen Spaghetti-Salat.`;
                 
-                // Schrott ins Inventar legen
+                // Nutzt jetzt die numerische Spaghetti ID
                 await inventoriesCollection.updateOne(
-                    { userId, productId: 'spaghetti_trash' },
+                    { userId, productId: SPAGHETTI_ITEM_ID },
                     { 
                         $inc: { quantityOwned: 1 },
                         $setOnInsert: { name: 'Spaghetti-Salat', icon: '🍝', type: 'trash' }
