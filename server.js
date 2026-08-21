@@ -41,7 +41,14 @@ const SELL_COOLDOWN_SECONDS_SHOW = 60;
 const LOG_PREFIX_SERVER = "[Limazon BACKEND]";
 
 const app = express();
-app.set('trust proxy', 1);
+app.set('trust proxy', [
+    'loopback',      // 127.0.0.1
+    'linklocal',     // 169.254.0.0/16
+    'uniquelocal',   // IPv6 lokale Adressen
+    '172.16.0.0/12', // Standard Docker Bridge Netzwerke
+    '10.0.0.0/8',    // Oft in Docker Swarm/K8s genutzt
+    '192.168.0.0/16' // Dein Heimnetzwerk (inkl. 192.168.178.183)
+]);
 
 const HTTP_PORT = process.env.PORT || 10000;
 const SEED_PRODUCTS_FILE = 'products.json';
@@ -14921,15 +14928,15 @@ app.post('/api/standesamt/divorce', isAuthenticated, async (req, res) => {
                 throw new Error("Ihr seid nicht verheiratet.");
             }
 
-            // Ex-Partner in der DB suchen (könnte null sein, wenn Account gelöscht wurde!)
+            // Ex-Partner in der DB suchen
             let targetObjId;
             try {
                 targetObjId = new ObjectId(targetIdString);
             } catch(e) {
-                targetObjId = null; // Fallback, falls die ID komplett korrupt ist
+                throw new Error("Die ID des Ex-Partners ist ungültig oder korrupt.");
             }
             
-            const exSpouse = targetObjId ? await usersCollection.findOne({ _id: targetObjId }, { session }) : null;
+            const exSpouse = await usersCollection.findOne({ _id: targetObjId }, { session });
             const exName = exSpouse ? exSpouse.username : "Unbekannt (Gelöschter Account)";
 
             // 1. Geld abziehen
@@ -17965,7 +17972,16 @@ app.get('/api/casino/p2p/signal/:roomCode', isAuthenticated, async (req, res) =>
         await global.redisPub.setEx(redisKey, 7200, JSON.stringify(room));
     }
     
-    res.json({ signals: mySignals, guests: room.guests, hostName: room.hostName, lockedBets: room.lockedBets });
+    const betsKey = `casino_room:${roomCode.toUpperCase()}:bets`;
+    const lockedBetsRaw = await global.redisPub.hGetAll(betsKey);
+    
+    // Redis gibt Strings zurück, wir machen Zahlen draus
+    const lockedBets = {};
+    for (const [pId, amount] of Object.entries(lockedBetsRaw)) {
+        lockedBets[pId] = parseFloat(amount);
+    }
+    
+    res.json({ signals: mySignals, guests: room.guests, hostName: room.hostName, lockedBets: lockedBets });
 });
 
 // 5. EINSATZ SPERREN (TREUHAND) - Wird aufgerufen, wenn ein Spieler wettet
@@ -17991,9 +18007,9 @@ app.post('/api/casino/p2p/bet', isAuthenticated, async (req, res) => {
             await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -betAmount } }, { session });
 
             // Einsatz im Redis-Raum sichern
-            room.lockedBets[req.session.userId] = (room.lockedBets[req.session.userId] || 0) + betAmount;
-            
-            await global.redisPub.setEx(redisKey, 7200, JSON.stringify(room));
+            const betsKey = `casino_room:${roomCode.toUpperCase()}:bets`;
+            await global.redisPub.hIncrByFloat(betsKey, req.session.userId, betAmount);
+            await global.redisPub.expire(betsKey, 7200); // Auch nach 2 Stunden löschen
         });
 
         res.json({ success: true, message: `Einsatz von $${betAmount} gelockt.` });
@@ -18915,19 +18931,22 @@ app.post('/api/limtube/upload', isAuthenticated, async (req, res) => {
     try {
         const user = await usersCollection.findOne({ _id: userId }, { projection: { isAdmin: 1, activeSubscriptions: 1 } });
         
-        const todayStart = new Date();
-        todayStart.setHours(0, 0, 0, 0);
-
-        const uploadedTodayCount = await limtubeVideosCollection.countDocuments({
-            uploaderId: userId,
-            createdAt: { $gte: todayStart }
-        });
-
         let dailyLimit = 3; 
         if (user.activeSubscriptions && user.activeSubscriptions.includes('prime')) dailyLimit = 10;
         if (user.isAdmin) dailyLimit = 999;
 
-        if (uploadedTodayCount >= dailyLimit) {
+        const todayStr = new Date().toISOString().split('T')[0];
+        const uploadKey = `limtube:uploads:${userId}:${todayStr}`;
+        
+        const currentUploads = await global.redisPub.incr(uploadKey);
+        // Beim ersten Upload heute den Timer auf 24 Stunden setzen
+        if (currentUploads === 1) {
+            await global.redisPub.expire(uploadKey, 24 * 60 * 60);
+        }
+
+        if (currentUploads > dailyLimit) {
+            // Counter wieder runterzählen, da der Upload abgelehnt wird
+            await global.redisPub.decr(uploadKey);
             return res.status(429).json({ error: `Upload-Limit erreicht! Du darfst nur ${dailyLimit} Videos pro Tag hochladen.` });
         }
     } catch (e) {
