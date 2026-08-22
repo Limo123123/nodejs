@@ -1181,11 +1181,36 @@ async function refreshProductCache(triggerFrontendUpdate = true) {
 }
 
 // --- Middleware für Authentifizierung und Admin-Rechte ---
-function isAuthenticated(req, res, next) {
+async function isAuthenticated(req, res, next) {
     if (req.session && req.session.userId) {
-        return next();
+        try {
+            // Schneller Check, ob der Account deaktiviert wurde
+            const user = await usersCollection.findOne(
+                { _id: new ObjectId(req.session.userId) },
+                { projection: { isDeactivated: 1 } }
+            );
+
+            if (!user) {
+                req.session.destroy();
+                return res.status(401).json({ error: 'Benutzer nicht gefunden.' });
+            }
+
+            // Wenn deaktiviert, wird jede Aktion sofort geblockt und die Session gekillt!
+            if (user.isDeactivated) {
+                req.session.destroy();
+                res.clearCookie('connect.sid', { path: '/' });
+                return res.status(403).json({ 
+                    error: 'ACCOUNT_DEACTIVATED', 
+                    message: 'Dein Account ist deaktiviert.' 
+                });
+            }
+
+            return next();
+        } catch (err) {
+            console.error(`${LOG_PREFIX_SERVER} Auth Fehler:`, err);
+            return res.status(500).json({ error: 'Serverfehler bei der Überprüfung.' });
+        }
     } else {
-        console.warn(`${LOG_PREFIX_SERVER} isAuthenticated: Zugriff verweigert (nicht eingeloggt) für Pfad ${req.originalUrl}. Session ID: ${req.sessionID}`);
         res.status(401).json({ error: 'Nicht eingeloggt. Bitte zuerst anmelden.' });
     }
 }
@@ -2328,6 +2353,18 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
         const match = await bcrypt.compare(password, user.password);
 
         if (match) {
+			// Check auf Deaktivierung VOR der Session-Erstellung
+            if (user.isDeactivated) {
+                // Rate-Limit Key löschen, da Passwort ja stimmte
+                if (req.loginRateLimitKey && global.redisPub) {
+                    global.redisPub.del(req.loginRateLimitKey).catch(e => console.error("Redis Del Error", e));
+                }
+                return res.status(403).json({ 
+                    error: 'ACCOUNT_DEACTIVATED', 
+                    message: 'Dein Account ist deaktiviert. Möchtest du ihn wiederherstellen?' 
+                });
+            }
+			
             // Bei Erfolg den Rate-Limit Zähler für diese IP löschen!
             if (req.loginRateLimitKey && global.redisPub) {
                 global.redisPub.del(req.loginRateLimitKey).catch(e => console.error("Redis Del Error", e));
@@ -2559,6 +2596,92 @@ app.patch('/api/account/settings', isAuthenticated, async (req, res) => {
         const effectiveInfinityMoney = updatedUser.isAdmin ? true : (updatedUser.infinityMoney || false);
         res.json({ message: message, user: { ...updatedUser, tokens: updatedUser.tokens || 0, infinityMoney: effectiveInfinityMoney, productSellCooldowns: updatedUser.productSellCooldowns || {} } });
     } catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler Acc-Settings ${req.session.username}:`, err); res.status(500).json({ error: "Fehler Speichern Einstellungen." }); }
+});
+
+app.post('/api/account/deactivate', isAuthenticated, async (req, res) => {
+    const { password } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (!password) {
+        return res.status(400).json({ error: "Passwort zur Bestätigung erforderlich." });
+    }
+
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        const match = await bcrypt.compare(password, user.password);
+        
+        if (!match) {
+            return res.status(401).json({ error: "Falsches Passwort! Deaktivierung abgebrochen." });
+        }
+
+        // Account deaktivieren
+        await usersCollection.updateOne(
+            { _id: userId },
+            { $set: { isDeactivated: true, deactivatedAt: new Date() } }
+        );
+
+        if (typeof logActivity === 'function') {
+            await logActivity(req, "USER_DEACTIVATED_ACCOUNT", { status: "success" });
+        }
+
+        // Session vernichten, damit er direkt rausfliegt
+        req.session.destroy(err => {
+            res.clearCookie('connect.sid', { path: '/' });
+            res.json({ message: "Dein Account wurde in den Tiefschlaf versetzt. Bis bald!" });
+        });
+
+    } catch (e) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler bei Deaktivierung:`, e);
+        res.status(500).json({ error: "Serverfehler bei der Deaktivierung." });
+    }
+});
+
+app.post('/api/auth/reactivate', rateLimitLogin, async (req, res) => {
+    const { username, password } = req.body;
+    const clientIp = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
+
+    if (!username || !password) return res.status(400).json({ error: 'Benutzername und Passwort erforderlich.' });
+
+    try {
+        const user = await usersCollection.findOne({ username: username.toLowerCase() });
+
+        if (!user || !user.isDeactivated) {
+            return res.status(400).json({ error: 'Dieser Account kann nicht reaktiviert werden.' });
+        }
+
+        const match = await bcrypt.compare(password, user.password);
+
+        if (match) {
+            // Flag entfernen
+            await usersCollection.updateOne(
+                { _id: user._id },
+                { $unset: { isDeactivated: "", deactivatedAt: "" } }
+            );
+
+            // Rate-Limit Zähler löschen
+            if (req.loginRateLimitKey && global.redisPub) {
+                global.redisPub.del(req.loginRateLimitKey).catch(e => console.error("Redis Del Error", e));
+            }
+
+            // Normal einloggen
+            req.session.userId = user._id.toString();
+            req.session.username = user.username;
+            req.session.isAdmin = user.isAdmin || false;
+
+            req.session.save(err => {
+                if (err) return res.status(500).json({ error: 'Fehler Session.' });
+                
+                console.log(`${LOG_PREFIX_SERVER} User ${user.username} hat seinen Account reaktiviert.`);
+                res.json({ message: "Willkommen zurück! Dein Account wurde reaktiviert." });
+            });
+
+        } else {
+            res.status(401).json({ error: 'Ungültige Anmeldedaten.' });
+        }
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Serverfehler Reaktivierung:`, err);
+        res.status(500).json({ error: 'Serverfehler bei der Reaktivierung.' });
+    }
 });
 
 // ORDERS
