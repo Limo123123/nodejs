@@ -2361,7 +2361,7 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
                 }
                 return res.status(403).json({ 
                     error: 'ACCOUNT_DEACTIVATED', 
-                    message: 'Dein Account ist deaktiviert. Möchtest du ihn wiederherstellen?' 
+                    message: 'Dein Account wurde gesperrt. Bitte wende dich an den Support.' 
                 });
             }
 			
@@ -2596,92 +2596,6 @@ app.patch('/api/account/settings', isAuthenticated, async (req, res) => {
         const effectiveInfinityMoney = updatedUser.isAdmin ? true : (updatedUser.infinityMoney || false);
         res.json({ message: message, user: { ...updatedUser, tokens: updatedUser.tokens || 0, infinityMoney: effectiveInfinityMoney, productSellCooldowns: updatedUser.productSellCooldowns || {} } });
     } catch (err) { console.error(`${LOG_PREFIX_SERVER} Fehler Acc-Settings ${req.session.username}:`, err); res.status(500).json({ error: "Fehler Speichern Einstellungen." }); }
-});
-
-app.post('/api/account/deactivate', isAuthenticated, async (req, res) => {
-    const { password } = req.body;
-    const userId = new ObjectId(req.session.userId);
-
-    if (!password) {
-        return res.status(400).json({ error: "Passwort zur Bestätigung erforderlich." });
-    }
-
-    try {
-        const user = await usersCollection.findOne({ _id: userId });
-        const match = await bcrypt.compare(password, user.password);
-        
-        if (!match) {
-            return res.status(401).json({ error: "Falsches Passwort! Deaktivierung abgebrochen." });
-        }
-
-        // Account deaktivieren
-        await usersCollection.updateOne(
-            { _id: userId },
-            { $set: { isDeactivated: true, deactivatedAt: new Date() } }
-        );
-
-        if (typeof logActivity === 'function') {
-            await logActivity(req, "USER_DEACTIVATED_ACCOUNT", { status: "success" });
-        }
-
-        // Session vernichten, damit er direkt rausfliegt
-        req.session.destroy(err => {
-            res.clearCookie('connect.sid', { path: '/' });
-            res.json({ message: "Dein Account wurde in den Tiefschlaf versetzt. Bis bald!" });
-        });
-
-    } catch (e) {
-        console.error(`${LOG_PREFIX_SERVER} Fehler bei Deaktivierung:`, e);
-        res.status(500).json({ error: "Serverfehler bei der Deaktivierung." });
-    }
-});
-
-app.post('/api/auth/reactivate', rateLimitLogin, async (req, res) => {
-    const { username, password } = req.body;
-    const clientIp = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
-
-    if (!username || !password) return res.status(400).json({ error: 'Benutzername und Passwort erforderlich.' });
-
-    try {
-        const user = await usersCollection.findOne({ username: username.toLowerCase() });
-
-        if (!user || !user.isDeactivated) {
-            return res.status(400).json({ error: 'Dieser Account kann nicht reaktiviert werden.' });
-        }
-
-        const match = await bcrypt.compare(password, user.password);
-
-        if (match) {
-            // Flag entfernen
-            await usersCollection.updateOne(
-                { _id: user._id },
-                { $unset: { isDeactivated: "", deactivatedAt: "" } }
-            );
-
-            // Rate-Limit Zähler löschen
-            if (req.loginRateLimitKey && global.redisPub) {
-                global.redisPub.del(req.loginRateLimitKey).catch(e => console.error("Redis Del Error", e));
-            }
-
-            // Normal einloggen
-            req.session.userId = user._id.toString();
-            req.session.username = user.username;
-            req.session.isAdmin = user.isAdmin || false;
-
-            req.session.save(err => {
-                if (err) return res.status(500).json({ error: 'Fehler Session.' });
-                
-                console.log(`${LOG_PREFIX_SERVER} User ${user.username} hat seinen Account reaktiviert.`);
-                res.json({ message: "Willkommen zurück! Dein Account wurde reaktiviert." });
-            });
-
-        } else {
-            res.status(401).json({ error: 'Ungültige Anmeldedaten.' });
-        }
-    } catch (err) {
-        console.error(`${LOG_PREFIX_SERVER} Serverfehler Reaktivierung:`, err);
-        res.status(500).json({ error: 'Serverfehler bei der Reaktivierung.' });
-    }
 });
 
 // ORDERS
@@ -5976,9 +5890,10 @@ app.get('/api/admin/users', isAuthenticated, isAdmin, async (req, res) => {
     } catch (e) { res.status(500).json({ error: "Fehler." }); }
 });
 
-// User bearbeiten (Geld, Tokens, Admin-Status UND Infinity Money)
+// User bearbeiten (Geld, Tokens, Admin-Status, Infinity Money UND Deaktivierung)
 app.put('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
-    const { balance, tokens, infinityMoney, role, permissions, schufaScore } = req.body; 
+    // NEU: isDeactivated hinzugefügt
+    const { balance, tokens, infinityMoney, role, permissions, schufaScore, isDeactivated } = req.body; 
     
     try {
         const updateData = {};
@@ -5994,19 +5909,24 @@ app.put('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
             if (updateData.schufaScore > 1000) updateData.schufaScore = 1000;
             if (updateData.schufaScore < 0) updateData.schufaScore = 0;
         }
+
+        // NEU: Deaktivierungs-Status setzen
+        if (isDeactivated !== undefined) {
+            updateData.isDeactivated = isDeactivated;
+            if (isDeactivated) {
+                updateData.deactivatedAt = new Date();
+            } else {
+                updateData.deactivatedAt = null;
+            }
+        }
         
         // --- SICHERHEITSCHECK FÜR ROLLEN & RECHTE ---
         if (role !== undefined || permissions !== undefined) {
-            // Nutzt jetzt req.user (frisch aus DB) statt req.session!
             const isSuperAdmin = req.user.isAdmin || (req.user.permissions && req.user.permissions.includes('super_admin'));
-            
-            if (!isSuperAdmin) {
-                 return res.status(403).json({ error: "Nur Super-Admins dürfen Rollen und Berechtigungen verändern!" });
-            }
+            if (!isSuperAdmin) return res.status(403).json({ error: "Nur Super-Admins dürfen Rollen und Berechtigungen verändern!" });
             
             if (role !== undefined) {
                 updateData.role = role;
-                // Prüft nur auf echte Rollen, die das Flag bekommen sollen
                 updateData.isAdmin = ['admin', 'owner'].includes(role); 
             }
             if (permissions !== undefined) {
@@ -6019,15 +5939,9 @@ app.put('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
             { $set: updateData }
         );
 
-        if (result.matchedCount === 0) {
-            return res.status(404).json({ error: "User nicht gefunden." });
-        }
+        if (result.matchedCount === 0) return res.status(404).json({ error: "User nicht gefunden." });
 		
-		await logActivity(req, "ADMIN_UPDATE_USER", { 
-    		targetUserId: req.params.id, 
-    		changes: updateData 
-		});
-
+		await logActivity(req, "ADMIN_UPDATE_USER", { targetUserId: req.params.id, changes: updateData });
         res.json({ message: "User erfolgreich aktualisiert." });
     } catch (e) {
         console.error("Update Error:", e);
