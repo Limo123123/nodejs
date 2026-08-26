@@ -19465,7 +19465,8 @@ app.get('/api/limtube/video/:id', isAuthenticated, async (req, res) => {
                 title: video.title,
                 description: video.description,
                 visibility: video.visibility || 'public', 
-                mediaType: video.mediaType || 'video', // <--- NEU: AUDIO ODER VIDEO INFO FÜR DEN PLAYER
+                mediaType: video.mediaType || 'video',
+				lyrics: video.lyrics || "",
                 uploaderName: video.uploaderName || video.uploader || "Unbekannt",
                 uploaderId: video.uploaderId,
                 views: video.views || 0,
@@ -20079,6 +20080,36 @@ app.get('/api/limtube/playlists/:id', async (req, res) => {
         res.json({ playlist, videos: sortedVideos });
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Laden der Playlist." });
+    }
+});
+
+// --- LIMTUBE: LYRICS SPEICHERN ---
+app.post('/api/limtube/video/:id/lyrics', isAuthenticated, async (req, res) => {
+    const videoId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+    const { lyrics } = req.body;
+
+    try {
+        const video = await limtubeVideosCollection.findOne({ _id: videoId });
+        if (!video) return res.status(404).json({ error: "Song nicht gefunden." });
+
+        const user = await usersCollection.findOne({ _id: userId });
+        const isOwner = video.uploaderId.equals(userId);
+
+        if (!isOwner && !user.isAdmin) {
+            return res.status(403).json({ error: "Du darfst nur bei deinen eigenen Songs Lyrics bearbeiten." });
+        }
+
+        await limtubeVideosCollection.updateOne(
+            { _id: videoId },
+            { $set: { lyrics: lyrics.trim() } }
+        );
+
+        console.log(`${LOG_PREFIX_SERVER} 🎵 Lyrics für "${video.title}" gespeichert.`);
+        res.json({ message: "Lyrics erfolgreich gespeichert!" });
+    } catch (e) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Speichern der Lyrics:`, e);
+        res.status(500).json({ error: "Fehler beim Speichern." });
     }
 });
 
