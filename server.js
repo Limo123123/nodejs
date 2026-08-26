@@ -6,6 +6,7 @@ const os = require('os');
 const helmet = require('helmet');
 const multer = require('multer');
 const sharp = require('sharp');
+const crypto = require('crypto');
 sharp.concurrency(1);
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const { createClient } = require('redis');
@@ -253,6 +254,7 @@ let inviteCodesCollection;
 let movementsCollection;
 let limtubeVideosCollection;
 let limabookPostsCollection, limabookCommentsCollection;
+let apiKeysCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -353,14 +355,19 @@ app.delete('/api/cdn/delete/:filename', isAuthenticated, isAdmin, (req, res) => 
 // --- LIMTUBE: VIDEO UPLOAD SYSTEM ---
 const videoStorage = multer.diskStorage({
     destination: (req, file, cb) => {
-        cb(null, CDN_DIR); // Wir speichern sie im gleichen /cdn Ordner!
+        cb(null, CDN_DIR);
     },
     filename: (req, file, cb) => {
         const ext = path.extname(file.originalname).toLowerCase();
-        // Nur MP4 zulassen
-        if (ext !== '.mp4') return cb(new Error('Nur MP4 Dateien erlaubt!'), false);
-        // Dateiname: vid_1691234567_123.mp4
-        cb(null, `vid_${Date.now()}_${Math.floor(Math.random() * 1000)}${ext}`);
+        // Erlaube MP4 (Video) sowie MP3, WAV und OGG (Audio)
+        const allowedExts = ['.mp4', '.mp3', '.wav', '.ogg'];
+        
+        if (!allowedExts.includes(ext)) {
+            return cb(new Error('Nur MP4, MP3, WAV oder OGG Dateien erlaubt!'), false);
+        }
+        
+        const prefix = ext === '.mp4' ? 'vid_' : 'aud_';
+        cb(null, `${prefix}${Date.now()}_${Math.floor(Math.random() * 1000)}${ext}`);
     }
 });
 
@@ -370,7 +377,7 @@ const uploadVideo = multer({
 });
 
 // ==============================================================================
-// === NEU: AUTOMATISIERTE SICHERHEITS- & REPARATURFUNKTIONEN ====================
+// === AUTOMATISIERTE SICHERHEITS- & REPARATURFUNKTIONEN ====================
 // ==============================================================================
 const LOG_PREFIX_SECURITY = "[Security Check]";
 
@@ -1180,11 +1187,41 @@ async function refreshProductCache(triggerFrontendUpdate = true) {
     }
 }
 
-// --- Middleware für Authentifizierung und Admin-Rechte ---
+// --- Middleware für Authentifizierung und API-Keys ---
 async function isAuthenticated(req, res, next) {
+    // 1. API KEY PRÜFUNG
+    const apiKey = req.headers['x-api-key'] || (req.headers['authorization'] ? req.headers['authorization'].replace('Bearer ', '') : null);
+    
+    if (apiKey) {
+        try {
+            const keyDoc = await apiKeysCollection.findOne({ key: apiKey });
+            if (keyDoc) {
+                const user = await usersCollection.findOne({ _id: keyDoc.userId }, { projection: { isDeactivated: 1, username: 1, isAdmin: 1 } });
+                
+                if (user && !user.isDeactivated) {
+                    // Session für den API Key emulieren
+                    req.session = req.session || {};
+                    req.session.userId = user._id.toString();
+                    req.session.username = user.username;
+                    req.session.isAdmin = user.isAdmin;
+                    req.user = user;
+                    
+                    // Nutzungsdatum updaten (im Hintergrund)
+                    apiKeysCollection.updateOne({ _id: keyDoc._id }, { $set: { lastUsed: new Date() } }).catch(e => {});
+                    
+                    return next();
+                } else if (user && user.isDeactivated) {
+                    return res.status(403).json({ error: 'ACCOUNT_DEACTIVATED', message: 'Dein Account ist deaktiviert.' });
+                }
+            }
+        } catch (e) {
+            console.error(`${LOG_PREFIX_SERVER} API Key Auth Fehler:`, e);
+        }
+    }
+
+    // 2. NORMALE SESSION PRÜFUNG
     if (req.session && req.session.userId) {
         try {
-            // Schneller Check, ob der Account deaktiviert wurde
             const user = await usersCollection.findOne(
                 { _id: new ObjectId(req.session.userId) },
                 { projection: { isDeactivated: 1 } }
@@ -1195,7 +1232,6 @@ async function isAuthenticated(req, res, next) {
                 return res.status(401).json({ error: 'Benutzer nicht gefunden.' });
             }
 
-            // Wenn deaktiviert, wird jede Aktion sofort geblockt und die Session gekillt!
             if (user.isDeactivated) {
                 req.session.destroy();
                 res.clearCookie('connect.sid', { path: '/' });
@@ -1211,7 +1247,7 @@ async function isAuthenticated(req, res, next) {
             return res.status(500).json({ error: 'Serverfehler bei der Überprüfung.' });
         }
     } else {
-        res.status(401).json({ error: 'Nicht eingeloggt. Bitte zuerst anmelden.' });
+        res.status(401).json({ error: 'Nicht eingeloggt. Bitte zuerst anmelden oder gültigen API-Key senden.' });
     }
 }
 
@@ -1538,6 +1574,7 @@ MongoClient.connect(mongoUri)
 		limtubeVideosCollection = db.collection('limtubeVideos');
 		limabookPostsCollection = db.collection('limabookPosts');
 		limabookCommentsCollection = db.collection('limabookComments');
+		apiKeysCollection = db.collection('apiKeys');
         console.log(`${LOG_PREFIX_SERVER} ✅ MongoDB verbunden & alle Collections initialisiert.`);
         // --- 2. Indizes & Reparaturen ---
         try {
@@ -1595,6 +1632,7 @@ MongoClient.connect(mongoUri)
     			{ "timestamp": 1 }, 
     			{ expireAfterSeconds: 30 * 24 * 60 * 60 } 
 			);
+			await apiKeysCollection.createIndex({ key: 1 }, { unique: true });
 			console.log(`${LOG_PREFIX_SERVER} ⏱️ TTL-Index für Activity-Logs aktiv (30 Tage).`);
 			await limtubeVideosCollection.createIndex({ createdAt: -1 });
 			await limabookPostsCollection.createIndex({ createdAt: -1 });
@@ -19034,10 +19072,10 @@ app.post('/api/webauthn/login-verify', async (req, res) => {
 });
 
 // =========================================================
-// === LIMTUBE V2 API ===
+// === LIMTUBE API ===
 // =========================================================
 
-// API: Neues Video hochladen
+// API: Neues Video oder Musik hochladen
 app.post('/api/limtube/upload', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
 
@@ -19060,7 +19098,7 @@ app.post('/api/limtube/upload', isAuthenticated, async (req, res) => {
         if (currentUploads > dailyLimit) {
             // Counter wieder runterzählen, da der Upload abgelehnt wird
             await global.redisPub.decr(uploadKey);
-            return res.status(429).json({ error: `Upload-Limit erreicht! Du darfst nur ${dailyLimit} Videos pro Tag hochladen.` });
+            return res.status(429).json({ error: `Upload-Limit erreicht! Du darfst nur ${dailyLimit} Uploads pro Tag durchführen.` });
         }
     } catch (e) {
         return res.status(500).json({ error: "Fehler beim Prüfen der Upload-Limits." });
@@ -19068,11 +19106,11 @@ app.post('/api/limtube/upload', isAuthenticated, async (req, res) => {
 
     uploadVideo.single('video')(req, res, async (err) => {
         if (err) {
-            console.error(`${LOG_PREFIX_SERVER} Video-Upload Fehler:`, err);
+            console.error(`${LOG_PREFIX_SERVER} Media-Upload Fehler:`, err);
             return res.status(400).json({ error: err.message || 'Fehler beim Upload. Max 500MB.' });
         }
 
-        if (!req.file) return res.status(400).json({ error: 'Kein Video empfangen.' });
+        if (!req.file) return res.status(400).json({ error: 'Keine Datei empfangen.' });
         
         // visibility aus dem Frontend holen
         const { title, description, visibility } = req.body;
@@ -19085,13 +19123,26 @@ app.post('/api/limtube/upload', isAuthenticated, async (req, res) => {
         // Sichtbarkeit setzen (Standard ist public, wenn nichts gesendet wird)
         const finalVisibility = ['public', 'unlisted', 'private'].includes(visibility) ? visibility : 'public';
 
-        const thumbFilename = req.file.filename.replace('.mp4', '.jpg');
-        const thumbPath = path.join(CDN_DIR, thumbFilename);
+        // --- AUDIO / VIDEO LOGIK ---
+        const ext = path.extname(req.file.filename).toLowerCase();
+        const isAudio = ['.mp3', '.wav', '.ogg'].includes(ext);
+        const mediaType = isAudio ? 'audio' : 'video';
 
-        const { exec } = require('child_process');
-        exec(`ffmpeg -i "${req.file.path}" -ss 00:00:01 -vframes 1 "${thumbPath}"`, (err) => {
-            if (err) console.error(`${LOG_PREFIX_SERVER} Thumbnail-Fehler:`, err.message);
-        });
+        let thumbFilename = null;
+
+        // Thumbnail nur für Videos mit ffmpeg generieren
+        if (!isAudio) {
+            thumbFilename = req.file.filename.replace('.mp4', '.jpg');
+            const thumbPath = path.join(CDN_DIR, thumbFilename);
+
+            const { exec } = require('child_process');
+            exec(`ffmpeg -i "${req.file.path}" -ss 00:00:01 -vframes 1 "${thumbPath}"`, (err) => {
+                if (err) console.error(`${LOG_PREFIX_SERVER} Thumbnail-Fehler:`, err.message);
+            });
+        } else {
+            // Bei Musik speichern wir ein Standard-Bild (kannst du noch in deinen CDN Ordner legen)
+            thumbFilename = 'default_audio_cover.jpg'; 
+        }
 
         try {
             const newVideo = {
@@ -19099,7 +19150,8 @@ app.post('/api/limtube/upload', isAuthenticated, async (req, res) => {
                 description: description ? description.trim().substring(0, 500) : "",
                 filename: req.file.filename,
                 thumbnail: thumbFilename,
-                visibility: finalVisibility, // <--- NEU GESPEICHERT
+                mediaType: mediaType, // NEU: speichert ob es Audio oder Video ist
+                visibility: finalVisibility, 
                 uploaderId: userId,
                 uploaderName: req.session.username,
                 views: 0,
@@ -19111,10 +19163,13 @@ app.post('/api/limtube/upload', isAuthenticated, async (req, res) => {
             };
 
             await limtubeVideosCollection.insertOne(newVideo);
-            await logActivity(req, "LIMTUBE_UPLOAD", { title: newVideo.title, visibility: finalVisibility });
+            
+            if (typeof logActivity === 'function') {
+                await logActivity(req, "LIMTUBE_UPLOAD", { title: newVideo.title, visibility: finalVisibility, mediaType: mediaType });
+            }
 
-            console.log(`${LOG_PREFIX_SERVER} 🎬 Limtube: ${req.session.username} hat "${newVideo.title}" hochgeladen (${finalVisibility}).`);
-            res.status(201).json({ message: 'Video erfolgreich hochgeladen!', video: newVideo });
+            console.log(`${LOG_PREFIX_SERVER} 🎬 Limtube: ${req.session.username} hat "${newVideo.title}" hochgeladen (${mediaType}).`);
+            res.status(201).json({ message: 'Erfolgreich hochgeladen!', video: newVideo });
 
         } catch (dbErr) {
             console.error(`${LOG_PREFIX_SERVER} Limtube DB-Fehler:`, dbErr);
@@ -19409,7 +19464,8 @@ app.get('/api/limtube/video/:id', isAuthenticated, async (req, res) => {
                 id: video._id || video.id,
                 title: video.title,
                 description: video.description,
-                visibility: video.visibility || 'public', // <--- NEU
+                visibility: video.visibility || 'public', 
+                mediaType: video.mediaType || 'video', // <--- NEU: AUDIO ODER VIDEO INFO FÜR DEN PLAYER
                 uploaderName: video.uploaderName || video.uploader || "Unbekannt",
                 uploaderId: video.uploaderId,
                 views: video.views || 0,
@@ -19419,9 +19475,8 @@ app.get('/api/limtube/video/:id', isAuthenticated, async (req, res) => {
                 comments: video.comments || [],
                 createdAt: video.createdAt,
                 dislikesCount: video.dislikes ? video.dislikes.length : 0,
-                isDisliked: hasDisliked,
-                subscribersCount: subCount,
-                isSubscribed: isSubscribed
+                isSubscribed: isSubscribed,
+                subscribersCount: subCount
             }
         });
     } catch (e) {
@@ -19458,7 +19513,8 @@ app.get('/api/limtube/dashboard', isAuthenticated, async (req, res) => {
                 filename: v.filename,
                 thumbnail: v.thumbnail,
                 ytId: v.ytId,
-                visibility: v.visibility || 'public' // <--- NEU FÜRS FRONTEND!
+                visibility: v.visibility || 'public',
+                mediaType: v.mediaType || 'video' // <--- NEU: SICHTBARKEIT DES ICONS IM DASHBOARD
             }))
         });
     } catch (e) {
@@ -19630,7 +19686,7 @@ const { spawn, exec } = require('child_process');
 const activeYtImports = {};
 
 app.post('/api/limtube/import-youtube', isAuthenticated, async (req, res) => {
-    const { ytId } = req.body;
+    const { ytId, format } = req.body; // format = 'video' oder 'audio'
     const userId = new ObjectId(req.session.userId);
 
     if (!ytId || ytId.length !== 11) return res.status(400).json({ error: "Ungültige YouTube ID." });
@@ -19640,21 +19696,37 @@ app.post('/api/limtube/import-youtube', isAuthenticated, async (req, res) => {
     const uploadedTodayCount = await limtubeVideosCollection.countDocuments({ uploaderId: userId, createdAt: { $gte: todayStart } });
     if (uploadedTodayCount >= 5 && !req.session.isAdmin) return res.status(429).json({ error: "Tageslimit für Uploads erreicht." });
 
-    const filename = `yt_${Date.now()}_${ytId}.mp4`;
+    const isAudio = format === 'audio';
+    const mediaType = isAudio ? 'audio' : 'video';
+    const ext = isAudio ? 'mp3' : 'mp4';
+    const prefix = isAudio ? 'aud_' : 'yt_';
+    
+    const filename = `${prefix}${Date.now()}_${ytId}.${ext}`;
     const filePath = path.join(CDN_DIR, filename);
 
     activeYtImports[ytId] = { progress: 0, status: 'started' };
 
-    const dl = spawn('yt-dlp', [
-        '-f', 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b',
-        '--merge-output-format', 'mp4',
-        '-o', filePath,
-        '--force-ipv4',
-        '--no-playlist',
-        '--newline',
-        '--js-runtimes', 'node',
-        `https://www.youtube.com/watch?v=${ytId}`
-    ]);
+    // yt-dlp Argumente dynamisch bauen
+    let ytArgs = [];
+    if (isAudio) {
+        // Lädt Audio und konvertiert zu MP3
+        ytArgs = [
+            '-x', '--audio-format', 'mp3', '--audio-quality', '0',
+            '-o', filePath.replace('.mp3', '.%(ext)s'), // yt-dlp ersetzt ext bei der Konvertierung
+            '--force-ipv4', '--no-playlist', '--newline', '--js-runtimes', 'node',
+            `https://www.youtube.com/watch?v=${ytId}`
+        ];
+    } else {
+        // Lädt Video als MP4
+        ytArgs = [
+            '-f', 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b', '--merge-output-format', 'mp4',
+            '-o', filePath,
+            '--force-ipv4', '--no-playlist', '--newline', '--js-runtimes', 'node',
+            `https://www.youtube.com/watch?v=${ytId}`
+        ];
+    }
+
+    const dl = spawn('yt-dlp', ytArgs);
 
     dl.stdout.on('data', (data) => {
         const match = data.toString().match(/(\d+\.\d+)%/);
@@ -19667,7 +19739,6 @@ app.post('/api/limtube/import-youtube', isAuthenticated, async (req, res) => {
 
     dl.on('close', async (code) => {
         if (code === 0) {
-            // Auch beim Titel-Abfragen müssen wir den JS-Runtime Parameter mitgeben!
             exec(`yt-dlp --js-runtimes node --get-title --get-filename -o "%(uploader)s" "https://www.youtube.com/watch?v=${ytId}"`, async (e, out) => {
                 const lines = out.split('\n');
                 const title = lines[0] || `YouTube Import ${ytId}`;
@@ -19677,16 +19748,19 @@ app.post('/api/limtube/import-youtube', isAuthenticated, async (req, res) => {
                     title: title.substring(0, 100),
                     description: `Importiert von YouTube. Originaler Uploader: ${originalUploader}`,
                     filename: filename,
-					ytId: ytId,
+                    ytId: ytId,
+                    mediaType: mediaType, // Wichtig für das Frontend (Visualizer)
+                    thumbnail: isAudio ? 'default_audio_cover.jpg' : null,
                     uploaderId: userId,
                     uploaderName: req.session.username,
                     views: 0, unpaidViews: 0, likes: [], dislikes: [], comments: [],
-                    createdAt: new Date(), status: 'active', origin: 'youtube'
+                    createdAt: new Date(), status: 'active', origin: 'youtube',
+                    visibility: 'public'
                 };
                 
                 await limtubeVideosCollection.insertOne(newVideo);
                 activeYtImports[ytId] = { progress: 100, status: 'done', videoId: newVideo._id };
-                console.log(`${LOG_PREFIX_SERVER} ✅ YouTube Import abgeschlossen: ${title}`);
+                console.log(`${LOG_PREFIX_SERVER} ✅ YouTube Import abgeschlossen (${mediaType}): ${title}`);
             });
         } else {
             console.error(`${LOG_PREFIX_SERVER} ❌ yt-dlp ist mit Code ${code} abgestürzt.`);
@@ -19694,7 +19768,7 @@ app.post('/api/limtube/import-youtube', isAuthenticated, async (req, res) => {
         }
     });
 
-    res.json({ message: "Import gestartet!", ytId });
+    res.json({ message: `Import als ${mediaType} gestartet!`, ytId });
 });
 
 app.get('/api/limtube/import-youtube/status/:ytId', isAuthenticated, (req, res) => {
@@ -20638,6 +20712,88 @@ app.post('/api/3dprint/claim', isAuthenticated, async (req, res) => {
         res.status(400).json({ error: e.message });
     } finally {
         await session.endSession();
+    }
+});
+
+// =========================================================
+// === API KEYS VERWALTUNG ===
+// =========================================================
+
+// 1. Neuen API Key generieren
+app.post('/api/account/api-keys', isAuthenticated, async (req, res) => {
+    const { name } = req.body; 
+    const userId = new ObjectId(req.session.userId);
+
+    // Wir erstellen einen sicheren, 48 Zeichen langen Token
+    const rawKey = 'limo_' + crypto.randomBytes(24).toString('hex');
+
+    try {
+        const newKeyDoc = {
+            userId: userId,
+            name: name ? name.trim().substring(0, 30) : 'Unbenannter Key',
+            key: rawKey,
+            createdAt: new Date(),
+            lastUsed: null
+        };
+
+        await apiKeysCollection.insertOne(newKeyDoc);
+        console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} hat API Key '${newKeyDoc.name}' erstellt.`);
+        
+        // Der Key wird nur dieses EINE Mal im Klartext gesendet
+        res.status(201).json({ 
+            message: 'API Key erfolgreich erstellt. Kopiere ihn jetzt, er wird nie wieder vollständig angezeigt!', 
+            apiKey: rawKey 
+        });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler Erstellen API Key:`, err);
+        res.status(500).json({ error: 'Fehler beim Erstellen des API Keys.' });
+    }
+});
+
+// 2. Alle eigenen API Keys abrufen
+app.get('/api/account/api-keys', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    try {
+        const keys = await apiKeysCollection.find({ userId: userId }).sort({ createdAt: -1 }).toArray();
+        
+        // Keys maskieren für die Sicherheit
+        const safeKeys = keys.map(k => ({
+            id: k._id,
+            name: k.name,
+            prefix: k.key.substring(0, 9) + '****************', // Zeigt nur z.B. limo_1234****************
+            createdAt: k.createdAt,
+            lastUsed: k.lastUsed
+        }));
+
+        res.json({ apiKeys: safeKeys });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler Laden API Keys:`, err);
+        res.status(500).json({ error: 'Fehler beim Laden der API Keys.' });
+    }
+});
+
+// 3. API Key widerrufen (Löschen)
+app.delete('/api/account/api-keys/:id', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+    let keyId;
+    
+    try {
+        keyId = new ObjectId(req.params.id);
+    } catch (e) {
+        return res.status(400).json({ error: 'Ungültige Key ID.' });
+    }
+
+    try {
+        const result = await apiKeysCollection.deleteOne({ _id: keyId, userId: userId });
+        if (result.deletedCount === 0) {
+            return res.status(404).json({ error: 'API Key nicht gefunden oder du hast keine Rechte.' });
+        }
+        
+        console.log(`${LOG_PREFIX_SERVER} User ${req.session.username} hat einen API Key widerrufen.`);
+        res.json({ message: 'API Key erfolgreich widerrufen und gelöscht.' });
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler Löschen API Key:`, err);
+        res.status(500).json({ error: 'Fehler beim Löschen des API Keys.' });
     }
 });
 
