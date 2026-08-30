@@ -273,9 +273,9 @@ const upload = multer({
 
 // Proxy: Alles was auf /cdn/ geht, leiten wir intern an den Nginx Container weiter
 app.use('/cdn', createProxyMiddleware({
-    target: 'http://limazon-cdn:80', // Name des Containers in der docker-compose
+    target: process.env.CDN_CONTAINER_URL || 'http://limazon-cdn:80',
     changeOrigin: true,
-    pathRewrite: { '^/cdn': '' }, // Entfernt /cdn aus dem Pfad für Nginx
+    pathRewrite: { '^/cdn': '' },
 }));
 
 // API: Bild Hochladen & Komprimieren (WebP)
@@ -20825,6 +20825,80 @@ app.delete('/api/account/api-keys/:id', isAuthenticated, async (req, res) => {
     } catch (err) {
         console.error(`${LOG_PREFIX_SERVER} Fehler Löschen API Key:`, err);
         res.status(500).json({ error: 'Fehler beim Löschen des API Keys.' });
+    }
+});
+
+// Admin-Panel Kram
+
+app.post('/api/admin/instances/generate', isAuthenticated, isAdmin, async (req, res) => {
+    const { instanceName, port, frontendUrl } = req.body;
+    
+    if (!instanceName || !port || !frontendUrl) {
+        return res.status(400).json({ error: "Name, Port und Frontend-URL erforderlich." });
+    }
+
+    const cleanName = instanceName.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const dbName = `shop_${cleanName}`;
+
+    // Generiert den YAML-Block für die docker-compose.yml
+    const composeBlock = `
+  # --- INSTANZ: ${cleanName.toUpperCase()} ---
+  node-server-${cleanName}:
+    container_name: limazon-${cleanName}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    ports:
+      - "${port}:10000"
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://limazon-redis-${cleanName}:6379
+      - MONGO_URI=mongodb://limazon-mongo:27017/${dbName}?replicaSet=rs0
+      - CDN_CONTAINER_URL=http://limazon-cdn-${cleanName}:80
+      - FRONTEND_URL=${frontendUrl}
+    networks:
+      - default
+    volumes:
+      - limazon_cdn_data_${cleanName}:/usr/src/app/cdn-data
+    depends_on:
+      - limazon-redis-${cleanName}
+      - limazon-mongo
+
+  limazon-cdn-${cleanName}:
+    image: nginx:alpine
+    container_name: limazon-cdn-${cleanName}
+    restart: always
+    networks:
+      - default
+    volumes:
+      - limazon_cdn_data_${cleanName}:/usr/share/nginx/html:ro
+
+  limazon-redis-${cleanName}:
+    image: redis:alpine
+    container_name: limazon-redis-${cleanName}
+    restart: always
+    networks:
+      - default
+`;
+
+    const volumeBlock = `  limazon_cdn_data_${cleanName}:`;
+
+    try {
+        // Speichere die URL direkt beim User ab, damit sie in seinem Profil auftaucht
+        await usersCollection.updateOne(
+            { username: { $regex: new RegExp(`^${cleanName}$`, 'i') } },
+            { $set: { myInstanceUrl: frontendUrl } }
+        );
+
+        res.json({
+            message: "Block erfolgreich generiert!",
+            composeBlock: composeBlock,
+            volumeBlock: volumeBlock
+        });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Speichern der URL." });
     }
 });
 
