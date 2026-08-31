@@ -20967,6 +20967,7 @@ app.post('/api/admin/instances/requests/:id/approve', isAuthenticated, isAdmin, 
         // 2. Die individuelle .env für diesen User (OHNE PASSWÖRTER!)
         const envTemplate = `# --- LIMAZON SERVER CONFIG FÜR: ${name.toUpperCase()} ---
 MONGO_URI="mongodb://limazon-mongo:27017/${newDbName}?replicaSet=rs0"
+MONGO_DB_NAME="${newDbName}"
 REDIS_URL="redis://limazon-redis-${name}:6379"
 
 CDN_CONTAINER_URL="http://limazon-cdn-${name}:80"
