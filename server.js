@@ -295,7 +295,7 @@ app.post('/api/cdn/upload', isAuthenticated, upload.single('image'), async (req,
             .toFile(filepath);
 
         // URL zurückgeben
-        const fileUrl = `https://api.limazon.v6.rocks/cdn/${filename}`;
+        const fileUrl = `${req.protocol}://${req.get('host')}/cdn/${filename}`;
 
         console.log(`${LOG_PREFIX_SERVER} 🖼️ Neues Bild hochgeladen: ${filename}`);
         res.json({ message: 'Upload erfolgreich!', url: fileUrl, filename: filename });
@@ -311,7 +311,7 @@ app.get('/api/cdn/list', isAuthenticated, (req, res) => {
     fs.readdir(CDN_DIR, (err, files) => {
         if (err) return res.status(500).json({ error: "Konnte Dateien nicht lesen." });
 
-        const baseUrl = `https://api.limazon.v6.rocks/cdn/`;
+        const baseUrl = `${req.protocol}://${req.get('host')}/cdn/`;
         // Nur .webp Dateien nehmen und URLs zusammenbauen
         const images = files.filter(f => f.endsWith('.webp')).map(f => ({
             filename: f,
@@ -18901,8 +18901,8 @@ const {
 // ==========================================
 
 const rpName = 'Limazon Universe';
-const rpID = 'app.limazon.v6.rocks';
-const expectedOrigin = 'https://app.limazon.v6.rocks';
+const expectedOrigin = process.env.FRONTEND_URL || 'https://app.limazon.v6.rocks';
+const rpID = new URL(expectedOrigin).hostname;
 
 // --- 1. REGISTRIERUNG: Optionen abrufen (In den Account-Einstellungen) ---
 app.post('/api/webauthn/register-options', isAuthenticated, async (req, res) => {
