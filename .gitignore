@@ -1,2 +1,5 @@
 package-lock.json
 .env
+.env.*
+secret.env
+!.env.example
