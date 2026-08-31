@@ -20,3 +20,12 @@ Das Backend ist eine Node.js / Express-Anwendung mit MongoDB. Es läuft containe
 ## 4. Architektur-Regeln
 - Passwörter oder API-Keys werden **nicht** hartcodiert.
 - Bei der Erstellung von neuen User-Instanzen werden keine Klartext-Passwörter in `.env`-Dateien geschrieben. Das Haupt-Backend klont den Admin-Account via MongoDB direkt in die neue Datenbank (`shop_instanzname`).
+
+## 5. Modul- & Streik-Architektur
+Jeder Bereich des Spiels (z.B. Casino, Bank, Tinda) ist als einheitliches Modul definiert. Der Name des Moduls MUSS exakt dem HTML-Dateinamen (ohne `.html`) entsprechen.
+
+Wenn du eine **neue API-Route** für eine neue Seite (z.B. `krankenhaus.html`) erstellst, beachte zwingend diese 3 Schritte:
+1. **Türsteher (Middleware):** Alle neuen Routen müssen mit den Middlewares `isModuleEnabled('krankenhaus')` und `isNotOnStrike('krankenhaus')` geschützt werden.
+   *Beispiel:* `app.use('/api/krankenhaus', isModuleEnabled('krankenhaus'), isNotOnStrike('krankenhaus'));`
+2. **Admin-Panel (`admin.html`):** Der Schalter zum Deaktivieren muss in der `admin.html` (Tab: System) hinzugefügt werden. Die ID der Checkbox muss zwingend `id="mod-krankenhaus"` heißen, und der Key `'krankenhaus'` muss in das Array `allModKeys` eingetragen werden.
+3. **Gewerkschaft:** Damit das Modul bestreikt werden kann, muss der Name `'krankenhaus'` im Backend in der Route `app.post('/api/strikes/propose')` in das Array `ALLOWED_MODULES` aufgenommen werden.
