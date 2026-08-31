@@ -568,48 +568,18 @@ async function runAutomatedSecurityChecks() {
 }
 
 // =========================================================
-// === STREIK-SYSTEM: MIDDLEWARE ===
-// =========================================================
-function isNotOnStrike(moduleName) {
-    return async (req, res, next) => {
-        try {
-            // Prüfen, ob ein AKTIVER Streik für dieses Modul existiert
-            const activeStrike = await db.collection('strikes').findOne({
-                module: moduleName,
-                status: 'active',
-                expiresAt: { $gt: new Date() }
-            });
-
-            if (activeStrike) {
-                // HTTP 423 = "Locked" (Ressource ist gesperrt)
-                return res.status(423).json({
-                    error: "STRIKE_ACTIVE",
-                    strikeData: {
-                        module: activeStrike.module,
-                        reason: activeStrike.reason,
-                        strikers: activeStrike.strikerNames,
-                        endsAt: activeStrike.expiresAt
-                    }
-                });
-            }
-            
-            next(); // Kein Streik? Weiter geht's!
-        } catch (e) {
-            console.error("Fehler bei Streik-Prüfung:", e);
-            res.status(500).json({ error: "Systemfehler bei der Streik-Prüfung." });
-        }
-    };
-}
-
-// =========================================================
 // === MODUL-KONTROLLE (ENABLE/DISABLE) ===
 // =========================================================
 function isModuleEnabled(moduleName) {
     return async (req, res, next) => {
         try {
+            // WICHTIG: Admins haben immer Zugriff, damit das Admin-Panel nicht crasht!
+            if (req.session && req.session.isAdmin) {
+                return next();
+            }
+            
             const settings = await db.collection('systemSettings').findOne({ id: 'active_modules' });
             
-            // Wenn es Einstellungen gibt und dieses spezifische Modul auf 'false' steht
             if (settings && settings[moduleName] === false) {
                 return res.status(403).json({ 
                     error: "MODULE_DISABLED", 
@@ -617,10 +587,36 @@ function isModuleEnabled(moduleName) {
                 });
             }
             
-            next(); // Modul ist aktiv (oder noch nicht konfiguriert -> Standard: an)
+            next();
         } catch (e) {
-            console.error("Fehler bei Modul-Prüfung:", e);
-            next(); // Bei Datenbankfehlern lieber durchlassen als alles blockieren
+            next();
+        }
+    };
+}
+
+// Auch die Streik-Funktion anpassen, damit Admins nicht bei Streiks aus dem Panel fliegen!
+function isNotOnStrike(moduleName) {
+    return async (req, res, next) => {
+        try {
+            // WICHTIG: Admins ignorieren auch Streiks im Backend!
+            if (req.session && req.session.isAdmin) {
+                return next();
+            }
+
+            const strike = await db.collection('strikes').findOne({
+                module: moduleName,
+                status: 'active'
+            });
+
+            if (strike) {
+                return res.status(423).json({
+                    error: "STRIKE_ACTIVE",
+                    strikeData: strike
+                });
+            }
+            next();
+        } catch (e) {
+            next();
         }
     };
 }
@@ -21093,6 +21089,36 @@ app.post('/api/admin/system/modules', isAuthenticated, isAdmin, async (req, res)
         res.json({ message: "Modul-Einstellungen erfolgreich gespeichert!" });
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Speichern der Module." });
+    }
+});
+
+app.get('/api/system/check-access/:moduleName', async (req, res) => {
+    const moduleName = req.params.moduleName;
+    const isAdmin = req.session && req.session.isAdmin;
+
+    try {
+        // 1. Ist das Modul vom Admin deaktiviert?
+        const settings = await db.collection('systemSettings').findOne({ id: 'active_modules' });
+        if (settings && settings[moduleName] === false) {
+            // Admins lassen wir durch, User werden geblockt
+            if (!isAdmin) {
+                return res.json({ locked: true, type: 'DISABLED' });
+            }
+        }
+
+        // 2. Wird das Modul gerade bestreikt?
+        const strike = await db.collection('strikes').findOne({ module: moduleName, status: 'active' });
+        if (strike) {
+            // Admins ignorieren Streiks (um Dinge reparieren zu können)
+            if (!isAdmin) {
+                return res.json({ locked: true, type: 'STRIKE', strikeData: strike });
+            }
+        }
+
+        // Alles okay, oder User ist Admin
+        res.json({ locked: false });
+    } catch (e) {
+        res.json({ locked: false }); // Im Zweifel (Datenbank-Lag) Seite lieber freigeben
     }
 });
 
