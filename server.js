@@ -187,26 +187,59 @@ app.use((req, res, next) => {
 });
 
 // =========================================================
-// === STREIK-SYSTEM: BLOCKIERTE ROUTEN ===
+// === TÜRSTEHER: MODULE & STREIKS ===
 // =========================================================
-// Wenn ein Streik aktiv ist, blockiert der Türsteher ab hier alle Anfragen an diese Pfade
-app.use('/api/teachermon', isNotOnStrike('teachermon'));
-app.use('/api/news', isNotOnStrike('limonews'));
-app.use('/api/casino', isNotOnStrike('casino'));
-app.use('/api/restaurant', isNotOnStrike('restaurant'));
-app.use('/api/jobs', isNotOnStrike('jobs'));
-app.use('/api/crime', isNotOnStrike('crime'));
-app.use('/api/gangs', isNotOnStrike('gangs'));
-app.use('/api/limterest', isNotOnStrike('limterest'));
-app.use('/api/realestate', isNotOnStrike('realestate'));
-app.use('/api/auctions', isNotOnStrike('auctions'));
-app.use('/api/products', isNotOnStrike('shop'));
-app.use('/api/purchase', isNotOnStrike('shop'));
-app.use('/api/bank', isNotOnStrike('bank'));
-app.use('/api/pets', isNotOnStrike('pets'));
-app.use('/api/delivery', isNotOnStrike('delivery'));
-app.use('/api/wheels', isNotOnStrike('wheels'));
-app.use('/api/limabook', isNotOnStrike('limabook'));
+
+// 1. Social Media & Kommunikation
+app.use('/api/limabook', isModuleEnabled('limabook'), isNotOnStrike('limabook'));
+app.use('/api/limtube', isModuleEnabled('limtube'), isNotOnStrike('limtube'));
+app.use('/api/limterest', isModuleEnabled('limterest'), isNotOnStrike('limterest'));
+app.use('/api/tinda', isModuleEnabled('tinda'), isNotOnStrike('tinda'));
+app.use('/api/whatslim', isModuleEnabled('whatslim'), isNotOnStrike('whatslim'));
+
+// 2. Kriminalität, Justiz & Unterwelt
+app.use('/api/crime', isModuleEnabled('crime'), isNotOnStrike('crime'));
+app.use('/api/blackmarket', isModuleEnabled('crime'), isNotOnStrike('crime')); // Gekoppelt an Crime
+app.use('/api/gangs', isModuleEnabled('gangs'), isNotOnStrike('gangs'));
+app.use('/api/court', isModuleEnabled('court'), isNotOnStrike('court'));
+app.use('/api/wanted', isModuleEnabled('wanted'), isNotOnStrike('wanted'));
+
+// 3. Finanzen, Wirtschaft & Jobs
+app.use('/api/bank', isModuleEnabled('bank'), isNotOnStrike('bank'));
+app.use('/api/finance', isModuleEnabled('finance'), isNotOnStrike('finance'));
+app.use('/api/jobs', isModuleEnabled('jobs'), isNotOnStrike('jobs'));
+app.use('/api/realestate', isModuleEnabled('realestate'), isNotOnStrike('realestate'));
+app.use('/api/taxes', isModuleEnabled('taxes'), isNotOnStrike('taxes'));
+app.use('/api/sharktank', isModuleEnabled('sharktank'), isNotOnStrike('sharktank'));
+
+// 4. Shopping & Logistik
+// Mehrere Seiten (limazon, limazonsuper, l-shop) nutzen meist die gleichen Routen
+app.use('/api/products', isModuleEnabled('shop'), isNotOnStrike('shop'));
+app.use('/api/purchase', isModuleEnabled('shop'), isNotOnStrike('shop'));
+app.use('/api/auctions', isModuleEnabled('kleinanzeigen'), isNotOnStrike('kleinanzeigen'));
+app.use('/api/delivery', isModuleEnabled('logistics'), isNotOnStrike('logistics'));
+
+// 5. Unterhaltung, Glücksspiel & Games
+app.use('/api/casino', isModuleEnabled('casino'), isNotOnStrike('casino'));
+app.use('/api/wheels', isModuleEnabled('wheel'), isNotOnStrike('wheel'));
+app.use('/api/lottery', isModuleEnabled('lottery'), isNotOnStrike('lottery'));
+app.use('/api/teachermon', isModuleEnabled('teachermon'), isNotOnStrike('teachermon'));
+app.use('/api/restaurant', isModuleEnabled('restaurant'), isNotOnStrike('restaurant'));
+
+// 6. Leben, Gesellschaft & Familie
+app.use('/api/schule', isModuleEnabled('schule'), isNotOnStrike('schule'));
+app.use('/api/standesamt', isModuleEnabled('standesamt'), isNotOnStrike('standesamt'));
+app.use('/api/family', isModuleEnabled('family-dashboard'), isNotOnStrike('family-dashboard'));
+app.use('/api/pets', isModuleEnabled('pets'), isNotOnStrike('pets'));
+app.use('/api/tierpark', isModuleEnabled('tierpark'), isNotOnStrike('tierpark'));
+app.use('/api/therapy', isModuleEnabled('therapy'), isNotOnStrike('therapy'));
+app.use('/api/kirche', isModuleEnabled('kirche'), isNotOnStrike('kirche'));
+
+// 7. System & Politik (Petitionen, Gewerkschaft, News)
+app.use('/api/news', isModuleEnabled('news'), isNotOnStrike('news'));
+app.use('/api/petitions', isModuleEnabled('petitions'), isNotOnStrike('petitions'));
+app.use('/api/gewerkschaft', isModuleEnabled('gewerkschaft'), isNotOnStrike('gewerkschaft'));
+app.use('/api/rathaus', isModuleEnabled('rathaus'), isNotOnStrike('rathaus'));
 
 // --- Datenbank Variablen ---
 let db;
@@ -564,6 +597,30 @@ function isNotOnStrike(moduleName) {
         } catch (e) {
             console.error("Fehler bei Streik-Prüfung:", e);
             res.status(500).json({ error: "Systemfehler bei der Streik-Prüfung." });
+        }
+    };
+}
+
+// =========================================================
+// === MODUL-KONTROLLE (ENABLE/DISABLE) ===
+// =========================================================
+function isModuleEnabled(moduleName) {
+    return async (req, res, next) => {
+        try {
+            const settings = await db.collection('systemSettings').findOne({ id: 'active_modules' });
+            
+            // Wenn es Einstellungen gibt und dieses spezifische Modul auf 'false' steht
+            if (settings && settings[moduleName] === false) {
+                return res.status(403).json({ 
+                    error: "MODULE_DISABLED", 
+                    message: "Dieses Modul wurde vom Server-Administrator deaktiviert." 
+                });
+            }
+            
+            next(); // Modul ist aktiv (oder noch nicht konfiguriert -> Standard: an)
+        } catch (e) {
+            console.error("Fehler bei Modul-Prüfung:", e);
+            next(); // Bei Datenbankfehlern lieber durchlassen als alles blockieren
         }
     };
 }
@@ -16560,7 +16617,14 @@ app.post('/api/strikes/propose', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
     const username = req.session.username;
 
-    const ALLOWED_MODULES = ['teachermon', 'limonews', 'casino', 'restaurant', 'jobs', 'crime', 'gangs', 'limterest', 'realestate', 'auctions', 'shop', 'bank', 'pets', 'delivery', 'wheels'];
+    const ALLOWED_MODULES = [
+        'limabook', 'limtube', 'limterest', 'tinda', 'whatslim',
+        'crime', 'gangs', 'court', 'wanted',
+        'bank', 'finance', 'realestate', 'shop', 'kleinanzeigen', 'logistics',
+        'casino', 'wheel', 'lottery', 'teachermon', 'restaurant',
+        'schule', 'standesamt', 'family-dashboard', 'pets', 'tierpark', 'therapy', 'kirche',
+        'news', 'petitions', 'gewerkschaft', 'rathaus'
+    ];
 
     if (!ALLOWED_MODULES.includes(moduleName)) {
         return res.status(400).json({ error: "Dieses System ist essenziell und darf nicht bestreikt werden!" });
@@ -16579,7 +16643,7 @@ app.post('/api/strikes/propose', isAuthenticated, async (req, res) => {
             return res.status(400).json({ error: "Es läuft bereits eine Streik-Organisation oder ein aktiver Streik für dieses Modul!" });
         }
 
-        // NEU: Prüfen, ob der User in einer Bewegung ist
+        // Prüfen, ob der User in einer Bewegung ist
         const myMovement = await movementsCollection.findOne({ members: userId });
         
         let movementData = null;
@@ -21001,6 +21065,35 @@ app.post('/api/admin/instances/requests/:id/reject', isAuthenticated, isAdmin, a
         await db.collection('instanceRequests').updateOne({ _id: new ObjectId(req.params.id) }, { $set: { status: 'rejected' } });
         res.json({ message: "Antrag abgelehnt." });
     } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// =========================================================
+// === MODUL-SYSTEM API (AKTIVIEREN / DEAKTIVIEREN) ===
+// =========================================================
+
+// Öffentlicher Endpunkt: Prüfen, welche Module aktiv sind (Für Frontend)
+app.get('/api/system/active-modules', async (req, res) => {
+    try {
+        const settings = await db.collection('systemSettings').findOne({ id: 'active_modules' });
+        // Wenn nichts in der DB steht, geben wir ein leeres Objekt zurück (alles ist standardmäßig an)
+        res.json({ modules: settings || {} });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der Module." });
+    }
+});
+
+// Admin-Endpunkt: Modul-Schalter speichern
+app.post('/api/admin/system/modules', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        await db.collection('systemSettings').updateOne(
+            { id: 'active_modules' },
+            { $set: req.body }, // req.body enthält die { casino: false, crime: true, ... } Liste
+            { upsert: true }
+        );
+        res.json({ message: "Modul-Einstellungen erfolgreich gespeichert!" });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Speichern der Module." });
+    }
 });
 
 app.use((req, res) => {
