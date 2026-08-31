@@ -199,24 +199,26 @@ app.use('/api/whatslim', isModuleEnabled('whatslim'), isNotOnStrike('whatslim'))
 
 // 2. Kriminalität, Justiz & Unterwelt
 app.use('/api/crime', isModuleEnabled('crime'), isNotOnStrike('crime'));
-app.use('/api/blackmarket', isModuleEnabled('crime'), isNotOnStrike('crime')); // Gekoppelt an Crime
+app.use('/api/drugs', isModuleEnabled('crime'), isNotOnStrike('crime'));
+app.use('/api/cartel', isModuleEnabled('crime'), isNotOnStrike('crime'));
 app.use('/api/gangs', isModuleEnabled('gangs'), isNotOnStrike('gangs'));
 app.use('/api/court', isModuleEnabled('court'), isNotOnStrike('court'));
-app.use('/api/wanted', isModuleEnabled('wanted'), isNotOnStrike('wanted'));
+app.use('/api/bounty', isModuleEnabled('wanted'), isNotOnStrike('wanted')); // Fix: bounty statt wanted
 
 // 3. Finanzen, Wirtschaft & Jobs
 app.use('/api/bank', isModuleEnabled('bank'), isNotOnStrike('bank'));
 app.use('/api/finance', isModuleEnabled('finance'), isNotOnStrike('finance'));
+app.use('/api/stonks', isModuleEnabled('finance'), isNotOnStrike('finance')); // Fix: Stonks-Handel schützen
 app.use('/api/jobs', isModuleEnabled('jobs'), isNotOnStrike('jobs'));
 app.use('/api/realestate', isModuleEnabled('realestate'), isNotOnStrike('realestate'));
 app.use('/api/taxes', isModuleEnabled('taxes'), isNotOnStrike('taxes'));
-app.use('/api/sharktank', isModuleEnabled('sharktank'), isNotOnStrike('sharktank'));
+app.use('/api/investors', isModuleEnabled('sharktank'), isNotOnStrike('sharktank')); // Fix: investors statt sharktank
 
 // 4. Shopping & Logistik
-// Mehrere Seiten (limazon, limazonsuper, l-shop) nutzen meist die gleichen Routen
 app.use('/api/products', isModuleEnabled('shop'), isNotOnStrike('shop'));
 app.use('/api/purchase', isModuleEnabled('shop'), isNotOnStrike('shop'));
 app.use('/api/auctions', isModuleEnabled('kleinanzeigen'), isNotOnStrike('kleinanzeigen'));
+app.use('/api/classifieds', isModuleEnabled('kleinanzeigen'), isNotOnStrike('kleinanzeigen')); // Fix: classifieds fehlte
 app.use('/api/delivery', isModuleEnabled('logistics'), isNotOnStrike('logistics'));
 
 // 5. Unterhaltung, Glücksspiel & Games
@@ -225,21 +227,23 @@ app.use('/api/wheels', isModuleEnabled('wheel'), isNotOnStrike('wheel'));
 app.use('/api/lottery', isModuleEnabled('lottery'), isNotOnStrike('lottery'));
 app.use('/api/teachermon', isModuleEnabled('teachermon'), isNotOnStrike('teachermon'));
 app.use('/api/restaurant', isModuleEnabled('restaurant'), isNotOnStrike('restaurant'));
+app.use('/api/games', isModuleEnabled('casino'), isNotOnStrike('casino')); // Fix: Minigames an Casino koppeln
 
 // 6. Leben, Gesellschaft & Familie
-app.use('/api/schule', isModuleEnabled('schule'), isNotOnStrike('schule'));
+app.use('/api/school', isModuleEnabled('schule'), isNotOnStrike('schule')); // Fix: school statt schule
 app.use('/api/standesamt', isModuleEnabled('standesamt'), isNotOnStrike('standesamt'));
 app.use('/api/family', isModuleEnabled('family-dashboard'), isNotOnStrike('family-dashboard'));
 app.use('/api/pets', isModuleEnabled('pets'), isNotOnStrike('pets'));
-app.use('/api/tierpark', isModuleEnabled('tierpark'), isNotOnStrike('tierpark'));
+app.use('/api/park', isModuleEnabled('tierpark'), isNotOnStrike('tierpark')); // Fix: park statt tierpark
 app.use('/api/therapy', isModuleEnabled('therapy'), isNotOnStrike('therapy'));
-app.use('/api/kirche', isModuleEnabled('kirche'), isNotOnStrike('kirche'));
+app.use('/api/system/donate', isModuleEnabled('kirche'), isNotOnStrike('kirche')); // Fix: Spenden absichern
 
 // 7. System & Politik (Petitionen, Gewerkschaft, News)
 app.use('/api/news', isModuleEnabled('news'), isNotOnStrike('news'));
 app.use('/api/petitions', isModuleEnabled('petitions'), isNotOnStrike('petitions'));
-app.use('/api/gewerkschaft', isModuleEnabled('gewerkschaft'), isNotOnStrike('gewerkschaft'));
-app.use('/api/rathaus', isModuleEnabled('rathaus'), isNotOnStrike('rathaus'));
+app.use('/api/strikes', isModuleEnabled('gewerkschaft'), isNotOnStrike('gewerkschaft')); // Fix: strikes statt gewerkschaft
+app.use('/api/movements', isModuleEnabled('gewerkschaft'), isNotOnStrike('gewerkschaft'));
+app.use('/api/mayor', isModuleEnabled('rathaus'), isNotOnStrike('rathaus')); // Fix: mayor statt rathaus
 
 // --- Datenbank Variablen ---
 let db;
