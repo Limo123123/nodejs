@@ -580,7 +580,8 @@ function isModuleEnabled(moduleName) {
             
             const settings = await db.collection('systemSettings').findOne({ id: 'active_modules' });
             
-            if (settings && settings[moduleName] === false) {
+            // Prüft jetzt auf Boolean ODER String (falls das Frontend es falsch sendet)
+            if (settings && (settings[moduleName] === false || settings[moduleName] === "false")) {
                 return res.status(403).json({ 
                     error: "MODULE_DISABLED", 
                     message: "Dieses Modul wurde vom Server-Administrator deaktiviert." 
@@ -1403,14 +1404,29 @@ const ENDPOINT_PERMISSIONS = {
 
     // --- System & Wartung ---
     'GET /api/admin/health-check': 'system_maintenance',
-    'GET /api/admin/system/stats': 'system_maintenance', // NEU
-    'GET /api/admin/system/report': 'system_maintenance', // NEU
+    'GET /api/admin/system/stats': 'system_maintenance',
+    'GET /api/admin/system/report': 'system_maintenance',
     'POST /api/admin/fix-balances': 'system_maintenance',
     'POST /api/admin/convert-products-to-stocks': 'system_maintenance',
     'POST /api/admin/normalize-balances': 'system_maintenance',
     'POST /api/admin/system/normalize': 'system_maintenance',
     'POST /api/admin/system/fix-images': 'system_maintenance',
     'POST /api/admin/system/fix-decimals': 'system_maintenance',
+	'POST /api/admin/system/modules': 'system_maintenance',
+    'GET /api/admin/activity-logs': 'system_maintenance',
+    'POST /api/admin/system/fix-teachermon-dupes': 'system_maintenance',
+    'POST /api/admin/mayor/start': 'system_maintenance',
+    'POST /api/admin/mayor/end': 'system_maintenance',
+    'POST /api/admin/petitions/config': 'system_maintenance',
+    'DELETE /api/admin/petitions/:id': 'system_maintenance',
+    'POST /api/admin/mail/send': 'manage_users',
+    'GET /api/admin/limtube/ads': 'manage_news',
+    'POST /api/admin/limtube/ads': 'manage_news',
+    'DELETE /api/admin/limtube/ads/:id': 'manage_news',
+    'GET /api/limtube/admin/videos': 'manage_news',
+    'GET /api/limtube/admin/reports': 'manage_news',
+    'DELETE /api/admin/reviews/:id': 'manage_products',
+    'POST /api/cartel/boss/hack-files': 'manage_users_critical',
 
     // --- Admin Engine ---
     'POST /api/admin/engine': 'super_admin',
@@ -2499,7 +2515,7 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
 
             req.session.userId = user._id.toString();
             req.session.username = user.username;
-            req.session.isAdmin = user.isAdmin || false;
+            req.session.isAdmin = user.isAdmin === true || user.role === 'admin' || user.role === 'owner';
 
             if (rememberMe === true) req.session.cookie.maxAge = 14 * 24 * 60 * 60 * 1000;
             else { req.session.cookie.expires = false; req.session.cookie.maxAge = null; }
@@ -2584,7 +2600,7 @@ app.post('/api/auth/temp-login', rateLimitLogin, async (req, res) => {
         // Session aufbauen
         req.session.userId = user._id.toString();
         req.session.username = user.username;
-        req.session.isAdmin = user.isAdmin || false;
+        req.session.isAdmin = user.isAdmin === true || user.role === 'admin' || user.role === 'owner';
         
         // WICHTIG: Da es ein Temp-Login ist, vergeben wir absichtlich KEIN "Remember Me" Cookie
         req.session.cookie.expires = false; 
@@ -21099,7 +21115,7 @@ app.get('/api/system/check-access/:moduleName', async (req, res) => {
     try {
         // 1. Ist das Modul vom Admin deaktiviert?
         const settings = await db.collection('systemSettings').findOne({ id: 'active_modules' });
-        if (settings && settings[moduleName] === false) {
+        if (settings && (settings[moduleName] === false || settings[moduleName] === "false")) {
             // Admins lassen wir durch, User werden geblockt
             if (!isAdmin) {
                 return res.json({ locked: true, type: 'DISABLED' });
