@@ -2336,7 +2336,7 @@ app.post('/api/auth/register', async (req, res) => {
     } finally {
         await sessionMongo.endSession();
     }
-});
+}); 
 
 // =========================================================
 // === SIMPLE LOGIN PROTECTION (RAM BASED) ===
@@ -6906,11 +6906,9 @@ app.get('/api/profile/:username', async (req, res) => {
             username: user.username,
             bio: user.bio || "Keine Beschreibung.",
             joinDate: user._id.getTimestamp(),
-            // HIER IST DIE ÄNDERUNG: Wir senden die kombinierte Liste
             achievements: uniqueBadges,
             isAdmin: user.isAdmin,
             badgesCount: uniqueBadges.length,
-            // Neue Felder:
             isInventoryPublic: !!user.isInventoryPublic,
             inventory: inventory,
             hideInventory: (!isOwner && !user.isInventoryPublic)
@@ -6928,7 +6926,6 @@ app.get('/api/profile/:username', async (req, res) => {
 app.post('/api/profile/edit', isAuthenticated, async (req, res) => {
     const { bio, isInventoryPublic } = req.body;
 
-    // NEU: Limit auf 255 erhöht
     if (bio && bio.length > 255) {
         return res.status(400).json({ error: "Bio zu lang (max. 255 Zeichen)." });
     }
@@ -20807,7 +20804,6 @@ app.get('/api/account/api-keys', isAuthenticated, async (req, res) => {
 app.delete('/api/account/api-keys/:id', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
     let keyId;
-    
     try {
         keyId = new ObjectId(req.params.id);
     } catch (e) {
@@ -20828,23 +20824,112 @@ app.delete('/api/account/api-keys/:id', isAuthenticated, async (req, res) => {
     }
 });
 
-// Admin-Panel Kram
+// =========================================================
+// === INSTANZ MANAGER (USER REQUESTS) ===
+// =========================================================
 
-app.post('/api/admin/instances/generate', isAuthenticated, isAdmin, async (req, res) => {
-    const { instanceName, port, frontendUrl } = req.body;
-    
-    if (!instanceName || !port || !frontendUrl) {
-        return res.status(400).json({ error: "Name, Port und Frontend-URL erforderlich." });
-    }
+// 1. User stellt einen Antrag
+app.post('/api/instances/request', isAuthenticated, async (req, res) => {
+    const { instanceName, frontendUrl, geminiKey, groqKey } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (!instanceName || !frontendUrl) return res.status(400).json({ error: "Wunschname und Domain sind Pflicht." });
 
     const cleanName = instanceName.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const dbName = `shop_${cleanName}`;
 
-    // Generiert den YAML-Block für die docker-compose.yml
-    const composeBlock = `
-  # --- INSTANZ: ${cleanName.toUpperCase()} ---
-  node-server-${cleanName}:
-    container_name: limazon-${cleanName}
+    try {
+        const existing = await db.collection('instanceRequests').findOne({ userId, status: 'pending' });
+        if (existing) return res.status(400).json({ error: "Du hast bereits einen offenen Server-Antrag." });
+
+        await db.collection('instanceRequests').insertOne({
+            userId,
+            username: req.session.username,
+            instanceName: cleanName,
+            frontendUrl: frontendUrl.trim(),
+            geminiKey: geminiKey ? geminiKey.trim() : "",
+            groqKey: groqKey ? groqKey.trim() : "",
+            status: 'pending',
+            createdAt: new Date()
+        });
+
+        res.json({ message: "Server-Antrag erfolgreich eingereicht!" });
+    } catch (e) { res.status(500).json({ error: "Fehler beim Einreichen." }); }
+});
+
+// 2. Admin ruft offene Anträge ab
+app.get('/api/admin/instances/requests', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const requests = await db.collection('instanceRequests').find({ status: 'pending' }).sort({ createdAt: 1 }).toArray();
+        
+        // Wir suchen den nächsten freien Port (ab 5501)
+        const approved = await db.collection('instanceRequests').find({ status: 'approved' }).toArray();
+        const nextPort = 5501 + approved.length;
+
+        res.json({ requests, nextPort });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// 3. Admin genehmigt den Antrag und generiert den Code
+app.post('/api/admin/instances/requests/:id/approve', isAuthenticated, isAdmin, async (req, res) => {
+    const reqId = new ObjectId(req.params.id);
+    const { port } = req.body;
+
+    if (!port) return res.status(400).json({ error: "Ein Port muss zugewiesen werden." });
+
+    try {
+        const instanceReq = await db.collection('instanceRequests').findOne({ _id: reqId });
+        if (!instanceReq) return res.status(404).json({ error: "Antrag nicht gefunden." });
+
+        const name = instanceReq.instanceName;
+        const newDbName = `shop_${name}`;
+        
+        let domain = instanceReq.frontendUrl;
+        if (domain.endsWith('/')) domain = domain.slice(0, -1);
+
+        const randomSecret = 'limo_sec_' + Math.random().toString(36).substr(2, 10) + Math.random().toString(36).substr(2, 10);
+
+		// Account in die DB Kopieren
+        const originalUser = await usersCollection.findOne({ _id: instanceReq.userId });
+        
+        if (originalUser) {
+            // Mit der neuen DB verbinden
+            const targetDb = client.db(newDbName);
+            const targetUsersCol = targetDb.collection('users');
+            
+            // Prüfen, ob DB wirklich neu/leer ist
+            const userCount = await targetUsersCol.countDocuments();
+            if (userCount === 0) {
+                const newOwner = {
+                    _id: originalUser._id, // Wir übernehmen die ID
+                    username: originalUser.username,
+                    password: originalUser.password, // Gehashtes Passwort übernehmen
+                    balance: 1000000.00, // Direkt 1 Million Startkapital
+                    tokens: 500,
+                    isAdmin: true,
+                    role: 'owner',
+                    permissions: ['ALL'],
+                    infinityMoney: true,
+                    unlockedInfinityMoney: true,
+                    schufaScore: 1000,
+                    createdAt: new Date(),
+                    productSellCooldowns: {},
+                    spouses: [],
+                    activeLoan: null,
+                    job: null,
+                    jobLevel: 1
+                };
+                
+                await targetUsersCol.insertOne(newOwner);
+                console.log(`${LOG_PREFIX_SERVER} ✅ Account von ${originalUser.username} erfolgreich in ${newDbName} als Owner geklont.`);
+            }
+        }
+        // =========================================================
+
+        // 1. Docker Compose Block (Unverändert)
+        const composeBlock = `
+  # --- INSTANZ: ${name.toUpperCase()} (User: ${instanceReq.username}) ---
+  node-server-${name}:
+    container_name: limazon-${name}
     build:
       context: .
       dockerfile: Dockerfile
@@ -20852,54 +20937,69 @@ app.post('/api/admin/instances/generate', isAuthenticated, isAdmin, async (req, 
     ports:
       - "${port}:10000"
     env_file:
-      - .env
-    environment:
-      - REDIS_URL=redis://limazon-redis-${cleanName}:6379
-      - MONGO_URI=mongodb://limazon-mongo:27017/${dbName}?replicaSet=rs0
-      - CDN_CONTAINER_URL=http://limazon-cdn-${cleanName}:80
-      - FRONTEND_URL=${frontendUrl}
+      - .env.${name}
     networks:
       - default
     volumes:
-      - limazon_cdn_data_${cleanName}:/usr/src/app/cdn-data
+      - limazon_cdn_data_${name}:/usr/src/app/cdn-data
     depends_on:
-      - limazon-redis-${cleanName}
+      - limazon-redis-${name}
       - limazon-mongo
 
-  limazon-cdn-${cleanName}:
+  limazon-cdn-${name}:
     image: nginx:alpine
-    container_name: limazon-cdn-${cleanName}
+    container_name: limazon-cdn-${name}
     restart: always
     networks:
       - default
     volumes:
-      - limazon_cdn_data_${cleanName}:/usr/share/nginx/html:ro
+      - limazon_cdn_data_${name}:/usr/share/nginx/html:ro
 
-  limazon-redis-${cleanName}:
+  limazon-redis-${name}:
     image: redis:alpine
-    container_name: limazon-redis-${cleanName}
+    container_name: limazon-redis-${name}
     restart: always
     networks:
-      - default
+      - default`;
+
+        const volumeBlock = `  limazon_cdn_data_${name}:`;
+
+        // 2. Die individuelle .env für diesen User (OHNE PASSWÖRTER!)
+        const envTemplate = `# --- LIMAZON SERVER CONFIG FÜR: ${name.toUpperCase()} ---
+MONGO_URI="mongodb://limazon-mongo:27017/${newDbName}?replicaSet=rs0"
+REDIS_URL="redis://limazon-redis-${name}:6379"
+
+CDN_CONTAINER_URL="http://limazon-cdn-${name}:80"
+FRONTEND_URL="${domain}"
+SESSION_SECRET="${randomSecret}"
+NODE_ENV="production"
+
+# ==========================================
+# BENUTZERDEFINIERTE API KEYS (Aus Antrag):
+# ==========================================
+GEMINI_API_KEY="${instanceReq.geminiKey}"
+GROQ_API_KEY="${instanceReq.groqKey}"
 `;
 
-    const volumeBlock = `  limazon_cdn_data_${cleanName}:`;
+        // Status auf Approved setzen
+        await db.collection('instanceRequests').updateOne({ _id: reqId }, { $set: { status: 'approved', approvedAt: new Date(), port: port } });
 
-    try {
-        // Speichere die URL direkt beim User ab, damit sie in seinem Profil auftaucht
-        await usersCollection.updateOne(
-            { username: { $regex: new RegExp(`^${cleanName}$`, 'i') } },
-            { $set: { myInstanceUrl: frontendUrl } }
-        );
+        // URL beim User speichern
+        await usersCollection.updateOne({ _id: instanceReq.userId }, { $set: { myInstanceUrl: domain } });
 
         res.json({
-            message: "Block erfolgreich generiert!",
-            composeBlock: composeBlock,
-            volumeBlock: volumeBlock
+            message: "Genehmigt! Der Account wurde geklont und der Code generiert.",
+            composeBlock, volumeBlock, envTemplate, instanceName: name
         });
-    } catch (e) {
-        res.status(500).json({ error: "Fehler beim Speichern der URL." });
-    }
+    } catch (e) { res.status(500).json({ error: "Fehler bei der Genehmigung." }); }
+});
+
+// 4. Admin lehnt Antrag ab
+app.post('/api/admin/instances/requests/:id/reject', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        await db.collection('instanceRequests').updateOne({ _id: new ObjectId(req.params.id) }, { $set: { status: 'rejected' } });
+        res.json({ message: "Antrag abgelehnt." });
+    } catch (e) { res.status(500).json({ error: "Fehler." }); }
 });
 
 app.use((req, res) => {
