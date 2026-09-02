@@ -2333,7 +2333,7 @@ app.post('/api/auth/register', async (req, res) => {
         }
     }
 
-    // NEU: inviteCode aus dem Body holen
+    // inviteCode aus dem Body holen
     const { username, password, inviteCode } = req.body;
     
     if (!username || !password || typeof username !== 'string' || typeof password !== 'string' || username.length < 3 || username.length > 30 || password.length < 6) {
@@ -2384,7 +2384,9 @@ app.post('/api/auth/register', async (req, res) => {
                 activeLoan: null,
                 lastDeviceId: deviceId,
                 lastFingerprint: fingerprint,
-                lastIp: clientIp
+                lastIp: clientIp,
+                knownFingerprints: fingerprint ? [fingerprint] : [],
+                knownDeviceIds: deviceId ? [deviceId] : []
             };
             
             await usersCollection.insertOne(newUser, { session: sessionMongo });
@@ -2409,7 +2411,7 @@ app.post('/api/auth/register', async (req, res) => {
     } finally {
         await sessionMongo.endSession();
     }
-}); 
+});
 
 // =========================================================
 // === SIMPLE LOGIN PROTECTION (RAM BASED) ===
@@ -2464,7 +2466,7 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
         const match = await bcrypt.compare(password, user.password);
 
         if (match) {
-			// Check auf Deaktivierung VOR der Session-Erstellung
+            // Check auf Deaktivierung VOR der Session-Erstellung
             if (user.isDeactivated) {
                 // Rate-Limit Key löschen, da Passwort ja stimmte
                 if (req.loginRateLimitKey && global.redisPub) {
@@ -2475,7 +2477,7 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
                     message: 'Dein Account wurde gesperrt. Bitte wende dich an den Support.' 
                 });
             }
-			
+            
             // Bei Erfolg den Rate-Limit Zähler für diese IP löschen!
             if (req.loginRateLimitKey && global.redisPub) {
                 global.redisPub.del(req.loginRateLimitKey).catch(e => console.error("Redis Del Error", e));
@@ -2506,16 +2508,26 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
                 }
             }
 
-            // 3. Spuren für zukünftige Bans abspeichern (inklusive lastFingerprint!)
-            await usersCollection.updateOne(
-                { _id: user._id },
-                { $set: { 
+            // 3. Spuren für zukünftige Bans abspeichern
+            const updateData = { 
+                $set: { 
                     lastDeviceId: deviceId, 
                     lastFingerprint: fingerprint,
                     lastIp: clientIp, 
                     lastLogin: new Date() 
-                } }
-            );
+                } 
+            };
+
+            // Füge neue Fingerprints/Cookies lückenlos zur Akte hinzu ($addToSet vermeidet Duplikate)
+            const addToSetData = {};
+            if (fingerprint) addToSetData.knownFingerprints = fingerprint;
+            if (deviceId) addToSetData.knownDeviceIds = deviceId;
+
+            if (Object.keys(addToSetData).length > 0) {
+                updateData.$addToSet = addToSetData;
+            }
+
+            await usersCollection.updateOne({ _id: user._id }, updateData);
 
             req.session.userId = user._id.toString();
             req.session.username = user.username;
@@ -2535,18 +2547,18 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
                 const effectiveInfinityMoney = user.isAdmin ? true : (user.infinityMoney || false);
 
                 res.json({
-    				message: 'Login erfolgreich!',
-    				user: {
-        				userId: user._id.toString(),
-        				username: user.username,
-       					balance: IS_APRIL_FOOLS ? 0 : user.balance, // FAKE GUTHABEN
-        				tokens: IS_APRIL_FOOLS ? 0 : (user.tokens || 0), // FAKE TOKENS
-        				isAdmin: user.isAdmin || false,
-        				infinityMoney: effectiveInfinityMoney,
-        				unlockedInfinityMoney: user.unlockedInfinityMoney || false,
-        				productSellCooldowns: user.productSellCooldowns || {}
-    				}
-				});
+                    message: 'Login erfolgreich!',
+                    user: {
+                        userId: user._id.toString(),
+                        username: user.username,
+                        balance: IS_APRIL_FOOLS ? 0 : user.balance, // FAKE GUTHABEN
+                        tokens: IS_APRIL_FOOLS ? 0 : (user.tokens || 0), // FAKE TOKENS
+                        isAdmin: user.isAdmin || false,
+                        infinityMoney: effectiveInfinityMoney,
+                        unlockedInfinityMoney: user.unlockedInfinityMoney || false,
+                        productSellCooldowns: user.productSellCooldowns || {}
+                    }
+                });
             });
 
         } else {
@@ -6239,38 +6251,57 @@ app.post('/api/admin/banUser', isAuthenticated, isAdmin, async (req, res) => {
 
         if (targetUser.isAdmin) return res.status(403).json({ error: "Admins können nicht gebannt werden." });
 
-        // BAN: Nur noch Cookie und Fingerprint abspeichern
-        const banData = {
-            bannedAt: new Date(),
-            bannedBy: req.session.username,
-            reason: "Account vernichtet & Gerät gesperrt"
-        };
+        // Wir sperren alle jemals genutzten Fingerprints und Device-IDs
+        const banOperations = [];
+        const banReason = "Account vernichtet & Gerät gesperrt";
+        const now = new Date();
 
-        const queryConditions = [];
-
-        if (targetUser.lastDeviceId) {
-            banData.deviceId = targetUser.lastDeviceId;
-            queryConditions.push({ deviceId: targetUser.lastDeviceId });
-        }
-        if (targetUser.lastFingerprint) {
-            banData.fingerprint = targetUser.lastFingerprint;
-            queryConditions.push({ fingerprint: targetUser.lastFingerprint });
+        // 1. Alle jemals genutzten Fingerprints bannen
+        const allFingerprints = targetUser.knownFingerprints || [];
+        if (targetUser.lastFingerprint && !allFingerprints.includes(targetUser.lastFingerprint)) {
+            allFingerprints.push(targetUser.lastFingerprint);
         }
 
-        // Nur bannen, wenn wir mindestens ein Merkmal haben
-        if (queryConditions.length > 0) {
-            await db.collection('banned_devices').updateOne(
-                { $or: queryConditions },
-                { $set: banData },
-                { upsert: true }
-            );
+        allFingerprints.forEach(fp => {
+            if (fp) {
+                banOperations.push({
+                    updateOne: {
+                        filter: { fingerprint: fp },
+                        update: { $set: { fingerprint: fp, bannedAt: now, bannedBy: req.session.username, reason: banReason } },
+                        upsert: true
+                    }
+                });
+            }
+        });
+
+        // 2. Alle jemals genutzten Geräte-IDs (Cookies) bannen
+        const allDeviceIds = targetUser.knownDeviceIds || [];
+        if (targetUser.lastDeviceId && !allDeviceIds.includes(targetUser.lastDeviceId)) {
+            allDeviceIds.push(targetUser.lastDeviceId);
+        }
+
+        allDeviceIds.forEach(dId => {
+            if (dId) {
+                banOperations.push({
+                    updateOne: {
+                        filter: { deviceId: dId },
+                        update: { $set: { deviceId: dId, bannedAt: now, bannedBy: req.session.username, reason: banReason } },
+                        upsert: true
+                    }
+                });
+            }
+        });
+
+        // 3. Führe alle Banns gleichzeitig in der Datenbank aus
+        if (banOperations.length > 0) {
+            await db.collection('banned_devices').bulkWrite(banOperations);
         }
 
         // User restlos vernichten
         await deleteUserAndCleanup(targetUserId);
         await logActivity(req, "ADMIN_BAN_DEVICE", { targetUsername: targetUser.username });
         
-        res.json({ success: true, message: "User vernichtet und Gerät (ohne IP) gebannt." });
+        res.json({ success: true, message: "User vernichtet und alle verknüpften Geräte gebannt." });
     } catch (err) {
         console.error("Ban Error:", err);
         res.status(500).json({ error: "Serverfehler beim Bannen." });
@@ -18809,8 +18840,8 @@ app.get('/api/school/zeugnis', isAuthenticated, async (req, res) => {
 
 // Die zentrale Event-Config direkt in der server.js
 const eventConfig = {
-    isActive: true, 
-    id: "csd_2026_v2", // Neue ID, falls du schon abgeholt hast, kannst du nochmal!
+    isActive: false, 
+    id: "csd_2026_v2",
     name: "Pride Month & CSD",
     description: "Hol dir deine tägliche Event-Ration und finde am Glücksrad heraus: Welche Sexualität hast du heute?",
     
@@ -21139,6 +21170,474 @@ app.get('/api/system/check-access/:moduleName', async (req, res) => {
         res.json({ locked: false });
     } catch (e) {
         res.json({ locked: false }); // Im Zweifel (Datenbank-Lag) Seite lieber freigeben
+    }
+});
+
+// =========================================================
+// === 🏛️ LIMO BUNDESTAG & PARTEIEN SYSTEM ===
+// =========================================================
+
+// 0. Status abrufen (Bündelt alles für das Frontend)
+app.get('/api/politics/status', isAuthenticated, async (req, res) => {
+    try {
+        const userId = new ObjectId(req.session.userId);
+        const user = await usersCollection.findOne({ _id: userId });
+
+        const parties = await db.collection('parties').find({}).sort({ seats: -1, createdAt: 1 }).toArray();
+        
+        // Aktive Wahl suchen, sonst die letzte geschlossene Wahl nehmen
+        let election = await db.collection('bundestagElections').findOne({ status: 'active' });
+        if (!election) {
+            election = await db.collection('bundestagElections').findOne({ status: 'closed' }, { sort: { closedAt: -1 } });
+        }
+
+        const myParty = await db.collection('parties').findOne({ members: userId });
+        
+        let hasVoted = false;
+        if (election && election.status === 'active') {
+            hasVoted = election.votes.some(v => v.userId === req.session.userId);
+        }
+
+        res.json({
+            parties,
+            election,
+            myPartyId: myParty ? myParty._id : null,
+            isLeader: myParty ? myParty.leaderId.equals(userId) : false,
+            isAdmin: user.isAdmin,
+            hasVoted
+        });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden des Bundestags." });
+    }
+});
+
+// 1. Partei gründen
+app.post('/api/politics/parties/create', isAuthenticated, async (req, res) => {
+    const { name, shortName, description } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (!name || name.length < 5 || !shortName || shortName.length < 2 || shortName.length > 6) {
+        return res.status(400).json({ error: "Name (min 5) und Kürzel (2-6) sind ungültig." });
+    }
+
+    try {
+        const existingParty = await db.collection('parties').findOne({ $or: [{ name }, { shortName }] });
+        if (existingParty) return res.status(400).json({ error: "Dieser Name oder dieses Kürzel ist bereits vergeben." });
+
+        const newParty = {
+            name: name.trim(),
+            shortName: shortName.toUpperCase().trim(),
+            description: description.trim(),
+            founderId: userId,
+            leaderId: userId,
+            members: [userId],
+            status: 'pending_members', // Braucht 3 Mitglieder, dann 'pending_approval' (Admin), dann 'approved'
+            seats: 0,
+            createdAt: new Date()
+        };
+
+        await db.collection('parties').insertOne(newParty);
+        res.json({ message: `Die Partei ${shortName} wurde gegründet! Sammle jetzt 2 weitere Mitglieder.` });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler bei der Parteigründung." });
+    }
+});
+
+// 2. Partei beitreten (und ggf. für Admin-Prüfung freischalten)
+app.post('/api/politics/parties/join/:id', isAuthenticated, async (req, res) => {
+    const partyId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const party = await db.collection('parties').findOne({ _id: partyId });
+        if (!party) return res.status(404).json({ error: "Partei nicht gefunden." });
+
+        // Ist der User schon in einer Partei?
+        const alreadyInParty = await db.collection('parties').findOne({ members: userId });
+        if (alreadyInParty) return res.status(400).json({ error: "Du bist bereits Mitglied einer Partei." });
+
+        const newMembersCount = party.members.length + 1;
+        const updateOps = { $push: { members: userId } };
+
+        // Wenn sie jetzt 3 Mitglieder haben, geht sie zur Admin-Prüfung
+        if (party.status === 'pending_members' && newMembersCount >= 3) {
+            updateOps.$set = { status: 'pending_approval' };
+        }
+
+        await db.collection('parties').updateOne({ _id: partyId }, updateOps);
+        res.json({ message: `Du bist der Partei ${party.shortName} beigetreten!` });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Beitritt." });
+    }
+});
+
+// 3. Admin: Partei genehmigen
+app.post('/api/admin/politics/parties/:id/approve', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        await db.collection('parties').updateOne(
+            { _id: new ObjectId(req.params.id) },
+            { $set: { status: 'approved' } }
+        );
+        res.json({ message: "Partei offiziell zur Wahl zugelassen!" });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler bei Genehmigung." });
+    }
+});
+
+// 4. Admin: Wahl starten
+app.post('/api/admin/politics/election/start', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        await db.collection('bundestagElections').insertOne({
+            status: 'active',
+            votes: [],
+            createdAt: new Date()
+        });
+        // LNN News feuern
+        await newsCollection.insertOne({
+            headline: "BUNDESTAGSWAHL GESTARTET! 🗳️",
+            content: "Die Wahllokale sind eröffnet! Jede Stimme zählt. Wer zieht in den Limazon-Bundestag ein und stellt den Kanzler?",
+            author: "LNN Politik", category: "Gesellschaft", createdAt: new Date(), likes: 0
+        });
+        res.json({ message: "Bundestagswahl gestartet!" });
+    } catch (e) {
+        res.status(500).json({ error: "Konnte Wahl nicht starten." });
+    }
+});
+
+// 5. User: Abstimmen
+app.post('/api/politics/election/vote', isAuthenticated, async (req, res) => {
+    const { partyId } = req.body;
+    const userId = req.session.userId;
+
+    try {
+        const election = await db.collection('bundestagElections').findOne({ status: 'active' });
+        if (!election) return res.status(400).json({ error: "Es läuft keine Wahl." });
+
+        const alreadyVoted = election.votes.some(v => v.userId === userId);
+        if (alreadyVoted) return res.status(400).json({ error: "Wahlbetrug! Du hast schon abgestimmt." });
+
+        await db.collection('bundestagElections').updateOne(
+            { _id: election._id },
+            { $push: { votes: { userId, partyId, timestamp: new Date() } } }
+        );
+        res.json({ message: "Deine Stimme wurde gezählt!" });
+    } catch (e) {
+        res.status(500).json({ error: "Das Wahlgerät klemmt." });
+    }
+});
+
+// 6. Admin: Wahl beenden (5% Hürde & Sitzverteilung)
+app.post('/api/admin/politics/election/end', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const election = await db.collection('bundestagElections').findOne({ status: 'active' });
+        if (!election) return res.status(400).json({ error: "Keine aktive Wahl." });
+
+        const totalVotes = election.votes.length;
+        if (totalVotes === 0) return res.status(400).json({ error: "Niemand hat gewählt." });
+
+        // Stimmen zählen
+        const voteCounts = {};
+        election.votes.forEach(v => {
+            voteCounts[v.partyId] = (voteCounts[v.partyId] || 0) + 1;
+        });
+
+        const parties = await db.collection('parties').find({ status: 'approved' }).toArray();
+        let validVotesForParliament = 0;
+        const qualifyingParties = [];
+
+        // 5% Hürde prüfen
+        for (const party of parties) {
+            const pVotes = voteCounts[party._id.toString()] || 0;
+            const percentage = pVotes / totalVotes;
+
+            if (percentage >= 0.05) {
+                validVotesForParliament += pVotes;
+                qualifyingParties.push({ id: party._id, name: party.shortName, votes: pVotes });
+            } else {
+                // Partei fliegt raus (Setze Sitze auf 0)
+                await db.collection('parties').updateOne({ _id: party._id }, { $set: { seats: 0 } });
+            }
+        }
+
+        // Sitze verteilen (Insgesamt 100 Sitze im Bundestag)
+        let winningParty = null;
+        let maxSeats = 0;
+
+        for (const qp of qualifyingParties) {
+            const seats = Math.round((qp.votes / validVotesForParliament) * 100);
+            await db.collection('parties').updateOne({ _id: qp.id }, { $set: { seats: seats } });
+            
+            if (seats > maxSeats) {
+                maxSeats = seats;
+                winningParty = qp.name;
+            }
+        }
+
+        await db.collection('bundestagElections').updateOne({ _id: election._id }, { $set: { status: 'closed', closedAt: new Date(), results: qualifyingParties } });
+
+        await newsCollection.insertOne({
+            headline: "WAHLERGEBNISSE SIND DA! 📊",
+            content: `Die Wahl ist beendet. Die Partei ${winningParty} bildet die stärkste Fraktion mit ${maxSeats} Sitzen! Das Parlament tritt in Kürze zusammen.`,
+            author: "LNN Politik", category: "Gesellschaft", createdAt: new Date(), likes: 0
+        });
+
+        res.json({ message: "Wahl beendet, 5%-Hürde berechnet und Sitze verteilt!" });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler bei der Auszählung." });
+    }
+});
+
+// 7. User: Partei verlassen
+app.post('/api/politics/parties/leave', isAuthenticated, async (req, res) => {
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        // Suche die Partei des Users
+        const myParty = await db.collection('parties').findOne({ members: userId });
+        if (!myParty) return res.status(400).json({ error: "Du bist aktuell in gar keiner Partei." });
+
+        // Wenn der Parteivorsitzende geht, wird die Partei komplett aufgelöst
+        if (myParty.leaderId.equals(userId)) {
+            await db.collection('parties').deleteOne({ _id: myParty._id });
+            return res.json({ message: "Du bist ausgetreten. Da du der Parteivorsitzende warst, hat sich die Partei komplett aufgelöst." });
+        }
+
+        // Normales Mitglied verlässt die Partei
+        await db.collection('parties').updateOne(
+            { _id: myParty._id },
+            { $pull: { members: userId } }
+        );
+        
+        // Fällt die Partei unter 3 Mitglieder, verliert sie die Zulassung zur Wahl
+        if (myParty.members.length - 1 < 3 && myParty.status === 'approved') {
+            await db.collection('parties').updateOne(
+                { _id: myParty._id },
+                { $set: { status: 'pending_members', seats: 0 } }
+            );
+        }
+
+        res.json({ message: `Du hast die Partei ${myParty.shortName} verlassen.` });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Parteiaustritt." });
+    }
+});
+
+// 8. Admin: Partei verbieten / zwangsauflösen
+app.delete('/api/admin/politics/parties/:id', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const partyId = new ObjectId(req.params.id);
+        const party = await db.collection('parties').findOne({ _id: partyId });
+        
+        if (!party) return res.status(404).json({ error: "Partei nicht gefunden." });
+
+        await db.collection('parties').deleteOne({ _id: partyId });
+        
+        // LNN News für das Drama
+        await newsCollection.insertOne({
+            headline: `PARTEIVERBOT: ${party.shortName} AUFGELÖST!`,
+            content: `Das Admin-Regime hat die Partei "${party.name}" offiziell verboten und zwangsaufgelöst. Alle Mitglieder sind nun parteilos.`,
+            author: "LNN Justiz", category: "Politik", createdAt: new Date(), likes: 0
+        });
+        if (typeof updateDataVersion === 'function') updateDataVersion('news');
+
+        res.json({ message: `Die Partei ${party.shortName} wurde erfolgreich verboten und gelöscht.` });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Löschen der Partei." });
+    }
+});
+
+// =========================================================
+// === 🧠 LIMO KAHOOT (QUIZ P2P & EDITOR) ===
+// =========================================================
+
+// 1. Editor: Quiz erstellen/speichern
+app.post('/api/quiz/create', isAuthenticated, async (req, res) => {
+    const { title, questions } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (!title || !questions || questions.length === 0) {
+        return res.status(400).json({ error: "Titel und mindestens eine Frage erforderlich." });
+    }
+
+    // Saubere Validierung der neuen Fragetypen
+    const validatedQuestions = questions.map(q => {
+        return {
+            // Typ: 'normal' (4 Antworten), 'slider' (Schieberegler), 'info' (Nur Bild/Text, keine Punkte)
+            type: ['normal', 'slider', 'info'].includes(q.type) ? q.type : 'normal',
+            questionText: q.questionText || "Unbekannte Frage",
+            
+            // Standard Multiple Choice
+            answers: Array.isArray(q.answers) ? q.answers : [], 
+            correctAnswer: q.correctAnswer || null, // Bei Normal: Index (0-3). Bei Slider: Ziel-Zahl
+            
+            // Slider (Schieberegler) Spezifikationen
+            sliderMin: typeof q.sliderMin === 'number' ? q.sliderMin : 0,
+            sliderMax: typeof q.sliderMax === 'number' ? q.sliderMax : 100,
+            sliderTolerance: typeof q.sliderTolerance === 'number' ? q.sliderTolerance : 5, // Wie nah muss man dran sein?
+            
+            // Modifikatoren
+            doublePoints: !!q.doublePoints, // true = 2x Punkte!
+            timeLimit: parseInt(q.timeLimit) || 20, // Zeit in Sekunden
+            imageUrl: q.imageUrl || null // Stock Image / Meme URL
+        };
+    });
+
+    try {
+        await db.collection('quizzes').insertOne({
+            title: title.trim(),
+            questions: validatedQuestions,
+            creatorId: userId,
+            creatorName: req.session.username,
+            createdAt: new Date()
+        });
+        res.json({ message: "Dein Limo-Kahoot wurde gespeichert!" });
+    } catch (e) {
+        res.status(500).json({ error: "Konnte Quiz nicht speichern." });
+    }
+});
+
+// 2. Quiz Liste abrufen (Für Lobby)
+app.get('/api/quiz/list', async (req, res) => {
+    try {
+        // Lädt alle Quizzes (ohne die eigentlichen Fragen, um Traffic zu sparen)
+        const quizzes = await db.collection('quizzes').find({}, { projection: { questions: 0 } }).sort({ createdAt: -1 }).toArray();
+        res.json({ quizzes });
+    } catch (e) {
+        res.status(500).json({ error: "Laden fehlgeschlagen." });
+    }
+});
+
+// 3. P2P: Raum erstellen (Host) - Basiert auf deiner Among Us Logik, aber skaliert für 100
+app.post('/api/quiz/host', isAuthenticated, async (req, res) => {
+    const { quizId } = req.body;
+    const hostId = req.session.userId;
+    let roomCode = generateRoomCode();
+    
+    while (await global.redisPub.exists(`quiz_room:${roomCode}`)) {
+        roomCode = generateRoomCode();
+    }
+
+    try {
+        // Komplettes Quiz aus DB laden und ins Redis pushen
+        const quiz = await db.collection('quizzes').findOne({ _id: new ObjectId(quizId) });
+        if (!quiz) return res.status(404).json({ error: "Quiz nicht gefunden." });
+
+        const roomData = {
+            hostId: hostId,
+            hostName: req.session.username,
+            quiz: quiz,
+            guests: [],
+            signals: [], // WebRTC Signale
+            state: 'lobby', // lobby, question_active, leaderboard, ended
+            currentQuestionIndex: 0,
+            createdAt: Date.now()
+        };
+
+        await global.redisPub.setEx(`quiz_room:${roomCode}`, 7200, JSON.stringify(roomData)); 
+        console.log(`${LOG_PREFIX_SERVER} [Quiz] Raum ${roomCode} von ${req.session.username} erstellt.`);
+        
+        res.json({ roomCode, playerId: hostId, isHost: true });
+    } catch (e) {
+        res.status(500).json({ error: "Host-Fehler." });
+    }
+});
+
+// 4. P2P: Raum beitreten
+app.post('/api/quiz/join', isAuthenticated, async (req, res) => {
+    const { roomCode } = req.body;
+    const guestId = req.session.userId;
+    const redisKey = `quiz_room:${roomCode.toUpperCase()}`;
+
+    const roomRaw = await global.redisPub.get(redisKey);
+    if (!roomRaw) return res.status(404).json({ error: "Quiz-Raum nicht gefunden." });
+    
+    const room = JSON.parse(roomRaw);
+    if (room.state !== 'lobby') return res.status(400).json({ error: "Das Quiz hat bereits gestartet." });
+    
+    const isAlreadyIn = room.guests.some(g => g.id === guestId);
+    if (!isAlreadyIn) {
+        if (room.guests.length >= 100) return res.status(400).json({ error: "Raum ist voll (Max 100)." });
+        
+        // Spieler wird hinzugefügt, Punktestand initialisiert
+        room.guests.push({ id: guestId, name: req.session.username, score: 0 });
+        await global.redisPub.setEx(redisKey, 7200, JSON.stringify(room));
+    }
+
+    res.json({ roomCode: roomCode.toUpperCase(), playerId: guestId, isHost: false, hostId: room.hostId });
+});
+
+// 5. P2P: WebRTC Signaling & Room State Polling
+// Da 100 Handys spammen, schickt dieses Polling die Signale und den aktuellen Spielstatus zurück.
+app.get('/api/quiz/sync/:roomCode', isAuthenticated, async (req, res) => {
+    const { roomCode } = req.params;
+    const receiverId = req.session.userId;
+    const redisKey = `quiz_room:${roomCode.toUpperCase()}`;
+
+    const roomRaw = await global.redisPub.get(redisKey);
+    if (!roomRaw) return res.json({ signals: [], guests: [], state: 'closed' });
+
+    const room = JSON.parse(roomRaw);
+    
+    // WebRTC Signale filtern
+    const mySignals = room.signals.filter(s => s.to === receiverId);
+    if (mySignals.length > 0) {
+        room.signals = room.signals.filter(s => s.to !== receiverId);
+        await global.redisPub.setEx(redisKey, 7200, JSON.stringify(room));
+    }
+    
+    res.json({ 
+        signals: mySignals, 
+        guests: room.guests, 
+        hostName: room.hostName,
+        state: room.state, // Lässt das Frontend wissen, ob gerade eine Frage läuft
+        currentQuestionIndex: room.currentQuestionIndex
+    });
+});
+
+// 6. P2P: WebRTC Signale senden
+app.post('/api/quiz/signal', isAuthenticated, async (req, res) => {
+    const { roomCode, targetId, signal } = req.body;
+    const senderId = req.session.userId;
+    const redisKey = `quiz_room:${roomCode.toUpperCase()}`;
+
+    const roomRaw = await global.redisPub.get(redisKey);
+    if (!roomRaw) return res.status(404).json({ error: "Raum nicht gefunden." });
+    
+    const room = JSON.parse(roomRaw);
+    room.signals.push({ from: senderId, to: targetId, signal });
+    
+    await global.redisPub.setEx(redisKey, 7200, JSON.stringify(room));
+    res.json({ success: true });
+});
+
+// 7. Host: Spielstatus steuern (Der wichtigste Endpoint für das Gameplay!)
+app.post('/api/quiz/host/control', isAuthenticated, async (req, res) => {
+    const { roomCode, newState, questionIndex, leaderboardData } = req.body;
+    const hostId = req.session.userId;
+    const redisKey = `quiz_room:${roomCode.toUpperCase()}`;
+
+    try {
+        const roomRaw = await global.redisPub.get(redisKey);
+        if (!roomRaw) return res.status(404).json({ error: "Raum existiert nicht mehr." });
+
+        const room = JSON.parse(roomRaw);
+        if (room.hostId !== hostId) return res.status(403).json({ error: "Nur der Host (Bildschirm) darf das Spiel steuern." });
+
+        // Status updaten: 'lobby', 'question_active', 'answer_reveal', 'leaderboard', 'podium'
+        if (newState) room.state = newState; 
+        
+        // Welche Frage läuft gerade?
+        if (questionIndex !== undefined) room.currentQuestionIndex = questionIndex;
+        
+        // Rangliste speichern (Der Host pusht z.B. die Top 5 in den Redis, damit Handys sie abrufen können)
+        if (leaderboardData) room.leaderboard = leaderboardData; 
+
+        // Update im Redis
+        await global.redisPub.setEx(redisKey, 7200, JSON.stringify(room));
+        
+        res.json({ success: true, state: room.state });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Syncen des Spielstatus." });
     }
 });
 
