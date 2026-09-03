@@ -21519,7 +21519,7 @@ app.post('/api/admin/politics/chancellor-election/start', isAuthenticated, isAdm
 
 // Parteimitglied: Für einen Kanzlerkandidaten stimmen
 app.post('/api/politics/chancellor/vote', isAuthenticated, async (req, res) => {
-    const { candidateId } = req.body;
+    const { candidateUsername } = req.body; // Jetzt erwarten wir den Usernamen
     const userId = new ObjectId(req.session.userId);
 
     try {
@@ -21532,15 +21532,30 @@ app.post('/api/politics/chancellor/vote', isAuthenticated, async (req, res) => {
             return res.status(403).json({ error: `Nur Mitglieder der Partei ${election.partyName} dürfen abstimmen!` });
         }
 
-        // Hat er schon gewählt?
+        // Hat der User schon gewählt?
         if (election.votes.some(v => v.voterId.toString() === userId.toString())) {
             return res.status(400).json({ error: "Du hast deine Stimme bereits abgegeben." });
+        }
+
+        if (!candidateUsername) return res.status(400).json({ error: "Bitte einen Kandidaten angeben." });
+
+        // Kandidat in der Datenbank suchen (Groß-/Kleinschreibung ignorieren)
+        const candidate = await usersCollection.findOne({ 
+            username: { $regex: new RegExp(`^${candidateUsername.trim()}$`, 'i') } 
+        });
+
+        if (!candidate) return res.status(404).json({ error: "Dieser Spieler existiert nicht." });
+
+        // Prüfen, ob der Kandidat überhaupt in der eigenen Partei ist
+        const isCandidateInParty = myParty.members.some(m => m.toString() === candidate._id.toString());
+        if (!isCandidateInParty) {
+            return res.status(400).json({ error: `${candidate.username} ist kein Mitglied deiner Partei!` });
         }
 
         // Abstimmen
         await systemSettingsCollection.updateOne(
             { id: 'chancellor_election' },
-            { $push: { votes: { voterId: userId, candidateId: new ObjectId(candidateId), timestamp: new Date() } } }
+            { $push: { votes: { voterId: userId, candidateId: candidate._id, timestamp: new Date() } } }
         );
 
         res.json({ message: "Deine Stimme für den Kanzler wurde gezählt!" });
