@@ -203,22 +203,22 @@ app.use('/api/drugs', isModuleEnabled('crime'), isNotOnStrike('crime'));
 app.use('/api/cartel', isModuleEnabled('crime'), isNotOnStrike('crime'));
 app.use('/api/gangs', isModuleEnabled('gangs'), isNotOnStrike('gangs'));
 app.use('/api/court', isModuleEnabled('court'), isNotOnStrike('court'));
-app.use('/api/bounty', isModuleEnabled('wanted'), isNotOnStrike('wanted')); // Fix: bounty statt wanted
+app.use('/api/bounty', isModuleEnabled('wanted'), isNotOnStrike('wanted'));
 
 // 3. Finanzen, Wirtschaft & Jobs
 app.use('/api/bank', isModuleEnabled('bank'), isNotOnStrike('bank'));
 app.use('/api/finance', isModuleEnabled('finance'), isNotOnStrike('finance'));
-app.use('/api/stonks', isModuleEnabled('finance'), isNotOnStrike('finance')); // Fix: Stonks-Handel schützen
+app.use('/api/stonks', isModuleEnabled('finance'), isNotOnStrike('finance'));
 app.use('/api/jobs', isModuleEnabled('jobs'), isNotOnStrike('jobs'));
 app.use('/api/realestate', isModuleEnabled('realestate'), isNotOnStrike('realestate'));
 app.use('/api/taxes', isModuleEnabled('taxes'), isNotOnStrike('taxes'));
-app.use('/api/investors', isModuleEnabled('sharktank'), isNotOnStrike('sharktank')); // Fix: investors statt sharktank
+app.use('/api/investors', isModuleEnabled('sharktank'), isNotOnStrike('sharktank'));
 
 // 4. Shopping & Logistik
 app.use('/api/products', isModuleEnabled('shop'), isNotOnStrike('shop'));
 app.use('/api/purchase', isModuleEnabled('shop'), isNotOnStrike('shop'));
 app.use('/api/auctions', isModuleEnabled('kleinanzeigen'), isNotOnStrike('kleinanzeigen'));
-app.use('/api/classifieds', isModuleEnabled('kleinanzeigen'), isNotOnStrike('kleinanzeigen')); // Fix: classifieds fehlte
+app.use('/api/classifieds', isModuleEnabled('kleinanzeigen'), isNotOnStrike('kleinanzeigen'));
 app.use('/api/delivery', isModuleEnabled('logistics'), isNotOnStrike('logistics'));
 
 // 5. Unterhaltung, Glücksspiel & Games
@@ -227,23 +227,23 @@ app.use('/api/wheels', isModuleEnabled('wheel'), isNotOnStrike('wheel'));
 app.use('/api/lottery', isModuleEnabled('lottery'), isNotOnStrike('lottery'));
 app.use('/api/teachermon', isModuleEnabled('teachermon'), isNotOnStrike('teachermon'));
 app.use('/api/restaurant', isModuleEnabled('restaurant'), isNotOnStrike('restaurant'));
-app.use('/api/games', isModuleEnabled('casino'), isNotOnStrike('casino')); // Fix: Minigames an Casino koppeln
+app.use('/api/games', isModuleEnabled('casino'), isNotOnStrike('casino'));
 
 // 6. Leben, Gesellschaft & Familie
-app.use('/api/school', isModuleEnabled('schule'), isNotOnStrike('schule')); // Fix: school statt schule
+app.use('/api/school', isModuleEnabled('schule'), isNotOnStrike('schule'));
 app.use('/api/standesamt', isModuleEnabled('standesamt'), isNotOnStrike('standesamt'));
 app.use('/api/family', isModuleEnabled('family-dashboard'), isNotOnStrike('family-dashboard'));
 app.use('/api/pets', isModuleEnabled('pets'), isNotOnStrike('pets'));
-app.use('/api/park', isModuleEnabled('tierpark'), isNotOnStrike('tierpark')); // Fix: park statt tierpark
+app.use('/api/park', isModuleEnabled('tierpark'), isNotOnStrike('tierpark'));
 app.use('/api/therapy', isModuleEnabled('therapy'), isNotOnStrike('therapy'));
-app.use('/api/system/donate', isModuleEnabled('kirche'), isNotOnStrike('kirche')); // Fix: Spenden absichern
+app.use('/api/system/donate', isModuleEnabled('kirche'), isNotOnStrike('kirche'));
 
 // 7. System & Politik (Petitionen, Gewerkschaft, News)
 app.use('/api/news', isModuleEnabled('news'), isNotOnStrike('news'));
 app.use('/api/petitions', isModuleEnabled('petitions'), isNotOnStrike('petitions'));
-app.use('/api/strikes', isModuleEnabled('gewerkschaft'), isNotOnStrike('gewerkschaft')); // Fix: strikes statt gewerkschaft
+app.use('/api/strikes', isModuleEnabled('gewerkschaft'), isNotOnStrike('gewerkschaft'));
 app.use('/api/movements', isModuleEnabled('gewerkschaft'), isNotOnStrike('gewerkschaft'));
-app.use('/api/mayor', isModuleEnabled('rathaus'), isNotOnStrike('rathaus')); // Fix: mayor statt rathaus
+app.use('/api/mayor', isModuleEnabled('rathaus'), isNotOnStrike('rathaus'));
 
 // --- Datenbank Variablen ---
 let db;
@@ -2715,6 +2715,21 @@ app.get('/api/auth/me', isAuthenticated, async (req, res) => {
     } catch (err) { 
         console.error(`${LOG_PREFIX_SERVER} Fehler /api/auth/me ${req.session.username}:`, err); 
         res.status(500).json({ error: "Fehler Abruf Benutzerdaten." }); 
+    }
+});
+
+// Einwohnermeldeamt
+app.get('/api/users/directory', isAuthenticated, async (req, res) => {
+    try {
+        const users = await usersCollection.find(
+            { isDeactivated: { $ne: true } }, // Verstecke gelöschte/gesperrte User
+            { projection: { username: 1, role: 1, isAdmin: 1 } }
+        ).sort({ username: 1 }).toArray();
+
+        res.json({ users });
+    } catch (e) {
+        console.error("Fehler beim Laden des Telefonbuchs:", e);
+        res.status(500).json({ error: "Das Einwohnermeldeamt ist aktuell geschlossen." });
     }
 });
 
