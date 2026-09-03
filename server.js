@@ -21229,7 +21229,7 @@ app.get('/api/politics/status', isAuthenticated, async (req, res) => {
             myPartyId: myParty ? myParty._id : null,
             isLeader: myParty ? myParty.leaderId.equals(userId) : false,
             isAdmin: user.isAdmin,
-			isChancellor: user.isChancellor
+			isChancellor: user.isChancellor,
             hasVoted,
 			chancellor,
 			activeLaw,
