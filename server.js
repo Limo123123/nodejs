@@ -228,6 +228,7 @@ app.use('/api/lottery', isModuleEnabled('lottery'), isNotOnStrike('lottery'));
 app.use('/api/teachermon', isModuleEnabled('teachermon'), isNotOnStrike('teachermon'));
 app.use('/api/restaurant', isModuleEnabled('restaurant'), isNotOnStrike('restaurant'));
 app.use('/api/games', isModuleEnabled('casino'), isNotOnStrike('casino'));
+app.use('/api/quiz', isModuleEnabled('kahoot'), isNotOnStrike('kahoot'));
 
 // 6. Leben, Gesellschaft & Familie
 app.use('/api/school', isModuleEnabled('schule'), isNotOnStrike('schule'));
@@ -244,6 +245,10 @@ app.use('/api/petitions', isModuleEnabled('petitions'), isNotOnStrike('petitions
 app.use('/api/strikes', isModuleEnabled('gewerkschaft'), isNotOnStrike('gewerkschaft'));
 app.use('/api/movements', isModuleEnabled('gewerkschaft'), isNotOnStrike('gewerkschaft'));
 app.use('/api/mayor', isModuleEnabled('rathaus'), isNotOnStrike('rathaus'));
+app.use('/api/politics', isModuleEnabled('bundestag'), isNotOnStrike('bundestag'));
+
+// 8. Werkzeuge & Verzeichnisse
+app.use('/api/users/directory', isModuleEnabled('directory'), isNotOnStrike('directory'));
 
 // --- Datenbank Variablen ---
 let db;
@@ -16701,7 +16706,7 @@ app.post('/api/strikes/propose', isAuthenticated, async (req, res) => {
         'bank', 'finance', 'realestate', 'shop', 'kleinanzeigen', 'logistics',
         'casino', 'wheel', 'lottery', 'teachermon', 'restaurant',
         'schule', 'standesamt', 'family-dashboard', 'pets', 'tierpark', 'therapy', 'kirche',
-        'news', 'petitions', 'gewerkschaft', 'rathaus'
+        'news', 'petitions', 'gewerkschaft', 'rathaus', 'bundestag', 'kahoot', 'directory'
     ];
 
     if (!ALLOWED_MODULES.includes(moduleName)) {
@@ -21756,49 +21761,77 @@ app.post('/api/politics/laws/:id/resolve', isAuthenticated, async (req, res) => 
 // === LIMO KAHOOT (QUIZ P2P & EDITOR) ===
 // =========================================================
 
-// 1. Editor: Quiz erstellen/speichern
-app.post('/api/quiz/create', isAuthenticated, async (req, res) => {
-    const { title, questions } = req.body;
+// 1. Editor: Quiz erstellen ODER aktualisieren
+app.post('/api/quiz/save', isAuthenticated, async (req, res) => {
+    const { quizId, title, questions } = req.body;
     const userId = new ObjectId(req.session.userId);
 
     if (!title || !questions || questions.length === 0) {
         return res.status(400).json({ error: "Titel und mindestens eine Frage erforderlich." });
     }
 
-    // Saubere Validierung der neuen Fragetypen
+    // Saubere Validierung (Jetzt mit Array für Multiple Choice!)
     const validatedQuestions = questions.map(q => {
         return {
-            // Typ: 'normal' (4 Antworten), 'slider' (Schieberegler), 'info' (Nur Bild/Text, keine Punkte)
             type: ['normal', 'slider', 'info'].includes(q.type) ? q.type : 'normal',
             questionText: q.questionText || "Unbekannte Frage",
-            
-            // Standard Multiple Choice
             answers: Array.isArray(q.answers) ? q.answers : [], 
-            correctAnswer: q.correctAnswer || null, // Bei Normal: Index (0-3). Bei Slider: Ziel-Zahl
             
-            // Slider (Schieberegler) Spezifikationen
+            correctAnswers: Array.isArray(q.correctAnswers) ? q.correctAnswers : [], 
+            
+            // Slider Spezifikationen
             sliderMin: typeof q.sliderMin === 'number' ? q.sliderMin : 0,
             sliderMax: typeof q.sliderMax === 'number' ? q.sliderMax : 100,
-            sliderTolerance: typeof q.sliderTolerance === 'number' ? q.sliderTolerance : 5, // Wie nah muss man dran sein?
+            correctAnswer: q.correctAnswer || null, // Bleibt für den Slider erhalten
+            sliderTolerance: typeof q.sliderTolerance === 'number' ? q.sliderTolerance : 5, 
             
-            // Modifikatoren
-            doublePoints: !!q.doublePoints, // true = 2x Punkte!
-            timeLimit: parseInt(q.timeLimit) || 20, // Zeit in Sekunden
-            imageUrl: q.imageUrl || null // Stock Image / Meme URL
+            doublePoints: !!q.doublePoints,
+            timeLimit: parseInt(q.timeLimit) || 20,
+            imageUrl: q.imageUrl || null
         };
     });
 
     try {
-        await db.collection('quizzes').insertOne({
-            title: title.trim(),
-            questions: validatedQuestions,
-            creatorId: userId,
-            creatorName: req.session.username,
-            createdAt: new Date()
-        });
-        res.json({ message: "Dein Limo-Kahoot wurde gespeichert!" });
+        if (quizId) {
+            // UPDATE eines existierenden Quizzes
+            const existing = await db.collection('quizzes').findOne({ _id: new ObjectId(quizId) });
+            if (!existing) return res.status(404).json({ error: "Quiz nicht gefunden." });
+
+            const user = await usersCollection.findOne({ _id: userId });
+            if (!existing.creatorId.equals(userId) && !user.isAdmin) {
+                return res.status(403).json({ error: "Du darfst nur deine eigenen Quizzes bearbeiten." });
+            }
+
+            await db.collection('quizzes').updateOne(
+                { _id: new ObjectId(quizId) },
+                { $set: { title: title.trim(), questions: validatedQuestions, updatedAt: new Date() } }
+            );
+            res.json({ message: "Dein Quiz wurde erfolgreich aktualisiert!", quizId: quizId });
+
+        } else {
+            // NEU ERSTELLEN
+            const result = await db.collection('quizzes').insertOne({
+                title: title.trim(),
+                questions: validatedQuestions,
+                creatorId: userId,
+                creatorName: req.session.username,
+                createdAt: new Date()
+            });
+            res.json({ message: "Neues Quiz erfolgreich gespeichert!", quizId: result.insertedId });
+        }
     } catch (e) {
         res.status(500).json({ error: "Konnte Quiz nicht speichern." });
+    }
+});
+
+// 1b. Editor: Einzelnes Quiz komplett laden (inkl. Fragen)
+app.get('/api/quiz/details/:id', isAuthenticated, async (req, res) => {
+    try {
+        const quiz = await db.collection('quizzes').findOne({ _id: new ObjectId(req.params.id) });
+        if (!quiz) return res.status(404).json({ error: "Quiz nicht gefunden." });
+        res.json({ quiz });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden des Quizzes." });
     }
 });
 
