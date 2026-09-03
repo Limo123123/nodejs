@@ -21835,6 +21835,29 @@ app.get('/api/quiz/details/:id', isAuthenticated, async (req, res) => {
     }
 });
 
+// 1c. Editor: Quiz löschen (Nur eigener Ersteller oder Admin)
+app.delete('/api/quiz/:id', isAuthenticated, async (req, res) => {
+    const quizId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const quiz = await db.collection('quizzes').findOne({ _id: quizId });
+        if (!quiz) return res.status(404).json({ error: "Quiz nicht gefunden." });
+
+        const user = await usersCollection.findOne({ _id: userId });
+        
+        // Darf nur löschen, wenn es sein eigenes ist oder er Admin ist
+        if (!quiz.creatorId.equals(userId) && !user.isAdmin) {
+            return res.status(403).json({ error: "Du darfst nur deine eigenen Quizzes löschen." });
+        }
+
+        await db.collection('quizzes').deleteOne({ _id: quizId });
+        res.json({ message: "Quiz erfolgreich in den Papierkorb geworfen." });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Löschen des Quizzes." });
+    }
+});
+
 // 2. Quiz Liste abrufen (Für Lobby)
 app.get('/api/quiz/list', async (req, res) => {
     try {
