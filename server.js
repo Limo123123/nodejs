@@ -292,6 +292,7 @@ let movementsCollection;
 let limtubeVideosCollection;
 let limabookPostsCollection, limabookCommentsCollection;
 let apiKeysCollection;
+let lawsCollection;
 
 // =========================================================
 // === CDN & BILDER UPLOAD SYSTEM ===
@@ -1480,7 +1481,7 @@ const PREDEFINED_ROLES = {
     }
 };
 
-// 2. DIE NEUE (SMARTE) isAdmin MIDDLEWARE
+// 2. Die isAdmin Middelware
 async function isAdmin(req, res, next) {
     if (!req.session || !req.session.userId) {
         return res.status(401).json({ error: 'Nicht eingeloggt.' });
@@ -1524,6 +1525,19 @@ async function isAdmin(req, res, next) {
     } catch (err) {
         console.error(`${LOG_PREFIX_SERVER} Fehler bei Admin-Prüfung:`, err);
         res.status(500).json({ error: "Fehler bei der Überprüfung der Berechtigungen." });
+    }
+}
+
+// Middleware: Prüft, ob der User der Kanzler ist
+async function isChancellor(req, res, next) {
+    try {
+        const user = await usersCollection.findOne({ _id: new ObjectId(req.session.userId) });
+        if (user && user.isChancellor === true) {
+            return next();
+        }
+        res.status(403).json({ error: "Zugriff verweigert! Nur der Bundeskanzler darf Gesetze vorschlagen." });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler bei der Authentifizierung." });
     }
 }
 
@@ -1648,6 +1662,7 @@ MongoClient.connect(mongoUri)
 		limabookPostsCollection = db.collection('limabookPosts');
 		limabookCommentsCollection = db.collection('limabookComments');
 		apiKeysCollection = db.collection('apiKeys');
+		lawsCollection = db.collection('laws');
         console.log(`${LOG_PREFIX_SERVER} ✅ MongoDB verbunden & alle Collections initialisiert.`);
         // --- 2. Indizes & Reparaturen ---
         try {
@@ -1725,6 +1740,7 @@ MongoClient.connect(mongoUri)
                 { expireAfterSeconds: 72 * 60 * 60 }
             );
             await authCodesCollection.createIndex({ "createdAt": 1 }, { expireAfterSeconds: 300 });
+			await lawsCollection.createIndex({ status: 1, createdAt: -1 });
 
             // --- AUTO-DELETE (TTL) INDIZES ---
             // Löscht Logs automatisch nach einer bestimmten Zeit
@@ -21197,6 +21213,15 @@ app.get('/api/politics/status', isAuthenticated, async (req, res) => {
         if (election && election.status === 'active') {
             hasVoted = election.votes.some(v => v.userId === req.session.userId);
         }
+		
+		// Aktuellen Kanzler laden
+		const chancellor = await usersCollection.findOne({ isChancellor: true }, { projection: { username: 1 } });
+
+		// Aktives Gesetz laden
+		const activeLaw = await lawsCollection.findOne({ status: 'voting' });
+
+		// Aktive Kanzlerwahl laden
+		const chancellorElection = await systemSettingsCollection.findOne({ id: 'chancellor_election' });
 
         res.json({
             parties,
@@ -21204,7 +21229,11 @@ app.get('/api/politics/status', isAuthenticated, async (req, res) => {
             myPartyId: myParty ? myParty._id : null,
             isLeader: myParty ? myParty.leaderId.equals(userId) : false,
             isAdmin: user.isAdmin,
-            hasVoted
+			isChancellor: user.isChancellor
+            hasVoted,
+			chancellor,
+			activeLaw,
+			chancellorElection
         });
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Laden des Bundestags." });
@@ -21446,8 +21475,255 @@ app.delete('/api/admin/politics/parties/:id', isAuthenticated, isAdmin, async (r
     }
 });
 
+// --- A. KANZLERWAHL INNERHALB DER STÄRKSTEN PARTEI ---
+
+// Admin: Startet die Kanzlerwahl für die stärkste Partei
+app.post('/api/admin/politics/chancellor-election/start', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        // Finde die Partei mit den meisten Sitzen
+        const topParty = await db.collection('parties')
+            .find({ seats: { $gt: 0 } })
+            .sort({ seats: -1 })
+            .limit(1)
+            .toArray();
+
+        if (topParty.length === 0) return res.status(400).json({ error: "Es gibt keine Parteien mit Sitzen im Bundestag." });
+
+        await systemSettingsCollection.updateOne(
+            { id: 'chancellor_election' },
+            {
+                $set: {
+                    isActive: true,
+                    partyId: topParty[0]._id,
+                    partyName: topParty[0].shortName,
+                    votes: [],
+                    createdAt: new Date()
+                }
+            },
+            { upsert: true }
+        );
+
+        // LNN News
+        await newsCollection.insertOne({
+            headline: "KANZLERWAHL STEHT AN! 👑",
+            content: `Die Partei ${topParty[0].shortName} stellt die stärkste Fraktion. Die Parteimitglieder sind nun aufgerufen, intern ihren Bundeskanzler zu wählen!`,
+            author: "LNN Politik", category: "Gesellschaft", createdAt: new Date(), likes: 0
+        });
+        if (typeof updateDataVersion === 'function') updateDataVersion('news');
+
+        res.json({ message: `Kanzlerwahl für die Partei ${topParty[0].shortName} gestartet!` });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Starten der Kanzlerwahl." });
+    }
+});
+
+// Parteimitglied: Für einen Kanzlerkandidaten stimmen
+app.post('/api/politics/chancellor/vote', isAuthenticated, async (req, res) => {
+    const { candidateId } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const election = await systemSettingsCollection.findOne({ id: 'chancellor_election' });
+        if (!election || !election.isActive) return res.status(400).json({ error: "Aktuell läuft keine Kanzlerwahl." });
+
+        // Prüfen, ob der User in der wählenden Partei ist
+        const myParty = await db.collection('parties').findOne({ members: userId });
+        if (!myParty || myParty._id.toString() !== election.partyId.toString()) {
+            return res.status(403).json({ error: `Nur Mitglieder der Partei ${election.partyName} dürfen abstimmen!` });
+        }
+
+        // Hat er schon gewählt?
+        if (election.votes.some(v => v.voterId.toString() === userId.toString())) {
+            return res.status(400).json({ error: "Du hast deine Stimme bereits abgegeben." });
+        }
+
+        // Abstimmen
+        await systemSettingsCollection.updateOne(
+            { id: 'chancellor_election' },
+            { $push: { votes: { voterId: userId, candidateId: new ObjectId(candidateId), timestamp: new Date() } } }
+        );
+
+        res.json({ message: "Deine Stimme für den Kanzler wurde gezählt!" });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler bei der Abstimmung." });
+    }
+});
+
+// Admin: Kanzlerwahl beenden und Kanzler ernennen
+app.post('/api/admin/politics/chancellor-election/end', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const election = await systemSettingsCollection.findOne({ id: 'chancellor_election' });
+        if (!election || !election.isActive) return res.status(400).json({ error: "Keine aktive Kanzlerwahl." });
+
+        if (election.votes.length === 0) return res.status(400).json({ error: "Niemand aus der Partei hat abgestimmt." });
+
+        // Stimmen zählen
+        const voteCounts = {};
+        election.votes.forEach(v => {
+            const cId = v.candidateId.toString();
+            voteCounts[cId] = (voteCounts[cId] || 0) + 1;
+        });
+
+        // Gewinner finden
+        let winnerId = null;
+        let maxVotes = -1;
+        for (const [cId, count] of Object.entries(voteCounts)) {
+            if (count > maxVotes) { maxVotes = count; winnerId = cId; }
+        }
+
+        // Alten Kanzler entlassen
+        await usersCollection.updateMany({ isChancellor: true }, { $set: { isChancellor: false } });
+
+        // Neuen Kanzler krönen
+        await usersCollection.updateOne({ _id: new ObjectId(winnerId) }, { $set: { isChancellor: true } });
+        const winner = await usersCollection.findOne({ _id: new ObjectId(winnerId) });
+
+        await systemSettingsCollection.updateOne({ id: 'chancellor_election' }, { $set: { isActive: false } });
+
+        // LNN News
+        await newsCollection.insertOne({
+            headline: "WIR HABEN EINEN BUNDESKANZLER! 🇩🇪",
+            content: `${winner.username} aus der Partei ${election.partyName} wurde zum neuen Kanzler von Limazon ernannt. Er regiert ab sofort das Land und schlägt Gesetze vor!`,
+            author: "LNN Politik", category: "Gesellschaft", createdAt: new Date(), likes: 0
+        });
+        if (typeof updateDataVersion === 'function') updateDataVersion('news');
+
+        res.json({ message: `${winner.username} ist nun Bundeskanzler!` });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler bei der Kanzler-Auszählung." });
+    }
+});
+
+// --- B. GESETZGEBUNG (LAWS) ---
+
+// Kanzler: Schlägt ein neues Gesetz vor
+app.post('/api/politics/laws/propose', isAuthenticated, isChancellor, async (req, res) => {
+    const { title, description } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (!title || title.length < 5 || !description || description.length < 10) {
+        return res.status(400).json({ error: "Titel und Beschreibung sind zu kurz." });
+    }
+
+    try {
+        // Prüfen, ob schon ein Gesetz zur Abstimmung steht
+        const activeLaw = await lawsCollection.findOne({ status: 'voting' });
+        if (activeLaw) return res.status(400).json({ error: "Das Parlament debattiert gerade noch ein anderes Gesetz. Warte auf die Abstimmung." });
+
+        const newLaw = {
+            title: title.trim(),
+            description: description.trim(),
+            proposedBy: userId,
+            proposedByName: req.session.username,
+            status: 'voting', // voting, passed, rejected
+            votes: [], // Speichert: { partyId, partyName, seats, vote: 'yes'/'no' }
+            createdAt: new Date()
+        };
+
+        await lawsCollection.insertOne(newLaw);
+
+        await newsCollection.insertOne({
+            headline: "NEUES GESETZ IM BUNDESTAG! 📜",
+            content: `Kanzler ${req.session.username} hat das Gesetz "${title}" eingebracht. Die Parteien sind nun aufgerufen, mit ihren Sitzen abzustimmen!`,
+            author: "LNN Politik", category: "Politik", createdAt: new Date(), likes: 0
+        });
+        if (typeof updateDataVersion === 'function') updateDataVersion('news');
+
+        res.json({ message: "Das Gesetz wurde erfolgreich in den Bundestag eingebracht." });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Einbringen des Gesetzes." });
+    }
+});
+
+// Parteivorsitzender: Stimmt mit den Sitzen seiner Partei ab
+app.post('/api/politics/laws/vote', isAuthenticated, async (req, res) => {
+    const { lawId, vote } = req.body; // vote: 'yes' oder 'no'
+    const userId = new ObjectId(req.session.userId);
+
+    if (!['yes', 'no'].includes(vote)) return res.status(400).json({ error: "Nur 'yes' oder 'no' sind erlaubt." });
+
+    try {
+        // Ist der User der LEADER einer Partei mit Sitzen?
+        const myParty = await db.collection('parties').findOne({ leaderId: userId });
+        if (!myParty) return res.status(403).json({ error: "Nur Parteivorsitzende dürfen im Bundestag für ihre Fraktion abstimmen!" });
+        if ((myParty.seats || 0) === 0) return res.status(403).json({ error: "Deine Partei hat keine Sitze im Bundestag (unter 5% Hürde)." });
+
+        const law = await lawsCollection.findOne({ _id: new ObjectId(lawId), status: 'voting' });
+        if (!law) return res.status(404).json({ error: "Kein aktives Gesetz zur Abstimmung gefunden." });
+
+        // Hat die Partei schon abgestimmt?
+        if (law.votes.some(v => v.partyId.toString() === myParty._id.toString())) {
+            return res.status(400).json({ error: "Deine Fraktion hat bereits abgestimmt!" });
+        }
+
+        // Stimme speichern (Gewichtet mit Sitzen!)
+        await lawsCollection.updateOne(
+            { _id: law._id },
+            { 
+                $push: { 
+                    votes: { 
+                        partyId: myParty._id, 
+                        partyName: myParty.shortName, 
+                        seats: myParty.seats, 
+                        vote: vote 
+                    } 
+                } 
+            }
+        );
+
+        res.json({ message: `Deine Fraktion (${myParty.shortName}) hat mit ${myParty.seats} Sitzen für '${vote.toUpperCase()}' gestimmt.` });
+    } catch (e) {
+        res.status(500).json({ error: "Das Mikrofon im Bundestag ist ausgefallen." });
+    }
+});
+
+// Admin oder Kanzler: Beendet die Abstimmung und zählt die Sitze
+app.post('/api/politics/laws/:id/resolve', isAuthenticated, async (req, res) => {
+    const lawId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        if (!user.isChancellor && !user.isAdmin) {
+            return res.status(403).json({ error: "Nur der Kanzler oder ein Admin kann die Abstimmung schließen." });
+        }
+
+        const law = await lawsCollection.findOne({ _id: lawId, status: 'voting' });
+        if (!law) return res.status(404).json({ error: "Gesetz nicht gefunden oder bereits geschlossen." });
+
+        let yesSeats = 0;
+        let noSeats = 0;
+
+        law.votes.forEach(v => {
+            if (v.vote === 'yes') yesSeats += v.seats;
+            if (v.vote === 'no') noSeats += v.seats;
+        });
+
+        // Mehrheitsbeschluss
+        const isPassed = yesSeats > noSeats;
+        const finalStatus = isPassed ? 'passed' : 'rejected';
+
+        await lawsCollection.updateOne(
+            { _id: law._id },
+            { $set: { status: finalStatus, yesSeats, noSeats, resolvedAt: new Date() } }
+        );
+
+        // LNN News
+        await newsCollection.insertOne({
+            headline: isPassed ? "GESETZ VERABSCHIEDET! ⚖️" : "GESETZ GESCHEITERT! ❌",
+            content: `Das Gesetz "${law.title}" wurde mit ${yesSeats} zu ${noSeats} Sitzen ${isPassed ? 'angenommen' : 'abgelehnt'}.`,
+            author: "LNN Politik", category: "Politik", createdAt: new Date(), likes: 0
+        });
+        if (typeof updateDataVersion === 'function') updateDataVersion('news');
+
+        res.json({ message: `Abstimmung beendet! Ergebnis: ${yesSeats} JA, ${noSeats} NEIN.` });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Zählen der Mandate." });
+    }
+});
+
 // =========================================================
-// === 🧠 LIMO KAHOOT (QUIZ P2P & EDITOR) ===
+// === LIMO KAHOOT (QUIZ P2P & EDITOR) ===
 // =========================================================
 
 // 1. Editor: Quiz erstellen/speichern
