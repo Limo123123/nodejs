@@ -21951,8 +21951,10 @@ app.get('/api/quiz/sync/:roomCode', isAuthenticated, async (req, res) => {
         signals: mySignals, 
         guests: room.guests, 
         hostName: room.hostName,
-        state: room.state, // Lässt das Frontend wissen, ob gerade eine Frage läuft
-        currentQuestionIndex: room.currentQuestionIndex
+        state: room.state,
+        currentQuestionIndex: room.currentQuestionIndex,
+        currentQuestion: room.quiz && room.quiz.questions ? room.quiz.questions[room.currentQuestionIndex || 0] : null,
+        leaderboard: room.leaderboard || null
     });
 });
 
