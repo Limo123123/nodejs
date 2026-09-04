@@ -162,7 +162,8 @@ const publicPaths = [
     '/health',
 	'/api/webauthn/login-options',
 	'/api/webauthn/login-verify',
-	'/api/oauth/authorize'
+	'/api/oauth/authorize',
+	'/api/oauth/token'
 ];
 
 app.use((req, res, next) => {
