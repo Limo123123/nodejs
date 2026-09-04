@@ -27,7 +27,7 @@
     "uuid": "^14.0.0",
 	"redis": "^5.11.0",
 	"cookie-parser": "^1.4.7",
-	"@simplewebauthn/server": "^9.0.0"
+	"@simplewebauthn/server": "^14.0.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"
