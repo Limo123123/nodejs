@@ -7172,7 +7172,7 @@ app.get('/api/system/stats', async (req, res) => {
 // 1. Authorize Seite
 app.get('/api/oauth/authorize', isAuthenticated, (req, res) => {
     const { client_id, redirect_uri, state } = req.query;
-    if (client_id !== 'limtube') return res.status(400).send("Unbekannte App.");
+    if (client_id !== 'fandub') return res.status(400).send("Unbekannte App.");
 
     const html = `
         <html><body style="font-family: sans-serif; background: #222; color: #fff; text-align: center; padding: 50px;">
