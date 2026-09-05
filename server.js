@@ -46,9 +46,9 @@ app.set('trust proxy', [
     'loopback',      // 127.0.0.1
     'linklocal',     // 169.254.0.0/16
     'uniquelocal',   // IPv6 lokale Adressen
-    '172.16.0.0/12', // Standard Docker Bridge Netzwerke
-    '10.0.0.0/8',    // Oft in Docker Swarm/K8s genutzt
-    '192.168.0.0/16' // Dein Heimnetzwerk (inkl. 192.168.178.183)
+    '172.16.0.0/12',
+    '10.0.0.0/8',
+    '192.168.0.0/16'
 ]);
 
 const HTTP_PORT = process.env.PORT || 10000;
@@ -97,8 +97,10 @@ if (!mongoUri) { console.error(`${LOG_PREFIX_SERVER} !!! FEHLER: Keine MongoDB U
 // --- Middleware ---
 const allowedOrigins = [
     frontendDevUrlHttp,
-    'https://raspberrypi.tail75d81e.ts.net:8443',
     'https://api.limazon.v6.rocks',
+    'https://lizse2.duckdns.org',
+    'https://app.limazon.v6.rocks',
+    'https://lizapp2.duckdns.org'
 ];
 if (frontendProdUrl) { allowedOrigins.push(frontendProdUrl); }
 console.log(`${LOG_PREFIX_SERVER} Erlaubte CORS Origins:`, allowedOrigins);
@@ -2682,7 +2684,9 @@ app.post('/api/auth/logout', (req, res) => {
     if (req.session) {
         req.session.destroy(err => {
             if (err) { console.error(`${LOG_PREFIX_SERVER} Logout fehlgeschlagen ${username} (Sess ${sessionId}):`, err); return res.status(500).json({ error: 'Logout fehlgeschlagen.' }); }
-            res.clearCookie('connect.sid', { path: '/', domain: process.env.NODE_ENV === 'production' && frontendProdUrl ? new URL(frontendProdUrl).hostname : undefined });
+            
+            res.clearCookie('connect.sid', { path: '/' });
+            
             console.log(`${LOG_PREFIX_SERVER} User ${username} (ehem. Sess ${sessionId}) ausgeloggt.`);
             res.json({ message: 'Logout erfolgreich!' });
         });
@@ -19049,13 +19053,28 @@ const {
 // === PASSKEYS (WEBAUTHN) SYSTEM ===========
 // ==========================================
 
+const {
+    generateRegistrationOptions,
+    verifyRegistrationResponse,
+    generateAuthenticationOptions,
+    verifyAuthenticationResponse
+} = require('@simplewebauthn/server');
+
 const rpName = 'Limazon Universe';
-const expectedOrigin = process.env.FRONTEND_URL || 'https://app.limazon.v6.rocks';
-const rpID = new URL(expectedOrigin).hostname;
+
+// NEU: Dynamische Erkennung der Domain (damit Passkeys auf v6.rocks UND duckdns.org klappen)
+function getWebAuthnConfig(req) {
+    const origin = req.headers.origin || process.env.FRONTEND_URL || 'https://app.limazon.v6.rocks';
+    return {
+        expectedOrigin: origin,
+        rpID: new URL(origin).hostname
+    };
+}
 
 // --- 1. REGISTRIERUNG: Optionen abrufen (In den Account-Einstellungen) ---
 app.post('/api/webauthn/register-options', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
+    const { expectedOrigin, rpID } = getWebAuthnConfig(req);
     
     try {
         const user = await usersCollection.findOne({ _id: userId });
@@ -19066,7 +19085,6 @@ app.post('/api/webauthn/register-options', isAuthenticated, async (req, res) => 
             rpID,
             userID: user._id.toString(),
             userName: user.username,
-            // Verhindert, dass man dasselbe Gerät 2x registriert
             excludeCredentials: userPasskeys.map(key => ({
                 id: key.credentialID,
                 type: 'public-key',
@@ -19078,7 +19096,6 @@ app.post('/api/webauthn/register-options', isAuthenticated, async (req, res) => 
             },
         });
 
-        // Wir müssen die Challenge kurz in der DB speichern, um sie im nächsten Schritt zu prüfen
         await usersCollection.updateOne(
             { _id: userId },
             { $set: { currentWebAuthnChallenge: options.challenge } }
@@ -19093,7 +19110,8 @@ app.post('/api/webauthn/register-options', isAuthenticated, async (req, res) => 
 // --- 2. REGISTRIERUNG: Verifizieren und speichern ---
 app.post('/api/webauthn/register-verify', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
-    const body = req.body; // Das Objekt, das vom Browser (Fingerabdruck) zurückkommt
+    const body = req.body;
+    const { expectedOrigin, rpID } = getWebAuthnConfig(req);
 
     try {
         const user = await usersCollection.findOne({ _id: userId });
@@ -19117,21 +19135,20 @@ app.post('/api/webauthn/register-verify', isAuthenticated, async (req, res) => {
 
         if (verified && registrationInfo) {
             const { credentialPublicKey, credentialID, counter } = registrationInfo;
-
             const newPasskey = {
-                // Wir speichern die rohen Buffer-Daten als Base64 Strings, damit MongoDB nicht meckert
                 credentialID: Buffer.from(credentialID).toString('base64url'),
                 credentialPublicKey: Buffer.from(credentialPublicKey).toString('base64url'),
                 counter,
                 transports: body.response.transports || [],
-                addedAt: new Date()
+                addedAt: new Date(),
+                domain: rpID // Wir merken uns zur Sicherheit, auf welcher Domain er erstellt wurde
             };
 
             await usersCollection.updateOne(
                 { _id: userId },
                 { 
                     $push: { passkeys: newPasskey },
-                    $unset: { currentWebAuthnChallenge: "" } // Challenge aufräumen
+                    $unset: { currentWebAuthnChallenge: "" } 
                 }
             );
 
@@ -19146,13 +19163,13 @@ app.post('/api/webauthn/register-verify', isAuthenticated, async (req, res) => {
 
 // --- 3. LOGIN: Optionen abrufen (Auf der index.html) ---
 app.get('/api/webauthn/login-options', async (req, res) => {
+    const { rpID } = getWebAuthnConfig(req);
     try {
         const options = await generateAuthenticationOptions({
             rpID,
             userVerification: 'preferred',
         });
 
-        // Wir speichern die Challenge in der Session des noch nicht eingeloggten Users
         req.session.currentWebAuthnChallenge = options.challenge;
         res.json(options);
     } catch (e) {
@@ -19164,9 +19181,9 @@ app.get('/api/webauthn/login-options', async (req, res) => {
 app.post('/api/webauthn/login-verify', async (req, res) => {
     const body = req.body; 
     const expectedChallenge = req.session.currentWebAuthnChallenge;
+    const { expectedOrigin, rpID } = getWebAuthnConfig(req);
 
     try {
-        // Wir suchen den User anhand der einzigartigen Passkey/Geräte-ID in der Datenbank
         const user = await usersCollection.findOne({ "passkeys.credentialID": body.id });
         if (!user) {
             return res.status(400).json({ error: "Kein Limazon-Account zu diesem Gerät gefunden." });
@@ -19186,15 +19203,14 @@ app.post('/api/webauthn/login-verify', async (req, res) => {
                     credentialID: Buffer.from(passkey.credentialID, 'base64url'),
                     counter: passkey.counter,
                 },
-				requireUserVerification: false
+                requireUserVerification: false
             });
         } catch (error) {
             console.error(error);
-            return res.status(400).json({ error: 'Fingerabdruck abgelehnt.' });
+            return res.status(400).json({ error: 'Fingerabdruck abgelehnt. Hast du diesen Passkey evtl. für eine andere Domain erstellt?' });
         }
 
         if (verification.verified) {
-            // Sicherheits-Counter des Schlüssels updaten
             await usersCollection.updateOne(
                 { _id: user._id, "passkeys.credentialID": passkey.credentialID },
                 { 
@@ -19203,7 +19219,6 @@ app.post('/api/webauthn/login-verify', async (req, res) => {
                 }
             );
 
-            // User offiziell in die Session einloggen
             req.session.userId = user._id;
             req.session.username = user.username;
             req.session.isAdmin = user.isAdmin;
