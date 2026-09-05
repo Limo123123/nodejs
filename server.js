@@ -19042,13 +19042,6 @@ app.post('/api/event/spin-wheel', isAuthenticated, async (req, res) => {
     }
 });
 
-const {
-    generateRegistrationOptions,
-    verifyRegistrationResponse,
-    generateAuthenticationOptions,
-    verifyAuthenticationResponse
-} = require('@simplewebauthn/server');
-
 // ==========================================
 // === PASSKEYS (WEBAUTHN) SYSTEM ===========
 // ==========================================
@@ -19062,7 +19055,7 @@ const {
 
 const rpName = 'Limazon Universe';
 
-// NEU: Dynamische Erkennung der Domain (damit Passkeys auf v6.rocks UND duckdns.org klappen)
+// Dynamische Erkennung der Domain (damit Passkeys auf v6.rocks UND duckdns.org klappen)
 function getWebAuthnConfig(req) {
     const origin = req.headers.origin || process.env.FRONTEND_URL || 'https://app.limazon.v6.rocks';
     return {
