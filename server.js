@@ -98,7 +98,7 @@ if (!mongoUri) { console.error(`${LOG_PREFIX_SERVER} !!! FEHLER: Keine MongoDB U
 const allowedOrigins = [
     frontendDevUrlHttp,
     frontendProdUrl,
-    'https://api.liz.slimo.dev'
+    'https://api-liz.slimo.dev'
 ];
 
 if (frontendProdUrl) { allowedOrigins.push(frontendProdUrl); }
