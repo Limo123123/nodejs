@@ -97,11 +97,10 @@ if (!mongoUri) { console.error(`${LOG_PREFIX_SERVER} !!! FEHLER: Keine MongoDB U
 // --- Middleware ---
 const allowedOrigins = [
     frontendDevUrlHttp,
-    'https://api.limazon.v6.rocks',
-    'https://lizse2.duckdns.org',
-    'https://app.limazon.v6.rocks',
-    'https://lizapp2.duckdns.org'
+    frontendProdUrl,
+    'https://api.liz.slimo.dev'
 ];
+
 if (frontendProdUrl) { allowedOrigins.push(frontendProdUrl); }
 console.log(`${LOG_PREFIX_SERVER} Erlaubte CORS Origins:`, allowedOrigins);
 
@@ -19055,9 +19054,9 @@ const {
 
 const rpName = 'Limazon Universe';
 
-// Dynamische Erkennung der Domain (damit Passkeys auf v6.rocks UND duckdns.org klappen)
+// Dynamische Erkennung der Domain
 function getWebAuthnConfig(req) {
-    const origin = req.headers.origin || process.env.FRONTEND_URL || 'https://app.limazon.v6.rocks';
+    const origin = req.headers.origin || process.env.FRONTEND_URL || 'https://app.liz.slimo.dev';
     return {
         expectedOrigin: origin,
         rpID: new URL(origin).hostname
