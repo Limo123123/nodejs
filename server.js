@@ -20358,7 +20358,7 @@ app.get('/api/limtube/channel/:username', isAuthenticated, async (req, res) => {
         if (uploaderDoc) {
             subCount = uploaderDoc.subscribers ? uploaderDoc.subscribers.length : 0;
             if (uploaderDoc.subscribers && currentUserId) {
-                isSubscribed = uploaderDoc.subscribers.some(id => id.equals(new ObjectId(currentUserId)));
+                isSubscribed = uploaderDoc.subscribers.some(id => id && String(id) === String(currentUserId));
             }
         }
 
