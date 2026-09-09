@@ -11257,6 +11257,7 @@ app.get('/api/court/status', isAuthenticated, async (req, res) => {
                 isOvertime: isOvertime,       
                 votesNeeded: Math.max(0, MIN_VOTES - total) 
             };
+		}
 
         // Archiv laden
         const archive = await db.collection('courtCases')
