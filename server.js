@@ -11002,6 +11002,9 @@ const BASE_DURATION = 24 * 60 * 60 * 1000; // 24 Stunden Standard
 const MAX_DURATION = 120 * 60 * 60 * 1000; // 5 Tage Maximum (Hard Limit)
 const MIN_VOTES = 3;     // Mindestens 3 Stimmen für reguläres Ende
 
+// =========================================================
+// === KI RICHTER LIMO (LOGIK) ===
+// =========================================================
 async function triggerAiJudge(caseId, isInitial = false) {
     const GROQ_API_KEY = process.env.GROQ_API_KEY;
     if (!GROQ_API_KEY) return;
@@ -11045,12 +11048,12 @@ ${logData}
 AUFGABE:
 Bewerte die Argumente. Setze "action" auf "speak", um Nachfragen zu stellen oder die Parteien zu belehren.
 Wenn der Fall für dich klar ist, setze "action" auf "verdict" und urteile ("guilty" oder "innocent" für den Angeklagten).
-DU HAST DIE MACHT ÜBER DAS GELD! Du kannst eine Strafzahlung (fineAmount) in Limo-Dollar festlegen. Du bestimmst auch, wer das Geld bekommt (fineRecipient). Du kannst den Angeklagten zwingen, den Kläger zu bezahlen ("plaintiff") oder umgekehrt ("accused"), wenn die Klage lächerlich war. Strafen dürfen die Konten gnadenlos ins Minus treiben!
+DU HAST DIE MACHT ÜBER DAS GELD! Du kannst eine Strafzahlung (fineAmount) in Limo-Dollar festlegen. Du bestimmst auch, wer das Geld bekommt (fineRecipient). Du kannst den Angeklagten zwingen, den Kläger zu bezahlen ("plaintiff") oder umgekehrt ("accused"). Strafen dürfen die Konten gnadenlos ins Minus treiben!
 
-WICHTIGE LIMITIERUNGEN:
-- Fordere NIEMALS Bilder, Screenshots, Videos, Links oder sonstige Dateien als Beweis.
-- Die User haben nur ein einfaches Textfeld zur Verfügung.
-- Stütze dich AUSSCHLIESSLICH auf ihre textlichen Argumente, Zeugenaussagen im Chat und die mitgelieferten Server-Logs. Wer logisch am besten argumentiert, gewinnt.
+WICHTIGE LIMITIERUNGEN (JSON SYNTAX):
+- Fordere NIEMALS Bilder, Screenshots, Videos oder Links als Beweis.
+- Stütze dich AUSSCHLIESSLICH auf ihre textlichen Argumente und die Server-Logs.
+- ACHTUNG: Schreibe absolut fehlerfreies JSON! Mache KEINE echten Zeilenumbrüche im Text (nutze \\n) und maskiere doppelte Anführungszeichen im Text zwingend (\\").
 
 WICHTIG: Antworte AUSSCHLIESSLICH im JSON-Format!
 {
@@ -11074,18 +11077,32 @@ WICHTIG: Antworte AUSSCHLIESSLICH im JSON-Format!
             messages.push({ role: "user", content: "Der Fall wurde gerade eröffnet. Eröffne die Sitzung, nenne die Anklage und fordere den Kläger/Anwalt zum ersten Argument auf." });
         }
 
-        // 4. Groq API aufrufen
+        // 4. Groq API aufrufen (Tokens auf 1000 erhöht!)
         const aiRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
-            model: "openai/gpt-oss-120b",
+            model: "openai/gpt-oss-120b", // Falls das Modell zickt, kannst du auch "llama3-70b-8192" probieren
             messages: messages,
             temperature: 0.7,
-            max_tokens: 500
+            max_tokens: 1000 
         }, {
             headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' }
         });
 
-        const rawText = aiRes.data.choices[0].message.content.replace(/```json/gi, '').replace(/```/g, '').trim();
-        const response = JSON.parse(rawText);
+        let rawText = aiRes.data.choices[0].message.content;
+        rawText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
+
+        let response;
+        try {
+            response = JSON.parse(rawText);
+        } catch (parseError) {
+            console.error(`${LOG_PREFIX_SERVER} AI JSON Parse Error. Raw Output war:`, rawText);
+            response = {
+                action: "speak",
+                verdict: null,
+                fineAmount: 0,
+                fineRecipient: "state",
+                message: "Das Gerichts-Protokollgerät hat sich verklemmt (Syntax Fehler). Bitte wiederholen Sie das letzte Argument."
+            };
+        }
 
         await db.collection('courtCases').updateOne(
             { _id: courtCase._id },
