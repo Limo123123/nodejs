@@ -1378,7 +1378,7 @@ const ENDPOINT_PERMISSIONS = {
     'POST /api/admin/ideas/ban-user': 'manage_ideas',
     'POST /api/admin/ideas/unban-user': 'manage_ideas',
 
-    // --- Bug Bounty --- // NEU HINZUGEFÜGT
+    // --- Bug Bounty ---
     'GET /api/admin/bugs': 'manage_bugs',
     'POST /api/admin/bugs/:id/resolve': 'manage_bugs',
 
@@ -1399,7 +1399,7 @@ const ENDPOINT_PERMISSIONS = {
     'GET /api/human/admin/raters/:userId': 'manage_human_ratings',
     'DELETE /api/human/admin/ratings/:id': 'manage_human_ratings',
 
-    // --- Limea --- // NEU HINZUGEFÜGT
+    // --- Limea ---
     'DELETE /api/limea/admin/layouts/:id': 'manage_limea',
 
     // --- Wirtschaft ---
@@ -1447,6 +1447,7 @@ const ENDPOINT_PERMISSIONS = {
 	'GET /api/admin/requests': 'manage_requests',
 	'POST /api/admin/requests/:id/process': 'manage_requests',
 	'POST /api/admin/system/resurrect-pets': 'manage_pets',
+	'DELETE /api/admin/court/cases/:id': 'manage_users_critical',
 };
 
 // 3. VORGEFERTIGTE GRUPPEN (ROLES)
@@ -7229,7 +7230,8 @@ let dataVersions = {
     products: Date.now(),
     chat: Date.now(),
     news: Date.now(),
-    stonks: Date.now()
+    stonks: Date.now(),
+	court: Date.now()
 };
 
 // Hilfsfunktion zum Aktualisieren (wird in anderen Funktionen aufgerufen)
@@ -9473,7 +9475,7 @@ app.post('/api/tinda/child/:chatId/feed', isAuthenticated, async (req, res) => {
     }
 });
 
-// NEU: Heiraten und Zusammenziehen
+// Heiraten und Zusammenziehen
 app.post('/api/tinda/chat/:chatId/marry', isAuthenticated, isChatParticipant, async (req, res) => {
     const chatId = new ObjectId(req.params.chatId);
     const userId = new ObjectId(req.session.userId);
@@ -10992,13 +10994,140 @@ app.post('/api/yakuza/buy', isAuthenticated, async (req, res) => {
 });
 
 // =========================================================
-// === ⚖️ LIMO COURT SYSTEM (UPDATED) ===
+// === ⚖️ LIMO COURT SYSTEM ===
 // =========================================================
 
 const COURT_FEE = 5000;
 const BASE_DURATION = 24 * 60 * 60 * 1000; // 24 Stunden Standard
 const MAX_DURATION = 120 * 60 * 60 * 1000; // 5 Tage Maximum (Hard Limit)
-const MIN_VOTES = 3;                       // Mindestens 3 Stimmen für reguläres Ende
+const MIN_VOTES = 3;     // Mindestens 3 Stimmen für reguläres Ende
+
+async function triggerAiJudge(caseId, isInitial = false) {
+    const GROQ_API_KEY = process.env.GROQ_API_KEY;
+    if (!GROQ_API_KEY) return;
+
+    try {
+        const courtCase = await db.collection('courtCases').findOne({ _id: new ObjectId(caseId) });
+        if (!courtCase || courtCase.status !== 'active' || courtCase.trialType !== 'ai') return;
+
+        // 1. Kontostände der Parteien laden
+        const accused = await usersCollection.findOne({ _id: courtCase.accusedId });
+        const plaintiff = await usersCollection.findOne({ _id: courtCase.plaintiffId });
+        
+        const accusedBalance = accused ? accused.balance : 0;
+        const plaintiffBalance = plaintiff ? plaintiff.balance : 0;
+
+        // 2. Beweismittel sammeln
+        const logs = await db.collection('activityLogs')
+            .find({ userId: { $in: [courtCase.accusedId, courtCase.plaintiffId] } })
+            .sort({ timestamp: -1 })
+            .limit(15)
+            .toArray();
+        
+        let logData = logs.length > 0 
+            ? logs.map(l => `[${l.username}] ${l.action}: ${JSON.stringify(l.details)}`).join('\n')
+            : "Keine Server-Einträge gefunden.";
+
+        // 3. System Prompt mit Kontoständen & Straf-Optionen
+        const systemPrompt = `Du bist Richter Limo, eine unbestechliche, zynische KI-Justitia im Limo Court.
+Dein Job ist es, Anhörungen zu leiten, Beweise zu prüfen und ein Urteil zu fällen.
+Es gilt das Limische Gesetzbuch. Wichtigste Regel: Kriminalität ist legitim, aber wenn man erwischt wird, zahlt man drauf!
+
+Falldaten:
+Kläger: ${courtCase.plaintiffName} (Kontostand: $${plaintiffBalance.toFixed(2)}) (Anwalt: ${courtCase.plaintiffLawyerName || 'Kein Anwalt'})
+Angeklagter: ${courtCase.accusedName} (Kontostand: $${accusedBalance.toFixed(2)}) (Anwalt: ${courtCase.accusedLawyerName || 'Kein Anwalt'})
+Anklage: ${courtCase.crime}
+Details: ${courtCase.description}
+
+Server-Log (Beweise):
+${logData}
+
+AUFGABE:
+Bewerte die Argumente. Setze "action" auf "speak", um Nachfragen zu stellen oder die Parteien zu belehren.
+Wenn der Fall für dich klar ist, setze "action" auf "verdict" und urteile ("guilty" oder "innocent" für den Angeklagten).
+DU HAST DIE MACHT ÜBER DAS GELD! Du kannst eine Strafzahlung (fineAmount) in Limo-Dollar festlegen. Du bestimmst auch, wer das Geld bekommt (fineRecipient). Du kannst den Angeklagten zwingen, den Kläger zu bezahlen ("plaintiff") oder umgekehrt ("accused"), wenn die Klage lächerlich war. Strafen dürfen die Konten gnadenlos ins Minus treiben!
+
+WICHTIG: Antworte AUSSCHLIESSLICH im JSON-Format!
+{
+  "action": "speak" oder "verdict",
+  "verdict": "guilty" oder "innocent" oder null,
+  "fineAmount": 0, // Die Höhe der Strafzahlung als Zahl (0 wenn keine)
+  "fineRecipient": "plaintiff" oder "accused" oder "state", // Wer bekommt das Geld?
+  "message": "Deine Rede als Richter (Ich-Form, direkt, zynisch, juristisch)."
+}`;
+
+        const messages = [{ role: 'system', content: systemPrompt }];
+
+        (courtCase.arguments || []).forEach(arg => {
+            messages.push({ 
+                role: arg.isJudge ? 'assistant' : 'user', 
+                content: `[${arg.role} | ${arg.speaker}] sagt: ${arg.text}` 
+            });
+        });
+
+        if (isInitial) {
+            messages.push({ role: "user", content: "Der Fall wurde gerade eröffnet. Eröffne die Sitzung, nenne die Anklage und fordere den Kläger/Anwalt zum ersten Argument auf." });
+        }
+
+        // 4. Groq API aufrufen
+        const aiRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
+            model: "openai/gpt-oss-120b",
+            messages: messages,
+            temperature: 0.7,
+            max_tokens: 500
+        }, {
+            headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' }
+        });
+
+        const rawText = aiRes.data.choices[0].message.content.replace(/```json/gi, '').replace(/```/g, '').trim();
+        const response = JSON.parse(rawText);
+
+        await db.collection('courtCases').updateOne(
+            { _id: courtCase._id },
+            { $push: { arguments: { speaker: 'Richter Limo', role: 'Richter', text: response.message, timestamp: new Date(), isJudge: true } } }
+        );
+
+        // 5. Urteils-Verarbeitung (inkl. Geldtransfers ins Minus!)
+        if (response.action === 'verdict') {
+            const isGuilty = response.verdict === 'guilty';
+            const fineAmount = parseFloat(response.fineAmount) || 0;
+            const recipient = response.fineRecipient || 'state';
+
+            await db.collection('courtCases').updateOne(
+                { _id: courtCase._id },
+                { $set: { status: 'closed', verdict: response.verdict, closedAt: new Date(), aiVerdict: true, fineAmount: fineAmount, fineRecipient: recipient } }
+            );
+
+            // Geld verschieben (ohne Balance-Check, treibt den Zahler ins Minus!)
+            if (fineAmount > 0) {
+                if (recipient === 'plaintiff') {
+                    await usersCollection.updateOne({ _id: courtCase.accusedId }, { $inc: { balance: -fineAmount } });
+                    await usersCollection.updateOne({ _id: courtCase.plaintiffId }, { $inc: { balance: fineAmount } });
+                } else if (recipient === 'accused') {
+                    await usersCollection.updateOne({ _id: courtCase.plaintiffId }, { $inc: { balance: -fineAmount } });
+                    await usersCollection.updateOne({ _id: courtCase.accusedId }, { $inc: { balance: fineAmount } });
+                } else if (recipient === 'state') {
+                    const loserId = isGuilty ? courtCase.accusedId : courtCase.plaintiffId;
+                    await usersCollection.updateOne({ _id: loserId }, { $inc: { balance: -fineAmount } });
+                    await systemSettingsCollection.updateOne({ id: 'state_treasury' }, { $inc: { balance: fineAmount } }, { upsert: true });
+                }
+            }
+            
+            // Breaking News
+            await newsCollection.insertOne({
+                headline: `KI-RICHTER HAT GEURTEILT: ${isGuilty ? 'SCHULDIG!' : 'FREISPRUCH!'} ⚖️`,
+                content: `Richter Limo hat entschieden! ${courtCase.accusedName} ist ${isGuilty ? 'schuldig' : 'unschuldig'}. Strafe: $${fineAmount.toLocaleString()}. Richter Limo: "${response.message.substring(0,80)}..."`,
+                author: "LNN Justiz", category: "Justiz", createdAt: new Date(), likes: 0
+            });
+            if (typeof updateDataVersion === 'function') updateDataVersion('news');
+        }
+
+        if (typeof updateDataVersion === 'function') updateDataVersion('court');
+
+    } catch (e) {
+        console.error(`${LOG_PREFIX_SERVER} AI Judge Fehler:`, e.message);
+    }
+}
 
 app.get('/api/court/status', isAuthenticated, async (req, res) => {
     try {
@@ -11108,10 +11237,14 @@ app.get('/api/court/status', isAuthenticated, async (req, res) => {
                 id: activeCase._id,
                 accused: activeCase.accusedName,
                 accusedAvatar: `https://ui-avatars.com/api/?name=${activeCase.accusedName}&background=333&color=fff`,
+                accusedLawyer: activeCase.accusedLawyerName,
                 plaintiff: activeCase.plaintiffName,
                 plaintiffAvatar: `https://ui-avatars.com/api/?name=${activeCase.plaintiffName}&background=111&color=fff`,
+                plaintiffLawyer: activeCase.plaintiffLawyerName,
                 crime: activeCase.crime,
                 description: activeCase.description,
+                trialType: activeCase.trialType || 'jury',
+                arguments: activeCase.arguments || [],
                 stats: {
                     guilty: gCount,
                     innocent: iCount,
@@ -11120,11 +11253,10 @@ app.get('/api/court/status', isAuthenticated, async (req, res) => {
                     innocentPerc: total > 0 ? Math.round((iCount / total) * 100) : 50
                 },
                 myVote: myVote,
-                endsAt: endsAt.toISOString(), // Für den Countdown
-                isOvertime: isOvertime,       // Flag für UI Warnung
-                votesNeeded: Math.max(0, MIN_VOTES - total) // Wie viele fehlen noch?
+                endsAt: endsAt.toISOString(), 
+                isOvertime: isOvertime,       
+                votesNeeded: Math.max(0, MIN_VOTES - total) 
             };
-        }
 
         // Archiv laden
         const archive = await db.collection('courtCases')
@@ -11152,39 +11284,58 @@ app.get('/api/court/status', isAuthenticated, async (req, res) => {
 // 2. POST: Einen neuen Fall einreichen
 app.post('/api/court/file', isAuthenticated, async (req, res) => {
     try {
-        const { accused, crime, description } = req.body;
+        // trialType kann 'jury' oder 'ai' sein. lawyer ist ein optionaler Username
+        const { accused, crime, description, trialType, lawyer } = req.body;
         const userId = new ObjectId(req.session.userId);
         const user = await usersCollection.findOne({ _id: userId });
 
-        // Gebühr checken
         if (user.balance < COURT_FEE) {
             return res.status(400).json({ error: `Anklage kostet $${COURT_FEE}. Du bist zu arm für Gerechtigkeit.` });
         }
 
-        // Angeklagten suchen
         const target = await usersCollection.findOne({ username: { $regex: new RegExp(`^${accused}$`, 'i') } });
         if (!target) return res.status(404).json({ error: "Dieser User existiert nicht." });
         if (target._id.toString() === userId.toString()) return res.status(400).json({ error: "Du kannst dich nicht selbst verklagen." });
 
-        // Geld abziehen
+        // Hat der Kläger einen Anwalt mitgebracht?
+        let plaintiffLawyerId = null;
+        let plaintiffLawyerName = null;
+        if (lawyer && lawyer.trim() !== '') {
+            const lUser = await usersCollection.findOne({ username: { $regex: new RegExp(`^${lawyer.trim()}$`, 'i') } });
+            if (lUser) {
+                plaintiffLawyerId = lUser._id;
+                plaintiffLawyerName = lUser.username;
+            }
+        }
+
         await usersCollection.updateOne({ _id: userId }, { $inc: { balance: -COURT_FEE } });
 
-        // Fall erstellen
         const newCase = {
             accusedId: target._id,
             accusedName: target.username,
+            accusedLawyerId: null,
+            accusedLawyerName: null,
             plaintiffId: userId,
             plaintiffName: user.username,
+            plaintiffLawyerId: plaintiffLawyerId,
+            plaintiffLawyerName: plaintiffLawyerName,
             crime: crime,
             description: description,
             status: 'active',
+            trialType: trialType === 'ai' ? 'ai' : 'jury',
+            arguments: [], // Der Gerichts-Chat
             createdAt: new Date(),
-            votes_guilty: [],   // Array von UserIDs
-            votes_innocent: [], // Array von UserIDs
-            voted_devices: []   // NEU: Speichert die Geräte-Fingerabdrücke
+            votes_guilty: [],
+            votes_innocent: [],
+            voted_devices: []
         };
 
-        await db.collection('courtCases').insertOne(newCase);
+        const result = await db.collection('courtCases').insertOne(newCase);
+
+        // KI Richter aktivieren (Begrüßung)
+        if (newCase.trialType === 'ai') {
+            triggerAiJudge(result.insertedId.toString(), true); 
+        }
 
         res.json({ success: true, message: "Anklage eingereicht. Der Fall liegt nun dem Gericht vor." });
 
@@ -11276,7 +11427,106 @@ app.post('/api/court/vote', isAuthenticated, async (req, res) => {
         res.status(500).json({ error: "Systemfehler bei der Stimmabgabe." });
     }
 });
+	
+// 4. Angeklagter ruft seinen Anwalt
+app.post('/api/court/lawyer/hire', isAuthenticated, async (req, res) => {
+    try {
+        const { caseId, lawyer } = req.body;
+        const userId = new ObjectId(req.session.userId);
 
+        const courtCase = await db.collection('courtCases').findOne({ _id: new ObjectId(caseId), status: 'active' });
+        if (!courtCase) return res.status(404).json({ error: "Fall nicht gefunden." });
+        if (!courtCase.accusedId.equals(userId)) return res.status(403).json({ error: "Nur der Angeklagte kann hier seinen Anwalt bestimmen." });
+
+        const lUser = await usersCollection.findOne({ username: { $regex: new RegExp(`^${lawyer.trim()}$`, 'i') } });
+        if (!lUser) return res.status(404).json({ error: "Dieser Anwalt existiert nicht." });
+
+        await db.collection('courtCases').updateOne(
+            { _id: courtCase._id },
+            { $set: { accusedLawyerId: lUser._id, accusedLawyerName: lUser.username } }
+        );
+
+        res.json({ success: true, message: `${lUser.username} vertritt dich nun vor Gericht.` });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler bei der Anwaltswahl." });
+    }
+});
+
+// 5. Im KI-Gericht argumentieren
+app.post('/api/court/argue', isAuthenticated, async (req, res) => {
+    try {
+        const { caseId, text } = req.body;
+        const userId = new ObjectId(req.session.userId);
+        const username = req.session.username;
+
+        if (!text || text.trim().length === 0) return res.status(400).json({ error: "Einspruch! Das Argument ist leer." });
+
+        const courtCase = await db.collection('courtCases').findOne({ _id: new ObjectId(caseId), status: 'active', trialType: 'ai' });
+        if (!courtCase) return res.status(404).json({ error: "Aktiver KI-Gerichtsfall nicht gefunden." });
+
+        // Identitätsprüfung: Darf der User hier überhaupt reden?
+        const isPlaintiff = courtCase.plaintiffId.equals(userId);
+        const isAccused = courtCase.accusedId.equals(userId);
+        const isPLawyer = courtCase.plaintiffLawyerId && courtCase.plaintiffLawyerId.equals(userId);
+        const isALawyer = courtCase.accusedLawyerId && courtCase.accusedLawyerId.equals(userId);
+
+        if (!isPlaintiff && !isAccused && !isPLawyer && !isALawyer) {
+            return res.status(403).json({ error: "Ruhe im Saal! Du bist an diesem Fall nicht beteiligt." });
+        }
+
+        // Rolle bestimmen für das UI und die KI
+        let role = "Zeuge";
+        if(isPlaintiff) role = "Kläger";
+        if(isAccused) role = "Angeklagter";
+        if(isPLawyer) role = "Anwalt des Klägers";
+        if(isALawyer) role = "Anwalt des Angeklagten";
+
+        const argument = {
+            speaker: username,
+            role: role,
+            text: text.trim().substring(0, 500),
+            timestamp: new Date(),
+            isJudge: false
+        };
+
+        await db.collection('courtCases').updateOne(
+            { _id: courtCase._id },
+            { $push: { arguments: argument } }
+        );
+
+        if (typeof updateDataVersion === 'function') updateDataVersion('court');
+        res.json({ success: true, message: "Argument zu den Akten genommen." });
+
+        // KI Richter auslösen (Asynchron, antwortet kurz danach im Chat)
+        triggerAiJudge(caseId, false);
+
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Argumentieren." });
+    }
+});
+
+// Admin: Gerichtsfall restlos löschen
+app.delete('/api/admin/court/cases/:id', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const caseId = new ObjectId(req.params.id);
+        const courtCase = await db.collection('courtCases').findOne({ _id: caseId });
+        
+        if (!courtCase) {
+            return res.status(404).json({ error: "Dieser Gerichtsfall existiert nicht." });
+        }
+
+        // Fall löschen
+        await db.collection('courtCases').deleteOne({ _id: caseId });
+        
+        console.log(`${LOG_PREFIX_SERVER} ⚖️ Admin ${req.session.username} hat den Gerichtsfall ${caseId} gelöscht.`);
+        res.json({ message: "Der Gerichtsfall wurde restlos aus den Archiven gelöscht." });
+
+    } catch (e) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Löschen der Gerichtsakte:`, e);
+        res.status(500).json({ error: "Fehler beim Löschen des Falles." });
+    }
+});
+	
 // =========================================================
 // === 🏴‍☠️ GANG SYSTEM BACKEND ===
 // =========================================================
