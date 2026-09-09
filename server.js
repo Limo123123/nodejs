@@ -11155,15 +11155,25 @@ app.get('/api/court/status', isAuthenticated, async (req, res) => {
     try {
         const userId = new ObjectId(req.session.userId);
 
-        // Suche aktiven Fall
-        const activeCase = await db.collection('courtCases').findOne(
+        // 1. Suche aktiven Fall
+        let activeCase = await db.collection('courtCases').findOne(
             { status: 'active' },
             { sort: { createdAt: 1 } }
         );
 
+        // 2. WICHTIG: Wenn kein aktiver Fall da ist, zeige den Kürzlich Geschlossenen (30 Min lang zum Nachlesen)
+        if (!activeCase) {
+            const thirtyMinsAgo = new Date(Date.now() - 30 * 60 * 1000);
+            activeCase = await db.collection('courtCases').findOne(
+                { status: 'closed', closedAt: { $gte: thirtyMinsAgo } },
+                { sort: { closedAt: -1 } }
+            );
+        }
+
         let caseData = null;
 
         if (activeCase) {
+            const isClosed = activeCase.status === 'closed';
             const gCount = (activeCase.votes_guilty || []).length;
             const iCount = (activeCase.votes_innocent || []).length;
             const total = gCount + iCount;
@@ -11173,7 +11183,7 @@ app.get('/api/court/status', isAuthenticated, async (req, res) => {
             if (activeCase.votes_guilty?.map(id => id.toString()).includes(userId.toString())) myVote = 'guilty';
             if (activeCase.votes_innocent?.map(id => id.toString()).includes(userId.toString())) myVote = 'innocent';
 
-            // --- ZEIT & ENDE LOGIK ---
+            // --- ZEIT & ENDE LOGIK (Nur wenn aktiv) ---
             const now = new Date();
             const created = new Date(activeCase.createdAt);
             const isAI = activeCase.trialType === 'ai';
@@ -11181,132 +11191,51 @@ app.get('/api/court/status', isAuthenticated, async (req, res) => {
             let endsAt = null;
             let isOvertime = false;
 
-            // ==========================================
-            // A) KI-VERFAHREN TIMEOUT (2 Stunden Inaktivität)
-            // ==========================================
-            if (isAI) {
-                const AI_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 Stunden Frist
-                const lastActivity = activeCase.arguments && activeCase.arguments.length > 0
-                    ? new Date(activeCase.arguments[activeCase.arguments.length - 1].timestamp)
-                    : created;
+            if (!isClosed) {
+                if (isAI) {
+                    const AI_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+                    const lastActivity = activeCase.arguments && activeCase.arguments.length > 0
+                        ? new Date(activeCase.arguments[activeCase.arguments.length - 1].timestamp)
+                        : created;
 
-                if (now.getTime() - lastActivity.getTime() > AI_TIMEOUT_MS) {
-                    // Richter Limo fällt ein Versäumnisurteil wegen Untätigkeit
-                    await db.collection('courtCases').updateOne(
-                        { _id: activeCase._id },
-                        { 
-                            $set: { 
-                                status: 'closed', 
-                                verdict: 'innocent', 
-                                closedAt: now,
-                                aiVerdict: true 
-                            },
-                            $push: { 
-                                arguments: { 
-                                    speaker: 'Richter Limo', 
-                                    role: 'Richter', 
-                                    text: 'Wegen anhaltender Untätigkeit und Missachtung des Gerichts stelle ich das Verfahren hiermit ein. Die Verhandlung ist beendet! Freispruch für den Angeklagten.', 
-                                    timestamp: now, 
-                                    isJudge: true 
-                                } 
-                            }
-                        }
-                    );
-
-                    // LNN News
-                    await newsCollection.insertOne({
-                        headline: `GERICHTSFALL WEGEN INAKTIVITÄT GESCHLOSSEN ⚖️`,
-                        content: `Richter Limo hat den Fall "${activeCase.crime}" wegen Untätigkeit der Parteien eingestellt. Verschwendet nicht die Zeit des Gerichts!`,
-                        author: "LNN Justiz", category: "Justiz", createdAt: new Date(), likes: 0
-                    });
-                    if (typeof updateDataVersion === 'function') updateDataVersion('news');
-
-                    return res.redirect('/api/court/status');
-                }
-            } 
-            // ==========================================
-            // B) JURY-VERFAHREN (Bestehende 24h / 5 Tage Logik)
-            // ==========================================
-            else {
-                endsAt = new Date(created.getTime() + BASE_DURATION);
-                const hardLimit = new Date(created.getTime() + MAX_DURATION);
-
-                // Ist die reguläre Zeit abgelaufen?
-                if (now > endsAt) {
-                    // Haben wir GENUG Stimmen ODER ist das Hard Limit erreicht?
-                    if (total >= MIN_VOTES || now > hardLimit) {
-
-                        // === FALL SCHLIESSEN ===
-                        let verdict = gCount > iCount ? 'guilty' : 'innocent';
-                        // Bei Gleichstand im Hard Limit: Freispruch (In dubio pro reo)
-                        if (gCount === iCount) verdict = 'innocent';
-
+                    if (now.getTime() - lastActivity.getTime() > AI_TIMEOUT_MS) {
                         await db.collection('courtCases').updateOne(
                             { _id: activeCase._id },
-                            { $set: { status: 'closed', verdict: verdict, closedAt: now } }
+                            { 
+                                $set: { status: 'closed', verdict: 'innocent', closedAt: now, aiVerdict: true },
+                                $push: { arguments: { speaker: 'Richter Limo', role: 'Richter', text: 'Wegen Inaktivität eingestellt. Freispruch.', timestamp: now, isJudge: true } }
+                            }
                         );
+                        return res.redirect('/api/court/status');
+                    }
+                } else {
+                    endsAt = new Date(created.getTime() + BASE_DURATION);
+                    const hardLimit = new Date(created.getTime() + MAX_DURATION);
 
-                        // Strafe vollstrecken
-                        if (verdict === 'guilty') {
-                            // WENN ES EIN SORGERECHTSSTREIT IST
-                            if (activeCase.isCustodyBattle) {
-                                const loser = await usersCollection.findOne({ username: activeCase.accusedName });
-                                if (loser) {
-                                    const moneyLoss = Math.floor(loser.balance * 0.5);
-                                    const tokenLoss = Math.floor((loser.tokens || 0) * 0.5);
+                    if (now > endsAt) {
+                        if (total >= MIN_VOTES || now > hardLimit) {
+                            let verdict = gCount > iCount ? 'guilty' : 'innocent';
+                            if (gCount === iCount) verdict = 'innocent';
 
-                                    // 50% Geld, 50% Tokens abziehen & Scheidung durchziehen
-                                    await usersCollection.updateOne(
-                                        { _id: loser._id },
-                                        { 
-                                            $inc: { balance: -moneyLoss, tokens: -tokenLoss },
-                                            $unset: { isMarriedTo: "" }
-                                        }
-                                    );
-
-                                    // Kindes-Chats und Familienchat löschen
-                                    await limChatsCollection.deleteMany({ participants: loser._id, type: { $in: ['tinda_child', 'tinda_family'] } });
-                                    // Hauptchat auf geschieden setzen und Kinder löschen
-                                    await limChatsCollection.updateOne({ _id: activeCase.childChatId }, { $set: { isMarried: false, children: [] } });
-
-                                    // LNN News
-                                    await newsCollection.insertOne({
-                                        headline: "SORGERECHT VERLOREN! 📉💔",
-                                        content: `${activeCase.accusedName} hat das Sorgerecht an ${activeCase.plaintiffName} verloren! Das Gericht hat das Kind zugesprochen und direkt 50% des Geldes ($${moneyLoss.toLocaleString()}) und ${tokenLoss.toLocaleString()} Tokens als Unterhalt gepfändet!`,
-                                        author: "LNN Justiz", category: "Justiz", createdAt: new Date(), likes: 0
-                                    });
-                                    if (typeof updateDataVersion === 'function') updateDataVersion('news');
-                                }
-                            } else {
-                                // NORMALE STRAFE (10% für reguläre Anklagen)
-                                await usersCollection.updateOne(
-                                    { username: activeCase.accusedName },
-                                    { $mul: { balance: 0.9 } } // 10% Strafe
-                                );
-                            }
-                        } else if (verdict === 'innocent' && activeCase.isCustodyBattle) {
-                            // Bei Unschuld im Sorgerechtsstreit behält der User das Kind und die Scheidung ist einfach durch
-                            const winner = await usersCollection.findOne({ username: activeCase.accusedName });
-                            if (winner) {
-                                await usersCollection.updateOne({ _id: winner._id }, { $unset: { isMarriedTo: "" } });
-                                await limChatsCollection.updateOne({ _id: activeCase.childChatId }, { $set: { isMarried: false } });
-                            }
+                            await db.collection('courtCases').updateOne(
+                                { _id: activeCase._id },
+                                { $set: { status: 'closed', verdict: verdict, closedAt: now } }
+                            );
+                            return res.redirect('/api/court/status');
+                        } else {
+                            isOvertime = true;
+                            endsAt = hardLimit;
                         }
-
-                        return res.redirect('/api/court/status'); // Reload für nächsten Fall
-
-                    } else {
-                        isOvertime = true;
-                        endsAt = hardLimit;
                     }
                 }
             }
 
-            // ==========================================
-            // C) CASEDATA FÜR FRONTEND ZUSAMMENSTELLEN
-            // ==========================================
             caseData = {
                 id: activeCase._id,
+                status: activeCase.status, // 'active' oder 'closed'
+                verdict: activeCase.verdict, // 'guilty' oder 'innocent'
+                fineAmount: activeCase.fineAmount || 0,
+                fineRecipient: activeCase.fineRecipient || 'state',
                 accused: activeCase.accusedName,
                 accusedAvatar: `https://ui-avatars.com/api/?name=${activeCase.accusedName}&background=333&color=fff`,
                 accusedLawyer: activeCase.accusedLawyerName,
@@ -11329,17 +11258,14 @@ app.get('/api/court/status', isAuthenticated, async (req, res) => {
                 isOvertime: isOvertime,       
                 votesNeeded: Math.max(0, MIN_VOTES - total) 
             };
-
         }
 
-        // Archiv laden
         const archive = await db.collection('courtCases')
             .find({ status: 'closed' })
             .sort({ closedAt: -1 })
             .limit(5)
             .toArray();
 
-        // Hole Admin-Status des anfragenden Users für das UI
         const requestingUser = await usersCollection.findOne({ _id: userId }, { projection: { isAdmin: 1 } });
 
         res.json({
