@@ -11159,85 +11159,135 @@ app.get('/api/court/status', isAuthenticated, async (req, res) => {
             // --- ZEIT & ENDE LOGIK ---
             const now = new Date();
             const created = new Date(activeCase.createdAt);
-
-            // Wann wäre das reguläre Ende?
-            let endsAt = new Date(created.getTime() + BASE_DURATION);
-            const hardLimit = new Date(created.getTime() + MAX_DURATION);
-
+            const isAI = activeCase.trialType === 'ai';
+            
+            let endsAt = null;
             let isOvertime = false;
 
-            // Ist die reguläre Zeit abgelaufen?
-            if (now > endsAt) {
-                // Haben wir GENUG Stimmen ODER ist das Hard Limit erreicht?
-                if (total >= MIN_VOTES || now > hardLimit) {
+            // ==========================================
+            // A) KI-VERFAHREN TIMEOUT (2 Stunden Inaktivität)
+            // ==========================================
+            if (isAI) {
+                const AI_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 Stunden Frist
+                const lastActivity = activeCase.arguments && activeCase.arguments.length > 0
+                    ? new Date(activeCase.arguments[activeCase.arguments.length - 1].timestamp)
+                    : created;
 
-                    // === FALL SCHLIESSEN ===
-                    let verdict = gCount > iCount ? 'guilty' : 'innocent';
-                    // Bei Gleichstand im Hard Limit: Freispruch (In dubio pro reo)
-                    if (gCount === iCount) verdict = 'innocent';
-
+                if (now.getTime() - lastActivity.getTime() > AI_TIMEOUT_MS) {
+                    // Richter Limo fällt ein Versäumnisurteil wegen Untätigkeit
                     await db.collection('courtCases').updateOne(
                         { _id: activeCase._id },
-                        { $set: { status: 'closed', verdict: verdict, closedAt: now } }
+                        { 
+                            $set: { 
+                                status: 'closed', 
+                                verdict: 'innocent', 
+                                closedAt: now,
+                                aiVerdict: true 
+                            },
+                            $push: { 
+                                arguments: { 
+                                    speaker: 'Richter Limo', 
+                                    role: 'Richter', 
+                                    text: 'Wegen anhaltender Untätigkeit und Missachtung des Gerichts stelle ich das Verfahren hiermit ein. Die Verhandlung ist beendet! Freispruch für den Angeklagten.', 
+                                    timestamp: now, 
+                                    isJudge: true 
+                                } 
+                            }
+                        }
                     );
 
-                    // Strafe vollstrecken
-                    if (verdict === 'guilty') {
-                        // WENN ES EIN SORGERECHTSSTREIT IST
-                        if (activeCase.isCustodyBattle) {
-                            const loser = await usersCollection.findOne({ username: activeCase.accusedName });
-                            if (loser) {
-                                const moneyLoss = Math.floor(loser.balance * 0.5);
-                                const tokenLoss = Math.floor((loser.tokens || 0) * 0.5);
+                    // LNN News
+                    await newsCollection.insertOne({
+                        headline: `GERICHTSFALL WEGEN INAKTIVITÄT GESCHLOSSEN ⚖️`,
+                        content: `Richter Limo hat den Fall "${activeCase.crime}" wegen Untätigkeit der Parteien eingestellt. Verschwendet nicht die Zeit des Gerichts!`,
+                        author: "LNN Justiz", category: "Justiz", createdAt: new Date(), likes: 0
+                    });
+                    if (typeof updateDataVersion === 'function') updateDataVersion('news');
 
-                                // 50% Geld, 50% Tokens abziehen & Scheidung durchziehen
+                    return res.redirect('/api/court/status');
+                }
+            } 
+            // ==========================================
+            // B) JURY-VERFAHREN (Bestehende 24h / 5 Tage Logik)
+            // ==========================================
+            else {
+                endsAt = new Date(created.getTime() + BASE_DURATION);
+                const hardLimit = new Date(created.getTime() + MAX_DURATION);
+
+                // Ist die reguläre Zeit abgelaufen?
+                if (now > endsAt) {
+                    // Haben wir GENUG Stimmen ODER ist das Hard Limit erreicht?
+                    if (total >= MIN_VOTES || now > hardLimit) {
+
+                        // === FALL SCHLIESSEN ===
+                        let verdict = gCount > iCount ? 'guilty' : 'innocent';
+                        // Bei Gleichstand im Hard Limit: Freispruch (In dubio pro reo)
+                        if (gCount === iCount) verdict = 'innocent';
+
+                        await db.collection('courtCases').updateOne(
+                            { _id: activeCase._id },
+                            { $set: { status: 'closed', verdict: verdict, closedAt: now } }
+                        );
+
+                        // Strafe vollstrecken
+                        if (verdict === 'guilty') {
+                            // WENN ES EIN SORGERECHTSSTREIT IST
+                            if (activeCase.isCustodyBattle) {
+                                const loser = await usersCollection.findOne({ username: activeCase.accusedName });
+                                if (loser) {
+                                    const moneyLoss = Math.floor(loser.balance * 0.5);
+                                    const tokenLoss = Math.floor((loser.tokens || 0) * 0.5);
+
+                                    // 50% Geld, 50% Tokens abziehen & Scheidung durchziehen
+                                    await usersCollection.updateOne(
+                                        { _id: loser._id },
+                                        { 
+                                            $inc: { balance: -moneyLoss, tokens: -tokenLoss },
+                                            $unset: { isMarriedTo: "" }
+                                        }
+                                    );
+
+                                    // Kindes-Chats und Familienchat löschen
+                                    await limChatsCollection.deleteMany({ participants: loser._id, type: { $in: ['tinda_child', 'tinda_family'] } });
+                                    // Hauptchat auf geschieden setzen und Kinder löschen
+                                    await limChatsCollection.updateOne({ _id: activeCase.childChatId }, { $set: { isMarried: false, children: [] } });
+
+                                    // LNN News
+                                    await newsCollection.insertOne({
+                                        headline: "SORGERECHT VERLOREN! 📉💔",
+                                        content: `${activeCase.accusedName} hat das Sorgerecht an ${activeCase.plaintiffName} verloren! Das Gericht hat das Kind zugesprochen und direkt 50% des Geldes ($${moneyLoss.toLocaleString()}) und ${tokenLoss.toLocaleString()} Tokens als Unterhalt gepfändet!`,
+                                        author: "LNN Justiz", category: "Justiz", createdAt: new Date(), likes: 0
+                                    });
+                                    if (typeof updateDataVersion === 'function') updateDataVersion('news');
+                                }
+                            } else {
+                                // NORMALE STRAFE (10% für reguläre Anklagen)
                                 await usersCollection.updateOne(
-                                    { _id: loser._id },
-                                    { 
-                                        $inc: { balance: -moneyLoss, tokens: -tokenLoss },
-                                        $unset: { isMarriedTo: "" }
-                                    }
+                                    { username: activeCase.accusedName },
+                                    { $mul: { balance: 0.9 } } // 10% Strafe
                                 );
-
-                                // Kindes-Chats und Familienchat löschen
-                                await limChatsCollection.deleteMany({ participants: loser._id, type: { $in: ['tinda_child', 'tinda_family'] } });
-                                // Hauptchat auf geschieden setzen und Kinder löschen
-                                await limChatsCollection.updateOne({ _id: activeCase.childChatId }, { $set: { isMarried: false, children: [] } });
-
-                                // LNN News
-                                await newsCollection.insertOne({
-                                    headline: "SORGERECHT VERLOREN! 📉💔",
-                                    content: `${activeCase.accusedName} hat das Sorgerecht an ${activeCase.plaintiffName} verloren! Das Gericht hat das Kind zugesprochen und direkt 50% des Geldes ($${moneyLoss.toLocaleString()}) und ${tokenLoss.toLocaleString()} Tokens als Unterhalt gepfändet!`,
-                                    author: "LNN Justiz", category: "Justiz", createdAt: new Date(), likes: 0
-                                });
-                                if (typeof updateDataVersion === 'function') updateDataVersion('news');
                             }
-                        } else {
-                            // NORMALE STRAFE (10% für reguläre Anklagen)
-                            await usersCollection.updateOne(
-                                { username: activeCase.accusedName },
-                                { $mul: { balance: 0.9 } } // 10% Strafe
-                            );
+                        } else if (verdict === 'innocent' && activeCase.isCustodyBattle) {
+                            // Bei Unschuld im Sorgerechtsstreit behält der User das Kind und die Scheidung ist einfach durch
+                            const winner = await usersCollection.findOne({ username: activeCase.accusedName });
+                            if (winner) {
+                                await usersCollection.updateOne({ _id: winner._id }, { $unset: { isMarriedTo: "" } });
+                                await limChatsCollection.updateOne({ _id: activeCase.childChatId }, { $set: { isMarried: false } });
+                            }
                         }
-                    } else if (verdict === 'innocent' && activeCase.isCustodyBattle) {
-                        // Bei Unschuld im Sorgerechtsstreit behält der User das Kind und die Scheidung ist einfach durch
-                        const winner = await usersCollection.findOne({ username: activeCase.accusedName });
-                        if (winner) {
-                            await usersCollection.updateOne({ _id: winner._id }, { $unset: { isMarriedTo: "" } });
-                            await limChatsCollection.updateOne({ _id: activeCase.childChatId }, { $set: { isMarried: false } });
-                        }
+
+                        return res.redirect('/api/court/status'); // Reload für nächsten Fall
+
+                    } else {
+                        isOvertime = true;
+                        endsAt = hardLimit;
                     }
-
-                    return res.redirect('/api/court/status'); // Reload für nächsten Fall
-
-                } else {
-                    // === VERLÄNGERUNG (OVERTIME) ===
-                    // Zu wenig Stimmen -> Wir verlängern bis zum Hard Limit
-                    isOvertime = true;
-                    endsAt = hardLimit; // Neues Ende anzeigen
                 }
             }
 
+            // ==========================================
+            // C) CASEDATA FÜR FRONTEND ZUSAMMENSTELLEN
+            // ==========================================
             caseData = {
                 id: activeCase._id,
                 accused: activeCase.accusedName,
@@ -11258,11 +11308,12 @@ app.get('/api/court/status', isAuthenticated, async (req, res) => {
                     innocentPerc: total > 0 ? Math.round((iCount / total) * 100) : 50
                 },
                 myVote: myVote,
-                endsAt: endsAt.toISOString(), 
+                endsAt: endsAt ? endsAt.toISOString() : null, 
                 isOvertime: isOvertime,       
                 votesNeeded: Math.max(0, MIN_VOTES - total) 
             };
-		}
+
+        }
 
         // Archiv laden
         const archive = await db.collection('courtCases')
@@ -11271,13 +11322,19 @@ app.get('/api/court/status', isAuthenticated, async (req, res) => {
             .limit(5)
             .toArray();
 
+        // Hole Admin-Status des anfragenden Users für das UI
+        const requestingUser = await usersCollection.findOne({ _id: userId }, { projection: { isAdmin: 1 } });
+
         res.json({
+            isAdmin: requestingUser ? requestingUser.isAdmin : false,
             activeCase: caseData,
             archive: archive.map(c => ({
                 id: c._id,
                 title: `${c.accusedName} vs. ${c.plaintiffName}`,
                 crime: c.crime,
-                verdict: c.verdict
+                verdict: c.verdict,
+                fineAmount: c.fineAmount,
+                fineRecipient: c.fineRecipient
             }))
         });
 
