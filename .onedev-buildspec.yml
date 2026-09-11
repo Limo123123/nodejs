@@ -1,4 +1,4 @@
-version: 52
+version: 53
 jobs:
 - name: Generate NPM Package
   steps:
@@ -30,6 +30,8 @@ jobs:
   retryCondition: never
   maxRetries: 3
   retryDelay: 30
+  includeUpstreamWhenRebuild: false
+  includeDownstreamWhenRebuild: false
   timeout: 14400
 - name: Push to Github
   steps:
@@ -64,11 +66,14 @@ jobs:
     optional: false
   triggers:
   - type: BranchUpdateTrigger
+    branches: main
     userMatch: anyone
     projects: limazon/nodejs
   retryCondition: never
   maxRetries: 3
   retryDelay: 30
+  includeUpstreamWhenRebuild: false
+  includeDownstreamWhenRebuild: false
   timeout: 14400
 - name: Git Pull
   steps:
@@ -104,4 +109,6 @@ jobs:
   retryCondition: never
   maxRetries: 3
   retryDelay: 30
+  includeUpstreamWhenRebuild: false
+  includeDownstreamWhenRebuild: false
   timeout: 14400
