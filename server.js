@@ -2911,7 +2911,7 @@ app.get('/api/products', (req, res) => {
     res.send(globalProductCacheString);
 });
 
-// NEU: Endpunkt für den Börsen-Verlauf eines einzelnen Produkts
+// Endpunkt für den Börsen-Verlauf eines einzelnen Produkts
 app.get('/api/products/:id/history', async (req, res) => {
     const prodId = parseInt(req.params.id, 10);
     try {
@@ -4544,7 +4544,7 @@ const checkTradeCooldown = async (user) => {
 };
 
 // ==========================================
-// 1. AKTIEN KAUFEN (FIX: portfoliosCollection)
+// 1. AKTIEN KAUFEN
 // ==========================================
 app.post('/api/stonks/buy', isAuthenticated, async (req, res) => {
     const { productId, quantity } = req.body;
@@ -4552,6 +4552,7 @@ app.post('/api/stonks/buy', isAuthenticated, async (req, res) => {
     const qty = parseInt(quantity);
 
     // 1. Validierung
+	if (qty > 100000) return res.status(400).json({ error: "Limit: Maximal 100.000 Aktien pro Trade!" });
     if (!qty || qty < 1) return res.status(400).json({ error: "Ungültige Menge." });
     if (!productId) return res.status(400).json({ error: "Produkt ID fehlt." });
 
@@ -4649,6 +4650,7 @@ app.post('/api/stonks/sell', isAuthenticated, async (req, res) => {
     const qty = parseInt(quantity);
 
     // 1. Validierung
+	if (qty > 100000) return res.status(400).json({ error: "Limit: Maximal 100.000 Aktien pro Trade!" });
     if (!qty || qty < 1) return res.status(400).json({ error: "Ungültige Menge." });
     if (!productId) return res.status(400).json({ error: "Produkt ID fehlt." });
 
@@ -12144,6 +12146,7 @@ app.post('/api/finance/trade', isAuthenticated, async (req, res) => {
     try {
         const { coinId, amount, type } = req.body; // type: 'buy' oder 'sell'
         const qty = parseFloat(amount); // Menge an Coins
+		if (qty > 100000) return res.status(400).json({ error: "Limit: Maximal 100.000 Coins pro Trade!" });
 
         if (!CRYPTO_MARKET[coinId]) return res.status(400).json({ error: "Coin existiert nicht." });
         if (qty <= 0) return res.status(400).json({ error: "Ungültige Menge." });
