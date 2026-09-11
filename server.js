@@ -3247,6 +3247,10 @@ app.post('/api/products/sell', isAuthenticated, async (req, res) => {
         return res.status(400).json({ error: 'Ungültige Eingabe Verkauf.' });
     }
 
+    if (quantity > 100000) {
+        return res.status(400).json({ error: 'Limit überschritten: Maximal 100.000 Items auf einmal verkaufbar!' });
+    }
+
     console.log(`${LOG_PREFIX_SERVER} 📉 User ${username} will verkaufen: ${quantity}x ID ${productId} für je $${sellPrice}`);
 
     const session = client.startSession();
@@ -6059,10 +6063,17 @@ app.get('/api/admin/users', isAuthenticated, isAdmin, async (req, res) => {
 
 // User bearbeiten (Geld, Tokens, Admin-Status, Infinity Money UND Deaktivierung)
 app.put('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
-    // NEU: isDeactivated hinzugefügt
     const { balance, tokens, infinityMoney, role, permissions, schufaScore, isDeactivated } = req.body; 
     
     try {
+        const targetUser = await usersCollection.findOne({ _id: new ObjectId(req.params.id) });
+        if (!targetUser) return res.status(404).json({ error: "User nicht gefunden." });
+        
+        // Ein Admin darf keinen anderen Admin bearbeiten (außer sich selbst)
+        if (targetUser._id.toString() !== req.session.userId && (targetUser.isAdmin === true || ['admin', 'owner'].includes(targetUser.role))) {
+            return res.status(403).json({ error: "Sicherheits-Sperre: Du kannst die Daten eines anderen Admins nicht bearbeiten." });
+        }
+
         const updateData = {};
         if (balance !== undefined) updateData.balance = parseFloat(balance);
         if (tokens !== undefined) updateData.tokens = parseInt(tokens);
@@ -6122,6 +6133,13 @@ app.post('/api/admin/users/:id/reset-pw', isAuthenticated, isAdmin, async (req, 
     if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: "Passwort zu kurz." });
 
     try {
+        const targetUser = await usersCollection.findOne({ _id: new ObjectId(req.params.id) });
+        if (!targetUser) return res.status(404).json({ error: "User nicht gefunden." });
+        
+        if (targetUser.isAdmin === true || ['admin', 'owner'].includes(targetUser.role)) {
+            return res.status(403).json({ error: "Sicherheits-Sperre: Du kannst das Passwort eines anderen Admins nicht zurücksetzen." });
+        }
+
         const hashedPassword = await bcrypt.hash(newPassword, 10);
         await usersCollection.updateOne(
             { _id: new ObjectId(req.params.id) },
@@ -6135,6 +6153,13 @@ app.post('/api/admin/users/:id/reset-pw', isAuthenticated, isAdmin, async (req, 
 // User löschen
 app.delete('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
     try {
+        const targetUser = await usersCollection.findOne({ _id: new ObjectId(req.params.id) });
+        if (!targetUser) return res.status(404).json({ error: "User nicht gefunden." });
+        
+        if (targetUser.isAdmin === true || ['admin', 'owner'].includes(targetUser.role)) {
+            return res.status(403).json({ error: "Sicherheits-Sperre: Admins können nicht gelöscht werden." });
+        }
+
         const success = await deleteUserAndCleanup(req.params.id);
         if (!success) return res.status(404).json({ error: "User nicht gefunden" });
         res.json({ message: "User und alle verknüpften Daten wurden restlos gelöscht." });
@@ -6144,7 +6169,6 @@ app.delete('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) =>
     }
 });
 
-// Admin: User bestrafen (Geld abziehen, erlaubt Minus!)
 app.post('/api/admin/users/:id/fine', isAuthenticated, isAdmin, async (req, res) => {
     const { amount, reason } = req.body;
     const fine = parseFloat(amount);
@@ -6152,6 +6176,13 @@ app.post('/api/admin/users/:id/fine', isAuthenticated, isAdmin, async (req, res)
     if (!fine || fine <= 0) return res.status(400).json({ error: "Betrag muss positiv sein." });
 
     try {
+        const targetUser = await usersCollection.findOne({ _id: new ObjectId(req.params.id) });
+        if (!targetUser) return res.status(404).json({ error: "User nicht gefunden." });
+        
+        if (targetUser.isAdmin === true || ['admin', 'owner'].includes(targetUser.role)) {
+            return res.status(403).json({ error: "Sicherheits-Sperre: Admins können nicht bestraft werden." });
+        }
+
         // 1. Geld abziehen (ohne Prüfung auf 0 -> Dispo erzwingen!)
         await usersCollection.updateOne(
             { _id: new ObjectId(req.params.id) },
@@ -6412,10 +6443,9 @@ app.post('/api/admin/users/:id/temp-login-code', isAuthenticated, isAdmin, async
         
         if (!targetUser) return res.status(404).json({ error: "Ziel-User nicht gefunden." });
 
-        // --- NEUER SICHERHEITSCHECK: Keine Admin-Impersonation! ---
-        if (targetUser.isAdmin === true || targetUser.role === 'admin') {
+        if (targetUser.isAdmin === true || ['admin', 'owner'].includes(targetUser.role)) {
             console.warn(`${LOG_PREFIX_SERVER} ⛔ Admin ${req.session.username} hat versucht, sich als Admin ${targetUser.username} einzuloggen!`);
-            return res.status(403).json({ error: "Zugriff verweigert: Du kannst dich nicht in den Account eines anderen Admins einloggen!" });
+            return res.status(403).json({ error: "Sicherheits-Sperre: Du kannst dich nicht in den Account eines anderen Admins einloggen!" });
         }
         // ------------------------------------------------------------
 
