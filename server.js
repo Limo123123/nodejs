@@ -1371,6 +1371,7 @@ const ENDPOINT_PERMISSIONS = {
     'POST /api/admin/news': 'manage_news',
     'POST /api/admin/news/trigger-ai': 'manage_news',
     'DELETE /api/admin/news/:id': 'manage_news',
+	'DELETE /api/limtube/admin/reports/:id': 'manage_news',
 
     // --- Ideenbox ---
     'PATCH /api/ideas/:id/status': 'manage_ideas',
@@ -19739,6 +19740,7 @@ app.delete('/api/limtube/video/:id', isAuthenticated, async (req, res) => {
 
         // 1. Aus der Datenbank löschen
         await limtubeVideosCollection.deleteOne({ _id: videoId });
+		await db.collection('reports').deleteMany({ type: 'limtube_report', videoId: videoId });
 
         // 2. Datei von der Platte löschen (NVMe aufräumen)
         const filepath = path.join(CDN_DIR, video.filename);
@@ -20032,6 +20034,22 @@ app.get('/api/limtube/admin/reports', isAuthenticated, isAdmin, async (req, res)
         res.json({ reports });
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Laden der Meldungen." });
+    }
+});
+
+// Admin - Limtube Meldung verwerfen / löschen
+app.delete('/api/limtube/admin/reports/:id', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const reportId = new ObjectId(req.params.id);
+        const result = await db.collection('reports').deleteOne({ _id: reportId, type: 'limtube_report' });
+
+        if (result.deletedCount === 0) {
+            return res.status(404).json({ error: "Meldung nicht gefunden." });
+        }
+        res.json({ message: "Meldung erfolgreich gelöscht." });
+    } catch (e) {
+        console.error("Fehler beim Löschen des Reports:", e);
+        res.status(500).json({ error: "Fehler beim Löschen der Meldung." });
     }
 });
 
