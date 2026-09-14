@@ -97,8 +97,7 @@ if (!mongoUri) { console.error(`${LOG_PREFIX_SERVER} !!! FEHLER: Keine MongoDB U
 // --- Middleware ---
 const allowedOrigins = [
     frontendDevUrlHttp,
-    frontendProdUrl,
-    'https://api-liz.slimo.dev'
+    frontendProdUrl
 ];
 
 if (frontendProdUrl) { allowedOrigins.push(frontendProdUrl); }
@@ -19346,7 +19345,7 @@ const rpName = 'Limazon Universe';
 
 // Dynamische Erkennung der Domain
 function getWebAuthnConfig(req) {
-    const origin = req.headers.origin || process.env.FRONTEND_URL || 'https://app.liz.slimo.dev';
+    const origin = req.headers.origin || process.env.FRONTEND_URL || 'https://limazon.slimo.dev';
     return {
         expectedOrigin: origin,
         rpID: new URL(origin).hostname
