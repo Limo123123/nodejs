@@ -19576,6 +19576,9 @@ app.post('/api/limtube/upload', isAuthenticated, async (req, res) => {
         if (!isAudio) {
             thumbFilename = req.file.filename.replace('.mp4', '.jpg');
             const thumbPath = path.join(CDN_DIR, thumbFilename);
+			
+			const util = require('util');
+            const execPromise = util.promisify(require('child_process').exec);
 
             const { exec } = require('child_process');
             exec(`ffmpeg -i "${req.file.path}" -ss 00:00:01 -vframes 1 "${thumbPath}"`, (err) => {
