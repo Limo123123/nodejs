@@ -10916,6 +10916,27 @@ app.delete('/api/limterest/pin/:id', isAuthenticated, async (req, res) => {
     }
 });
 
+// Admin: Limterest Meldungen laden
+app.get('/api/limterest/admin/reports', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const reports = await db.collection('reports').find({ type: 'pin_report' }).sort({ createdAt: -1 }).toArray();
+        res.json({ reports });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der Meldungen." });
+    }
+});
+
+// Admin: Limterest Meldung verwerfen
+app.delete('/api/limterest/admin/reports/:id', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const reportId = new ObjectId(req.params.id);
+        await db.collection('reports').deleteOne({ _id: reportId });
+        res.json({ message: "Meldung erfolgreich verworfen." });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Löschen der Meldung." });
+    }
+});
+
 // =========================================================
 // === YAKUZA / BLACK MARKET ===
 // =========================================================
