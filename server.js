@@ -10871,6 +10871,51 @@ app.get('/api/limterest/my-saved', isAuthenticated, async (req, res) => {
     }
 });
 
+// 8. Pin löschen (Nur Autor oder Admin)
+app.delete('/api/limterest/pin/:id', isAuthenticated, async (req, res) => {
+    const pinId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const pin = await limterestCollection.findOne({ _id: pinId });
+        if (!pin) return res.status(404).json({ error: "Pin nicht gefunden." });
+
+        const user = await usersCollection.findOne({ _id: userId });
+        const isOwner = pin.userId.equals(userId);
+
+        if (!isOwner && !user.isAdmin) {
+            return res.status(403).json({ error: "Du darfst nur deine eigenen Pins löschen." });
+        }
+
+        // 1. Aus der Datenbank löschen
+        await limterestCollection.deleteOne({ _id: pinId });
+
+        // 2. Das Bild vom CDN löschen (falls es ein lokaler Upload war)
+        if (pin.imageUrl && pin.imageUrl.includes('/cdn/')) {
+            const filename = pin.imageUrl.split('/cdn/')[1];
+            const filepath = path.join(CDN_DIR, filename);
+            if (fs.existsSync(filepath)) {
+                fs.unlinkSync(filepath);
+                console.log(`${LOG_PREFIX_PIN} 🗑️ Bild gelöscht: ${filename}`);
+            }
+        }
+
+        // 3. Alle Reports (Meldungen) zu diesem Pin direkt mitlöschen
+        await db.collection('reports').deleteMany({ type: 'pin_report', pinId: pinId });
+
+        // 4. Aus den gemerkten Pins der User entfernen
+        await usersCollection.updateMany(
+            { savedPins: pinId },
+            { $pull: { savedPins: pinId } }
+        );
+
+        res.json({ message: "Pin restlos gelöscht." });
+    } catch (e) {
+        console.error(`${LOG_PREFIX_PIN} Fehler beim Löschen des Pins:`, e);
+        res.status(500).json({ error: "Fehler beim Löschen des Pins." });
+    }
+});
+
 // =========================================================
 // === YAKUZA / BLACK MARKET ===
 // =========================================================
