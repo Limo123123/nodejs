@@ -8285,7 +8285,7 @@ const ENGINE_ALLOWED_COLLECTIONS = [
     'humans', 'ratings', 'criteria', 'categories', 'tindaSwipes', 'restaurantOrders', 'limterestPins', 
     'teachermonCards', 'teachermonInventories', 'teachermonTrades', 'teachermonBattles', 'teachermonUniverses', 
     'properties', 'ownedProperties', 'propertyInvites', 'pets', 'petCemetery', 'limeaLayouts', 
-    'gangs', 'publicGangChat', 'zones', 'bounties', 'lotteryTickets', 'banned_ips', 'inviteCodes', 'movements', 'bankTransactions'
+    'gangs', 'publicGangChat', 'zones', 'bounties', 'lotteryTickets', 'banned_ips', 'inviteCodes', 'movements'
 ];
 
 app.post('/api/admin/engine', isAuthenticated, isAdmin, isEnvWhitelisted, async (req, res) => {
