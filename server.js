@@ -10,6 +10,7 @@ const crypto = require('crypto');
 sharp.concurrency(1);
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const { createClient } = require('redis');
+const nodemailer = require('nodemailer');
 
 // Lade Umgebungsvariablen aus secret.env (wenn vorhanden)
 const pathToSecretEnv = '/etc/secrets/secret.env'; // Für Render
@@ -94,6 +95,30 @@ const TOKEN_TO_DOLLAR_RATE = 200;    // 1 Token gibt $200 zurück
 if (!sessionSecret) { console.error(`${LOG_PREFIX_SERVER} !!! FEHLER: Kein SESSION_SECRET in Umgebungsvariablen! Server stoppt.`); process.exit(1); }
 if (!mongoUri) { console.error(`${LOG_PREFIX_SERVER} !!! FEHLER: Keine MongoDB URI (MONGO_URI oder User/PW/Cluster) in Umgebungsvariablen! Server stoppt.`); process.exit(1); }
 
+// --- E-Mail Konfiguration (Dynamisch per .env) ---
+const smtpHost = process.env.SMTP_HOST;
+const smtpPort = parseInt(process.env.SMTP_PORT, 10) || 465; // Standard-Port für SSL
+const smtpSecure = process.env.SMTP_SECURE === 'true'; 
+const smtpUser = process.env.SMTP_USER;
+const smtpPass = process.env.SMTP_PASS;
+
+let mailTransporter = null;
+
+if (smtpHost && smtpUser && smtpPass) {
+    mailTransporter = nodemailer.createTransport({
+        host: smtpHost,
+        port: smtpPort,
+        secure: smtpSecure, 
+        auth: {
+            user: smtpUser,
+            pass: smtpPass
+        }
+    });
+    console.log(`${LOG_PREFIX_SERVER} SMTP E-Mail Transporter initialisiert via ${smtpHost}:${smtpPort}`);
+} else {
+    console.warn(`${LOG_PREFIX_SERVER} Unvollständige SMTP-Daten in den Env-Variablen. E-Mail-Reset ist deaktiviert.`);
+}
+
 // --- Middleware ---
 const allowedOrigins = [
     frontendDevUrlHttp,
@@ -163,7 +188,9 @@ const publicPaths = [
 	'/api/webauthn/login-options',
 	'/api/webauthn/login-verify',
 	'/api/oauth/authorize',
-	'/api/oauth/token'
+	'/api/oauth/token',
+	'/api/auth/forgot-password',
+    '/api/auth/reset-password'
 ];
 
 app.use((req, res, next) => {
@@ -21507,6 +21534,15 @@ SESSION_SECRET="${randomSecret}"
 NODE_ENV="production"
 
 # ==========================================
+# E-MAIL SETUP (Optional für Passwort-Reset):
+# ==========================================
+SMTP_HOST=""
+SMTP_PORT="465"
+SMTP_SECURE="true"
+SMTP_USER=""
+SMTP_PASS=""
+
+# ==========================================
 # BENUTZERDEFINIERTE API KEYS (Aus Antrag):
 # ==========================================
 GEMINI_API_KEY="${instanceReq.geminiKey}"
@@ -22386,6 +22422,135 @@ app.post('/api/quiz/host/control', isAuthenticated, async (req, res) => {
         res.json({ success: true, state: room.state });
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Syncen des Spielstatus." });
+    }
+});
+
+// =========================================================
+// === PASSWORT RESET SYSTEM (E-MAIL) ===
+// =========================================================
+
+// 1. Recovery E-Mail hinterlegen (Für eingeloggte User in den Settings)
+app.post('/api/account/recovery-email', isAuthenticated, async (req, res) => {
+    const { email } = req.body;
+    const userId = new ObjectId(req.session.userId);
+
+    if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
+        return res.status(400).json({ error: "Bitte eine gültige E-Mail-Adresse angeben." });
+    }
+
+    try {
+        await usersCollection.updateOne(
+            { _id: userId }, 
+            { $set: { recoveryEmail: email.trim().toLowerCase() } }
+        );
+        res.json({ message: "Wiederherstellungs-E-Mail erfolgreich gespeichert!" });
+    } catch (e) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Speichern der E-Mail:`, e);
+        res.status(500).json({ error: "Fehler beim Speichern der E-Mail." });
+    }
+});
+
+// 2. Passwort vergessen anfordern (Public)
+app.post('/api/auth/forgot-password', rateLimitLogin, async (req, res) => {
+    const { username } = req.body;
+
+    if (!username) return res.status(400).json({ error: "Benutzername erforderlich." });
+
+    try {
+        const user = await usersCollection.findOne({ username: username.toLowerCase() });
+        
+        // Anti-Enumeration: Verrate nicht, ob der User existiert oder eine E-Mail hat.
+        if (!user || !user.recoveryEmail) {
+            return res.json({ message: "Falls ein Account mit einer hinterlegten E-Mail existiert, haben wir einen Link gesendet." });
+        }
+
+        if (!mailTransporter) {
+            console.error(`${LOG_PREFIX_SERVER} E-Mail Reset angefordert, aber SMTP ist nicht konfiguriert.`);
+            return res.status(500).json({ error: "Das E-Mail-System ist derzeit offline." });
+        }
+
+        // Token generieren (gültig für 1 Stunde)
+        const resetToken = crypto.randomBytes(32).toString('hex');
+        const tokenExpires = new Date(Date.now() + 60 * 60 * 1000);
+
+        await usersCollection.updateOne(
+            { _id: user._id },
+            { $set: { resetToken: resetToken, resetTokenExpires: tokenExpires } }
+        );
+
+        // Dynamische Frontend-URL für Multi-Tenancy
+        const frontendUrl = process.env.FRONTEND_URL || `${req.protocol}://${req.get('host')}`;
+        const resetLink = `${frontendUrl}/reset-password.html?token=${resetToken}&username=${encodeURIComponent(user.username)}`;
+
+        // E-Mail senden
+        const mailOptions = {
+            from: `"Limazon System" <${smtpUser}>`,
+            to: user.recoveryEmail,
+            subject: 'Passwort zurücksetzen - Limazon',
+            html: `
+                <div style="font-family: sans-serif; background: #222; color: #fff; padding: 20px; border-radius: 8px; max-width: 500px;">
+                    <h2 style="color: #00ffcc;">Passwort zurücksetzen</h2>
+                    <p>Hallo <b>${user.username}</b>,</p>
+                    <p>Jemand (hoffentlich du) hat angefordert, dein Passwort zurückzusetzen.</p>
+                    <p>Klicke auf den folgenden Button, um ein neues Passwort zu vergeben:</p>
+                    <br>
+                    <a href="${resetLink}" style="display: inline-block; padding: 12px 20px; background-color: #2ecc71; color: white; text-decoration: none; border-radius: 5px; font-weight: bold;">Neues Passwort setzen</a>
+                    <br><br>
+                    <p><i>Dieser Link ist für 1 Stunde gültig. Falls du keinen Reset angefordert hast, ignoriere diese E-Mail einfach.</i></p>
+                </div>
+            `
+        };
+
+        await mailTransporter.sendMail(mailOptions);
+        console.log(`${LOG_PREFIX_SERVER} 📧 Reset-Link an ${user.username} (${user.recoveryEmail}) gesendet.`);
+
+        res.json({ message: "Falls ein Account mit einer hinterlegten E-Mail existiert, haben wir einen Link gesendet." });
+
+    } catch (e) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Passwort-Reset:`, e);
+        res.status(500).json({ error: "Serverfehler beim Verarbeiten der Anfrage." });
+    }
+});
+
+// 3. Neues Passwort setzen (Public)
+app.post('/api/auth/reset-password', async (req, res) => {
+    const { username, token, newPassword } = req.body;
+
+    if (!username || !token || !newPassword || newPassword.length < 6) {
+        return res.status(400).json({ error: "Ungültige Daten oder Passwort zu kurz (min. 6 Zeichen)." });
+    }
+
+    try {
+        const user = await usersCollection.findOne({ 
+            username: username.toLowerCase(),
+            resetToken: token
+        });
+
+        if (!user) {
+            return res.status(400).json({ error: "Ungültiger oder bereits genutzter Token." });
+        }
+
+        if (new Date() > new Date(user.resetTokenExpires)) {
+            return res.status(400).json({ error: "Der Token ist abgelaufen. Bitte fordere einen neuen an." });
+        }
+
+        const hashedPassword = await bcrypt.hash(newPassword, SALT_ROUNDS);
+
+        // Neues Passwort speichern und Token sofort vernichten
+        await usersCollection.updateOne(
+            { _id: user._id },
+            { 
+                $set: { password: hashedPassword },
+                $unset: { resetToken: "", resetTokenExpires: "" }
+            }
+        );
+
+        console.log(`${LOG_PREFIX_SERVER} 🔐 User ${user.username} hat sein Passwort über E-Mail zurückgesetzt.`);
+        res.json({ message: "Dein Passwort wurde erfolgreich geändert! Du kannst dich jetzt einloggen." });
+
+    } catch (e) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Speichern des neuen Passworts:`, e);
+        res.status(500).json({ error: "Fehler beim Zurücksetzen des Passworts." });
     }
 });
 
