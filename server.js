@@ -22479,26 +22479,58 @@ app.post('/api/auth/forgot-password', rateLimitLogin, async (req, res) => {
             { $set: { resetToken: resetToken, resetTokenExpires: tokenExpires } }
         );
 
-        // Dynamische Frontend-URL für Multi-Tenancy
         const frontendUrl = process.env.FRONTEND_URL || `${req.protocol}://${req.get('host')}`;
-        const resetLink = `${frontendUrl}/reset-password.html?token=${resetToken}&username=${encodeURIComponent(user.username)}`;
+        const resetLink = `${frontendUrl}/themes/reset-password.html?token=${resetToken}&username=${encodeURIComponent(user.username)}`;
 
-        // E-Mail senden
+        // E-Mail senden mit schickem Dark-Mode-Style & Favicon
         const mailOptions = {
-            from: `"Limazon System" <${smtpUser}>`,
+            from: `"Limazon Universe" <${smtpUser}>`,
             to: user.recoveryEmail,
             subject: 'Passwort zurücksetzen - Limazon',
             html: `
-                <div style="font-family: sans-serif; background: #222; color: #fff; padding: 20px; border-radius: 8px; max-width: 500px;">
-                    <h2 style="color: #00ffcc;">Passwort zurücksetzen</h2>
-                    <p>Hallo <b>${user.username}</b>,</p>
-                    <p>Jemand (hoffentlich du) hat angefordert, dein Passwort zurückzusetzen.</p>
-                    <p>Klicke auf den folgenden Button, um ein neues Passwort zu vergeben:</p>
-                    <br>
-                    <a href="${resetLink}" style="display: inline-block; padding: 12px 20px; background-color: #2ecc71; color: white; text-decoration: none; border-radius: 5px; font-weight: bold;">Neues Passwort setzen</a>
-                    <br><br>
-                    <p><i>Dieser Link ist für 1 Stunde gültig. Falls du keinen Reset angefordert hast, ignoriere diese E-Mail einfach.</i></p>
-                </div>
+                <!DOCTYPE html>
+                <html lang="de">
+                <head>
+                    <meta charset="UTF-8">
+                    <link rel="icon" type="image/svg+xml" href="https://limazon.slimo.dev/favicon.svg">
+                    <style>
+                        body { background-color: #050505; color: #ffffff; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 0; }
+                        .wrapper { width: 100%; table-layout: fixed; background-color: #050505; padding: 40px 0; }
+                        .card { background: #141419; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 24px; max-width: 480px; margin: 0 auto; padding: 40px; box-shadow: 0 20px 40px rgba(0,0,0,0.8); }
+                        .logo { width: 36px; height: 36px; vertical-align: middle; margin-right: 10px; }
+                        h2 { font-size: 24px; font-weight: 900; letter-spacing: -0.5px; margin-top: 0; color: #ffffff; }
+                        p { color: #a3a3a3; font-size: 14px; line-height: 1.5; margin-bottom: 24px; }
+                        .btn { display: inline-block; padding: 14px 28px; background-color: #3b82f6; color: #ffffff !important; text-decoration: none; border-radius: 12px; font-weight: 700; font-size: 14px; box-shadow: 0 0 20px rgba(59, 130, 246, 0.4); text-align: center; }
+                        .btn:hover { background-color: #2563eb; }
+                        .footer { margin-top: 30px; font-size: 11px; color: #52525b; text-align: center; }
+                    </style>
+                </head>
+                <body>
+                    <center class="wrapper">
+                        <table class="card" width="100%" cellpadding="0" cellspacing="0">
+                            <tr>
+                                ____
+                                <td>
+                                    <div style="margin-bottom: 20px;">
+                                        <img src="https://limazon.slimo.dev/favicon.svg" class="logo" alt="Logo">
+                                        <span style="font-size: 20px; font-weight: 900; vertical-align: middle;">Limazon<span style="color: #3b82f6;">.</span></span>
+                                    </div>
+                                    <h2>Passwort zurücksetzen</h2>
+                                    <p>Hallo <b>${user.username}</b>,</p>
+                                    <p>Es wurde eine Anfrage zum Zurücksetzen deines Passworts für dein Limazon-Konto gestellt.</p>
+                                    <p style="text-align: center; margin: 30px 0;">
+                                        <a href="${resetLink}" class="btn">Neues Passwort vergeben</a>
+                                    </p>
+                                    <p><i>Dieser Link ist aus Sicherheitsgründen nur 1 Stunde lang gültig. Falls du das nicht warst, kannst du diese E-Mail ignorieren.</i></p>
+                                    <div class="footer">
+                                        Limazon.Universe • Ein geschlossenes System
+                                    </div>
+                                </td>
+                            </tr>
+                        </table>
+                    </center>
+                </body>
+                </html>
             `
         };
 
