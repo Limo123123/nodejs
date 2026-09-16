@@ -280,6 +280,7 @@ app.use('/api/politics', isModuleEnabled('bundestag'), isNotOnStrike('bundestag'
 app.use('/api/users/directory', isModuleEnabled('directory'), isNotOnStrike('directory'));
 
 // --- Datenbank Variablen ---
+let server;
 let db;
 let productsCollection, usersCollection, ordersCollection, inventoriesCollection;
 let wheelsCollection, tokenCodesCollection, tokenTransactionsCollection;
@@ -2019,7 +2020,7 @@ MongoClient.connect(mongoUri)
 
             } else {
                 // 👷 WORKER-PROZESS: Startet den eigentlichen Express-Server
-                http.createServer(app).listen(HTTP_PORT, '::', () => {
+                server = http.createServer(app).listen(HTTP_PORT, '::', () => {
                     console.log(`${LOG_PREFIX_SERVER} 🌐 Worker ${process.pid} ist online auf Port ${HTTP_PORT}`);
                 });
             }
