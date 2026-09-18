@@ -6097,12 +6097,30 @@ app.put('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
         const targetUser = await usersCollection.findOne({ _id: new ObjectId(req.params.id) });
         if (!targetUser) return res.status(404).json({ error: "User nicht gefunden." });
         
-        // Ein Admin darf keinen anderen Admin bearbeiten (außer sich selbst)
-        if (targetUser._id.toString() !== req.session.userId && (targetUser.isAdmin === true || ['admin', 'owner'].includes(targetUser.role))) {
+        // ENV-Whitelist prüfen
+        const allowedUsers = (process.env.ENGINE_WHITELIST || "").split(',').map(u => u.trim().toLowerCase());
+        const isEnvUser = allowedUsers.includes((req.session.username || "").toLowerCase());
+
+        const isSelf = targetUser._id.toString() === req.session.userId;
+        const targetIsAdmin = targetUser.isAdmin === true || ['admin', 'owner'].includes(targetUser.role);
+        
+        // 5-Minuten-Rücknahme-Check
+        let within5MinWindow = false;
+        if (targetIsAdmin && targetUser.adminGrantedBy === req.session.userId && targetUser.adminGrantedAt) {
+            const grantedTime = new Date(targetUser.adminGrantedAt).getTime();
+            if (Date.now() - grantedTime <= 5 * 60 * 1000) {
+                within5MinWindow = true;
+            }
+        }
+
+        // Ein Admin darf keinen anderen Admin bearbeiten (außer sich selbst, env user oder innerhalb des 5-Minuten-Fensters)
+        if (!isSelf && !isEnvUser && !within5MinWindow && targetIsAdmin) {
             return res.status(403).json({ error: "Sicherheits-Sperre: Du kannst die Daten eines anderen Admins nicht bearbeiten." });
         }
 
         const updateData = {};
+        const unsetData = {};
+
         if (balance !== undefined) updateData.balance = parseFloat(balance);
         if (tokens !== undefined) updateData.tokens = parseInt(tokens);
         if (infinityMoney !== undefined) {
@@ -6132,22 +6150,40 @@ app.put('/api/admin/users/:id', isAuthenticated, isAdmin, async (req, res) => {
             if (!isSuperAdmin) return res.status(403).json({ error: "Nur Super-Admins dürfen Rollen und Berechtigungen verändern!" });
             
             if (role !== undefined) {
+                const willBeAdmin = ['admin', 'owner'].includes(role);
                 updateData.role = role;
-                updateData.isAdmin = ['admin', 'owner'].includes(role); 
+                updateData.isAdmin = willBeAdmin; 
+                
+                // Wenn jemand neu zum Admin gemacht wird, speichern wir, wer es war und wann
+                if (willBeAdmin && !targetIsAdmin) {
+                    updateData.adminGrantedBy = req.session.userId;
+                    updateData.adminGrantedAt = new Date();
+                }
+                
+                // Wenn Admin-Rechte wieder entzogen werden, bereinigen wir die Spuren
+                if (!willBeAdmin && targetIsAdmin) {
+                    unsetData.adminGrantedBy = "";
+                    unsetData.adminGrantedAt = "";
+                }
             }
             if (permissions !== undefined) {
                 updateData.permissions = permissions;
             }
         }
 
+        const updateOps = { $set: updateData };
+        if (Object.keys(unsetData).length > 0) {
+            updateOps.$unset = unsetData;
+        }
+
         const result = await usersCollection.updateOne(
             { _id: new ObjectId(req.params.id) }, 
-            { $set: updateData }
+            updateOps
         );
 
         if (result.matchedCount === 0) return res.status(404).json({ error: "User nicht gefunden." });
 		
-		await logActivity(req, "ADMIN_UPDATE_USER", { targetUserId: req.params.id, changes: updateData });
+        await logActivity(req, "ADMIN_UPDATE_USER", { targetUserId: req.params.id, changes: updateData });
         res.json({ message: "User erfolgreich aktualisiert." });
     } catch (e) {
         console.error("Update Error:", e);
