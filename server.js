@@ -1137,8 +1137,8 @@ async function deleteUserAndCleanup(userIdString) {
 // === GLOBAL API RATE LIMITER (RAM BASED) ===
 // =========================================================
 const apiRequestCounts = new Map();
-const API_WINDOW_MS = 60 * 1000; // 1 Minute Zeitfenster
-const API_MAX_REQS = 300;        // Max 300 Requests pro Minute pro IP
+const API_WINDOW_MS = 30 * 1000; // 30 Sekunden Zeitfenster
+const API_MAX_REQS = 1200;        // Max 1200 Requests pro 30 Sekunden pro IP
 
 async function globalApiRateLimit(req, res, next) {
     // 1. Dein alter God-Mode-Header (für externe Skripte)
