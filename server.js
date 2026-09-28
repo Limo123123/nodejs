@@ -19647,85 +19647,123 @@ app.post('/api/webauthn/login-verify', async (req, res) => {
 // === LIMTUBE API ===
 // =========================================================
 
+const CHUNK_TEMP_DIR = path.resolve(CDN_DIR, 'temp_chunks');
+if (!fs.existsSync(CHUNK_TEMP_DIR)) fs.mkdirSync(CHUNK_TEMP_DIR, { recursive: true });
+
+// Multer für Chunks: Speichert sie im RAM, da sie direkt auf die Platte geschrieben werden
+const chunkUpload = multer({ 
+    storage: multer.memoryStorage(), 
+    limits: { fileSize: 100 * 1024 * 1024 } // Hard Limit für einen EINZELNEN Chunk (100MB)
+});
+
 // API: Neues Video oder Musik hochladen
-app.post('/api/limtube/upload', isAuthenticated, async (req, res) => {
+app.post('/api/limtube/upload/chunk', isAuthenticated, chunkUpload.single('chunk'), async (req, res) => {
     const userId = new ObjectId(req.session.userId);
+    
+    // Metadaten vom Frontend
+    const { uploadId, chunkIndex, totalChunks, fileName, title, description, visibility } = req.body;
 
-    try {
-        const user = await usersCollection.findOne({ _id: userId }, { projection: { isAdmin: 1, activeSubscriptions: 1 } });
-        
-        let dailyLimit = 3; 
-        if (user.activeSubscriptions && user.activeSubscriptions.includes('prime')) dailyLimit = 10;
-        if (user.isAdmin) dailyLimit = 999;
+    if (!req.file) return res.status(400).json({ error: 'Kein Chunk empfangen.' });
+    if (!title || title.trim().length < 5) return res.status(400).json({ error: 'Ein Titel (min. 5 Zeichen) ist Pflicht!' });
 
-        const todayStr = new Date().toISOString().split('T')[0];
-        const uploadKey = `limtube:uploads:${userId}:${todayStr}`;
-        
-        const currentUploads = await global.redisPub.incr(uploadKey);
-        // Beim ersten Upload heute den Timer auf 24 Stunden setzen
-        if (currentUploads === 1) {
-            await global.redisPub.expire(uploadKey, 24 * 60 * 60);
+    // --- LIMIT CHECK (Wird nur beim allerersten Chunk geprüft, um Traffic zu sparen) ---
+    if (parseInt(chunkIndex) === 0) {
+        try {
+            const user = await usersCollection.findOne({ _id: userId }, { projection: { isAdmin: 1, activeSubscriptions: 1 } });
+            let dailyLimit = 3; 
+            if (user.activeSubscriptions && user.activeSubscriptions.includes('prime')) dailyLimit = 10;
+            if (user.isAdmin) dailyLimit = 999;
+
+            const todayStr = new Date().toISOString().split('T')[0];
+            const uploadKey = `limtube:uploads:${userId}:${todayStr}`;
+            
+            const currentUploads = await global.redisPub.get(uploadKey);
+            if (currentUploads && parseInt(currentUploads) >= dailyLimit) {
+                return res.status(429).json({ error: `Upload-Limit erreicht! Du darfst nur ${dailyLimit} Uploads pro Tag durchführen.` });
+            }
+        } catch (e) {
+            return res.status(500).json({ error: "Fehler beim Prüfen der Upload-Limits." });
         }
-
-        if (currentUploads > dailyLimit) {
-            // Counter wieder runterzählen, da der Upload abgelehnt wird
-            await global.redisPub.decr(uploadKey);
-            return res.status(429).json({ error: `Upload-Limit erreicht! Du darfst nur ${dailyLimit} Uploads pro Tag durchführen.` });
-        }
-    } catch (e) {
-        return res.status(500).json({ error: "Fehler beim Prüfen der Upload-Limits." });
     }
 
-    uploadVideo.single('video')(req, res, async (err) => {
-        if (err) {
-            console.error(`${LOG_PREFIX_SERVER} Media-Upload Fehler:`, err);
-            return res.status(400).json({ error: err.message || 'Fehler beim Upload. Max 500MB.' });
-        }
+    // --- CHUNK SPEICHERN ---
+    const tempDir = path.join(CHUNK_TEMP_DIR, uploadId);
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 
-        if (!req.file) return res.status(400).json({ error: 'Keine Datei empfangen.' });
-        
-        // visibility aus dem Frontend holen
-        const { title, description, visibility } = req.body;
-        
-        if (!title || title.trim().length < 5) {
-            fs.unlinkSync(req.file.path);
-            return res.status(400).json({ error: 'Ein Titel (min. 5 Zeichen) ist Pflicht!' });
-        }
+    const chunkPath = path.join(tempDir, chunkIndex.toString());
+    fs.writeFileSync(chunkPath, req.file.buffer);
 
-        // Sichtbarkeit setzen (Standard ist public, wenn nichts gesendet wird)
-        const finalVisibility = ['public', 'unlisted', 'private'].includes(visibility) ? visibility : 'public';
+    // --- PRÜFEN OB ALLE CHUNKS DA SIND ---
+    const chunks = fs.readdirSync(tempDir);
+    const parsedTotalChunks = parseInt(totalChunks);
 
-        // --- AUDIO / VIDEO LOGIK ---
-        const ext = path.extname(req.file.filename).toLowerCase();
-        const isAudio = ['.mp3', '.wav', '.ogg'].includes(ext);
-        const mediaType = isAudio ? 'audio' : 'video';
-
-        let thumbFilename = null;
-
-        // Thumbnail nur für Videos mit ffmpeg generieren
-        if (!isAudio) {
-            thumbFilename = req.file.filename.replace('.mp4', '.jpg');
-            const thumbPath = path.join(CDN_DIR, thumbFilename);
-			
-			const util = require('util');
-            const execPromise = util.promisify(require('child_process').exec);
-
-            const { exec } = require('child_process');
-            exec(`ffmpeg -i "${req.file.path}" -ss 00:00:01 -vframes 1 "${thumbPath}"`, (err) => {
-                if (err) console.error(`${LOG_PREFIX_SERVER} Thumbnail-Fehler:`, err.message);
-            });
-        } else {
-            // Bei Musik speichern wir ein Standard-Bild (kannst du noch in deinen CDN Ordner legen)
-            thumbFilename = 'default_audio_cover.jpg'; 
-        }
-
+    if (chunks.length === parsedTotalChunks) {
+        // ALLE CHUNKS EMPFANGEN -> DATEI ZUSAMMENFÜGEN
         try {
+            const ext = path.extname(fileName).toLowerCase();
+            const allowedExts = ['.mp4', '.mp3', '.wav', '.ogg'];
+            
+            if (!allowedExts.includes(ext)) {
+                fs.rmSync(tempDir, { recursive: true, force: true });
+                return res.status(400).json({ error: 'Nur MP4, MP3, WAV oder OGG erlaubt!' });
+            }
+
+            const isAudio = ['.mp3', '.wav', '.ogg'].includes(ext);
+            const mediaType = isAudio ? 'audio' : 'video';
+            const prefix = isAudio ? 'aud_' : 'vid_';
+            
+            const finalFilename = `${prefix}${Date.now()}_${Math.floor(Math.random() * 1000)}${ext}`;
+            const finalPath = path.join(CDN_DIR, finalFilename);
+
+            // RAM-schonendes Zusammenfügen mit Streams
+            const writeStream = fs.createWriteStream(finalPath);
+            
+            for (let i = 0; i < parsedTotalChunks; i++) {
+                const currentChunkPath = path.join(tempDir, i.toString());
+                
+                // Chunk in die Zieldatei pumpen
+                await new Promise((resolve, reject) => {
+                    const readStream = fs.createReadStream(currentChunkPath);
+                    readStream.pipe(writeStream, { end: false });
+                    readStream.on('end', () => resolve());
+                    readStream.on('error', reject);
+                });
+                
+                fs.unlinkSync(currentChunkPath); // Chunk nach dem Lesen sofort löschen
+            }
+            writeStream.end();
+            fs.rmdirSync(tempDir); // Leeren Temp-Ordner löschen
+
+            // --- NORMALE VIDEOPROZESSIERUNG & DATENBANK ---
+            
+            // Limit-Zähler in Redis hochsetzen (Jetzt erst, wo es erfolgreich war)
+            const todayStr = new Date().toISOString().split('T')[0];
+            const uploadKey = `limtube:uploads:${userId}:${todayStr}`;
+            const currentUploads = await global.redisPub.incr(uploadKey);
+            if (currentUploads === 1) await global.redisPub.expire(uploadKey, 24 * 60 * 60);
+
+            const finalVisibility = ['public', 'unlisted', 'private'].includes(visibility) ? visibility : 'public';
+            let thumbFilename = null;
+
+            // Thumbnail mit FFmpeg (nur für Video)
+            if (!isAudio) {
+                thumbFilename = finalFilename.replace('.mp4', '.jpg');
+                const thumbPath = path.join(CDN_DIR, thumbFilename);
+                const { exec } = require('child_process');
+                exec(`ffmpeg -i "${finalPath}" -ss 00:00:01 -vframes 1 "${thumbPath}"`, (err) => {
+                    if (err) console.error(`${LOG_PREFIX_SERVER} Thumbnail-Fehler:`, err.message);
+                });
+            } else {
+                thumbFilename = 'default_audio_cover.jpg'; 
+            }
+
+            // In DB Speichern
             const newVideo = {
                 title: title.trim(),
                 description: description ? description.trim().substring(0, 500) : "",
-                filename: req.file.filename,
+                filename: finalFilename,
                 thumbnail: thumbFilename,
-                mediaType: mediaType, // NEU: speichert ob es Audio oder Video ist
+                mediaType: mediaType,
                 visibility: finalVisibility, 
                 uploaderId: userId,
                 uploaderName: req.session.username,
@@ -19744,14 +19782,17 @@ app.post('/api/limtube/upload', isAuthenticated, async (req, res) => {
             }
 
             console.log(`${LOG_PREFIX_SERVER} 🎬 Limtube: ${req.session.username} hat "${newVideo.title}" hochgeladen (${mediaType}).`);
-            res.status(201).json({ message: 'Erfolgreich hochgeladen!', video: newVideo });
+            return res.status(201).json({ message: 'Erfolgreich hochgeladen!', video: newVideo });
 
-        } catch (dbErr) {
-            console.error(`${LOG_PREFIX_SERVER} Limtube DB-Fehler:`, dbErr);
-            fs.unlinkSync(req.file.path); 
-            res.status(500).json({ error: 'Serverfehler beim Speichern.' });
+        } catch (mergeErr) {
+            console.error(`${LOG_PREFIX_SERVER} Chunk-Merge Fehler:`, mergeErr);
+            if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
+            return res.status(500).json({ error: 'Fehler beim Zusammenfügen der Videodatei.' });
         }
-    });
+    } else {
+        // Chunk erfolgreich gespeichert, warte auf den Rest
+        return res.json({ message: `Chunk ${chunkIndex + 1}/${totalChunks} erfolgreich empfangen.`, chunkIndex });
+    }
 });
 
 // --- Limtube Such-Route (Feed filtern) ---
