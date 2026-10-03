@@ -2429,12 +2429,22 @@ app.post('/api/auth/register', async (req, res) => {
             if (requiresVerification) verificationToken = crypto.randomBytes(32).toString('hex');
 
             const newUser = {
-                username: username.toLowerCase(), password: hashedPassword, 
-                balance: 5000.00, tokens: DEFAULT_STARTING_TOKENS, isAdmin: false, 
-                infinityMoney: false, unlockedInfinityMoney: false, createdAt: new Date(), 
-                productSellCooldowns: {}, schufaScore: 500, activeLoan: null,
-                lastDeviceId: deviceId, lastFingerprint: fingerprint, lastIp: clientIp,
-                knownFingerprints: fingerprint ? [fingerprint] : [], knownDeviceIds: deviceId ? [deviceId] : []
+                username: username.toLowerCase(), 
+                password: hashedPassword, 
+                balance: 5000.00, 
+                tokens: DEFAULT_STARTING_TOKENS,
+                isAdmin: false, 
+                infinityMoney: false, 
+                unlockedInfinityMoney: false, 
+                createdAt: new Date(), 
+                productSellCooldowns: {}, 
+                schufaScore: 500, 
+                activeLoan: null,
+                lastDeviceId: deviceId,
+                lastFingerprint: fingerprint,
+                lastIp: clientIp,
+                knownFingerprints: fingerprint ? [fingerprint] : [],
+                knownDeviceIds: deviceId ? [deviceId] : []
             };
 
             if (requiresVerification) {
@@ -2508,11 +2518,16 @@ app.post('/api/auth/register', async (req, res) => {
             }
         });
         
-        if (requiresVerification) res.status(201).json({ message: 'Wir haben dir eine E-Mail geschickt. Bitte klicke auf den Link darin, um deinen Account zu aktivieren.' });
-        else res.status(201).json({ message: 'Registrierung erfolgreich! Du kannst dich jetzt einloggen.' });
+        if (requiresVerification) {
+            res.status(201).json({ message: 'Wir haben dir eine E-Mail geschickt. Bitte klicke auf den Link darin, um deinen Account zu aktivieren.' });
+        } else {
+            res.status(201).json({ message: 'Registrierung erfolgreich! Du kannst dich jetzt einloggen.' });
+        }
         
     } catch (err) {
-        if (['Der eingegebene Code ist ungültig oder wurde bereits verwendet.', 'Benutzername ist bereits vergeben.', 'Diese E-Mail-Adresse ist bereits registriert.'].includes(err.message)) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler bei Registrierung:`, err);
+        const knownErrors = ['Der Code ist ungültig oder verbraucht.', 'Benutzername vergeben.', 'E-Mail-Adresse bereits registriert.'];
+        if (knownErrors.includes(err.message)) {
             return res.status(400).json({ error: err.message });
         }
         res.status(500).json({ error: 'Serverfehler.' });
@@ -2557,8 +2572,6 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
     const { username, password, rememberMe } = req.body; 
     const clientIp = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
 
-    console.log(`${LOG_PREFIX_SERVER} Login-Versuch für: ${username ? username.substring(0, 3) + "***" : "LEER"} von IP: ${clientIp}`);
-
     if (!username || !password) return res.status(400).json({ error: 'Benutzername/E-Mail und Passwort erforderlich.' });
 
     try {
@@ -2571,15 +2584,15 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
         });
 
         if (!user) {
-            console.warn(`${LOG_PREFIX_SERVER} Login fehlgeschlagen: User/E-Mail ${username.toLowerCase()} nicht gefunden.`);
             return res.status(401).json({ error: 'Ungültige Anmeldedaten.' });
         }
         
+        // Verifizierungs-Check (nur greifen lassen, wenn eine E-Mail hinterlegt und noch nicht verifiziert ist)
         if (user.email && user.isVerified === false) {
             if (req.loginRateLimitKey && global.redisPub) {
                 global.redisPub.del(req.loginRateLimitKey).catch(() => {});
             }
-            return res.status(403).json({ error: 'Bitte verifiziere zuerst deine E-Mail-Adresse! Prüfe dein Postfach (und den Spam-Ordner).' });
+            return res.status(403).json({ error: 'Bitte verifiziere zuerst deine E-Mail-Adresse über den Link in deinem Postfach.' });
         }
 
         const match = await bcrypt.compare(password, user.password);
@@ -2616,7 +2629,6 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
                 if (user.isAdmin) {
                     console.log(`${LOG_PREFIX_SERVER} ⚠️ ADMIN BYPASS: Gebanntes Gerät loggt sich als Admin ${user.username} ein.`);
                 } else {
-                    console.warn(`${LOG_PREFIX_SERVER} ⛔ ZUGRIFF VERWEIGERT: Gebanntes Gerät versuchte Login als ${user.username}.`);
                     return res.status(403).json({ error: 'Dieser Account oder dieses Gerät ist gesperrt.' });
                 }
             }
@@ -2653,8 +2665,6 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
                     return res.status(500).json({ error: 'Fehler Session.' });
                 }
 
-                console.log(`${LOG_PREFIX_SERVER} User ${user.username} eingeloggt. Session ID: ${req.session.id}, Admin: ${req.session.isAdmin}`);
-
                 const effectiveInfinityMoney = user.isAdmin ? true : (user.infinityMoney || false);
 
                 res.json({
@@ -2673,11 +2683,10 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
             });
 
         } else {
-            console.warn(`${LOG_PREFIX_SERVER} Login fehlgeschlagen: Falsches PW für ${username.toLowerCase()}.`);
-            res.status(401).json({ error: 'Ungültige Anmeldedaten.' });
+            return res.status(401).json({ error: 'Ungültige Anmeldedaten.' });
         }
     } catch (err) {
-        console.error(`${LOG_PREFIX_SERVER} Serverfehler Login ${username}:`, err);
+        console.error(`${LOG_PREFIX_SERVER} Serverfehler Login:`, err);
         res.status(500).json({ error: 'Serverfehler beim Login.' });
     }
 });
@@ -22577,7 +22586,7 @@ app.post('/api/account/recovery-email', isAuthenticated, async (req, res) => {
     const finalEmail = email.trim().toLowerCase();
 
     try {
-        const existing = await usersCollection.findOne({ recoveryEmail: finalEmail, _id: { $ne: userId } });
+        const existing = await usersCollection.findOne({ email: finalEmail, _id: { $ne: userId } });
         if (existing) {
             return res.status(409).json({ error: "Diese E-Mail wird bereits von einem anderen Account genutzt." });
         }
@@ -22587,11 +22596,7 @@ app.post('/api/account/recovery-email', isAuthenticated, async (req, res) => {
         await usersCollection.updateOne(
             { _id: userId }, 
             { 
-                $set: { 
-                    recoveryEmail: finalEmail,
-                    isRecoveryVerified: false,
-                    recoveryVerificationToken: verificationToken
-                } 
+                $set: {                      email: finalEmail,                     isVerified: false,                     verificationToken: verificationToken                 },$unset: { recoveryEmail: "", isRecoveryVerified: "", recoveryVerificationToken: "" } // Altlasten entfernen
             }
         );
 
@@ -22602,7 +22607,7 @@ app.post('/api/account/recovery-email', isAuthenticated, async (req, res) => {
             const mailOptions = {
                 from: `"Limazon Universe" <${process.env.SMTP_USER}>`,
                 to: finalEmail,
-                subject: 'Wiederherstellungs-E-Mail bestätigen - Limazon',
+                subject: 'E-Mail-Adresse bestätigen - Limazon',
                 html: `
                     <!DOCTYPE html>
                     <html lang="de">
@@ -22632,7 +22637,7 @@ app.post('/api/account/recovery-email', isAuthenticated, async (req, res) => {
                                         </div>
                                         <h2>Sicherheits-Update</h2>
                                         <p>Hallo <b>${req.session.username}</b>,</p>
-                                        <p>du hast soeben eine neue E-Mail-Adresse für die Kontowiederherstellung hinterlegt. Bitte klicke auf den Button, um sie zu bestätigen.</p>
+                                        <p>du hast soeben eine neue E-Mail-Adresse hinterlegt. Bitte klicke auf den Button, um sie zu bestätigen und für deinen Account zu aktivieren.</p>
                                         <p style="text-align: center; margin: 30px 0;">
                                             <a href="${verifyLink}" class="btn">Adresse bestätigen</a>
                                         </p>
@@ -22651,7 +22656,7 @@ app.post('/api/account/recovery-email', isAuthenticated, async (req, res) => {
             await mailTransporter.sendMail(mailOptions);
         }
 
-        res.json({ message: "Wiederherstellungs-E-Mail gespeichert! Bitte prüfe dein Postfach zur Verifizierung." });
+        res.json({ message: "E-Mail gespeichert! Bitte prüfe dein Postfach zur Verifizierung." });
     } catch (e) {
         console.error(`${LOG_PREFIX_SERVER} Fehler beim Speichern der E-Mail:`, e);
         res.status(500).json({ error: "Fehler beim Speichern der E-Mail." });
@@ -22667,8 +22672,8 @@ app.post('/api/auth/forgot-password', rateLimitLogin, async (req, res) => {
     try {
         const user = await usersCollection.findOne({ username: username.toLowerCase() });
         
-        // Anti-Enumeration: Verrate nicht, ob der User existiert, eine E-Mail hat oder verifiziert ist.
-        if (!user || !user.recoveryEmail || !user.isRecoveryVerified) {
+        // Anti-Enumeration: Verrate nicht, ob der User existiert oder eine E-Mail hat.
+        if (!user || !user.email || !user.isVerified) {
             return res.json({ message: "Falls ein Account mit einer verifizierten E-Mail existiert, haben wir einen Link gesendet." });
         }
 
@@ -22690,7 +22695,7 @@ app.post('/api/auth/forgot-password', rateLimitLogin, async (req, res) => {
 
         const mailOptions = {
             from: `"Limazon Universe" <${process.env.SMTP_USER}>`,
-            to: user.recoveryEmail,
+            to: user.email,
             subject: 'Passwort zurücksetzen - Limazon',
             html: `
                 <!DOCTYPE html>
@@ -22739,7 +22744,7 @@ app.post('/api/auth/forgot-password', rateLimitLogin, async (req, res) => {
         };
 
         await mailTransporter.sendMail(mailOptions);
-        console.log(`${LOG_PREFIX_SERVER} 📧 Reset-Link an ${user.username} (${user.recoveryEmail}) gesendet.`);
+        console.log(`${LOG_PREFIX_SERVER} 📧 Reset-Link an ${user.username} (${user.email}) gesendet.`);
 
         res.json({ message: "Falls ein Account mit einer verifizierten E-Mail existiert, haben wir einen Link gesendet." });
 
@@ -22814,30 +22819,16 @@ app.get('/api/auth/verify-email', async (req, res) => {
     if (!token) return res.status(400).send(renderHtml("Fehler", "Kein Verifizierungs-Token angegeben.", true));
 
     try {
-        const user = await usersCollection.findOne({
-            $or: [
-                { verificationToken: token },
-                { recoveryVerificationToken: token }
-            ]
-        });
+        const result = await usersCollection.updateOne(
+            { verificationToken: token },
+            { $set: { isVerified: true },$unset: { verificationToken: "" } }
+        );
 
-        if (!user) {
+        if (result.matchedCount === 0) {
             return res.status(400).send(renderHtml("Fehler", "Der Link ist ungültig oder deine E-Mail wurde bereits verifiziert.", true));
         }
 
-        if (user.verificationToken === token) {
-            await usersCollection.updateOne(
-                { _id: user._id },
-                { $set: { isVerified: true },$unset: { verificationToken: "" } }
-            );
-        } else if (user.recoveryVerificationToken === token) {
-            await usersCollection.updateOne(
-                { _id: user._id },
-                { $set: { isRecoveryVerified: true },$unset: { recoveryVerificationToken: "" } }
-            );
-        }
-
-        res.send(renderHtml("Erfolgreich!", "Deine E-Mail-Adresse wurde verifiziert.<br><br>Du kannst diesen Tab nun schließen."));
+        res.send(renderHtml("Erfolgreich!", "Deine E-Mail-Adresse wurde verifiziert.<br><br>Du kannst diesen Tab nun schließen und in Limazon durchstarten."));
     } catch (err) {
         console.error(`${LOG_PREFIX_SERVER} Fehler bei Verifizierung:`, err);
         res.status(500).send(renderHtml("Serverfehler", "Ein Fehler ist bei der Verifizierung aufgetreten.", true));
