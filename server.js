@@ -2388,8 +2388,15 @@ app.post('/api/auth/register', async (req, res) => {
         return res.status(400).json({ error: 'Benutzername (3-30 Zeichen) und Passwort (min 6 Zeichen) erforderlich.' });
     }
     
+    // 1. Prüfen, ob das Feld leer ist
     if (!inviteCode || typeof inviteCode !== 'string' || inviteCode.trim() === '') {
         return res.status(400).json({ error: 'MISSING_INVITE', message: 'Bitte gib einen Invite-Code ein.' });
+    }
+
+    // 2. Prüfen, ob der Code in der DB existiert und unbenutzt ist (VOR der Transaktion)
+    const validCode = await inviteCodesCollection.findOne({ code: inviteCode.trim(), isUsed: false });
+    if (!validCode) {
+        return res.status(400).json({ error: 'INVALID_INVITE', message: 'Der eingegebene Code ist ungültig oder wurde bereits verwendet.' });
     }
 
     let finalEmail = null;
@@ -2411,9 +2418,6 @@ app.post('/api/auth/register', async (req, res) => {
 
     try {
         await sessionMongo.withTransaction(async () => {
-            const validCode = await inviteCodesCollection.findOne({ code: inviteCode.trim(), isUsed: false }, { session: sessionMongo });
-            if (!validCode) throw new Error('Der Code ist ungültig oder verbraucht.');
-
             const orConditions = [{ username: username.toLowerCase() }];
             if (finalEmail) orConditions.push({ email: finalEmail });
 
@@ -2456,6 +2460,8 @@ app.post('/api/auth/register', async (req, res) => {
             }
             
             await usersCollection.insertOne(newUser, { session: sessionMongo });
+            
+            // Code verbrennen
             await inviteCodesCollection.updateOne(
                 { _id: validCode._id },
                 { $set: { isUsed: true, usedBy: username.toLowerCase(), usedAt: new Date() } },
@@ -2526,13 +2532,13 @@ app.post('/api/auth/register', async (req, res) => {
         
     } catch (err) {
         console.error(`${LOG_PREFIX_SERVER} Fehler bei Registrierung:`, err);
-        const knownErrors = ['Der Code ist ungültig oder verbraucht.', 'Benutzername vergeben.', 'E-Mail-Adresse bereits registriert.'];
+        const knownErrors = ['Benutzername vergeben.', 'E-Mail-Adresse bereits registriert.'];
         if (knownErrors.includes(err.message)) {
             return res.status(400).json({ error: err.message });
         }
         res.status(500).json({ error: 'Serverfehler.' });
     } finally {
-        await sessionMongo.endSession();
+        await sessionMongo.endStatus ? sessionMongo.endSession() : sessionMongo.endSession();
     }
 });
 
