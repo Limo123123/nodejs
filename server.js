@@ -190,7 +190,8 @@ const publicPaths = [
 	'/api/oauth/authorize',
 	'/api/oauth/token',
 	'/api/auth/forgot-password',
-    '/api/auth/reset-password'
+    '/api/auth/reset-password',
+	'/api/auth/verify-email'
 ];
 
 app.use((req, res, next) => {
@@ -2372,95 +2373,149 @@ app.post('/api/auth/register', async (req, res) => {
     const fingerprint = req.headers['x-device-fingerprint'] || null;
     const deviceId = req.deviceId || null;
 
-    console.log(`${LOG_PREFIX_SERVER} Registrierungsversuch. IP: ${clientIp} | Fingerprint: ${fingerprint || 'N/A'}`);
-
     const queryConditions = [];
     if (deviceId) queryConditions.push({ deviceId: deviceId });
     if (fingerprint) queryConditions.push({ fingerprint: fingerprint });
 
     if (queryConditions.length > 0) {
         const isBanned = await db.collection('banned_devices').findOne({ $or: queryConditions });
-        if (isBanned) {
-            console.warn(`${LOG_PREFIX_SERVER} ⛔ Gebanntes Gerät blockiert bei Registrierung!`);
-            return res.status(403).json({ error: "Dieses Gerät wurde vom Server gesperrt." });
-        }
+        if (isBanned) return res.status(403).json({ error: "Dieses Gerät wurde vom Server gesperrt." });
     }
 
-    // inviteCode aus dem Body holen
-    const { username, password, inviteCode } = req.body;
+    const { username, password, inviteCode, email } = req.body;
     
     if (!username || !password || typeof username !== 'string' || typeof password !== 'string' || username.length < 3 || username.length > 30 || password.length < 6) {
         return res.status(400).json({ error: 'Benutzername (3-30 Zeichen) und Passwort (min 6 Zeichen) erforderlich.' });
     }
     
     if (!inviteCode || typeof inviteCode !== 'string' || inviteCode.trim() === '') {
-        return res.status(400).json({ error: 'Ein gültiger Bestätigungscode (Invite Code) ist zwingend erforderlich.' });
+        return res.status(400).json({ error: 'MISSING_INVITE', message: 'Bitte gib einen Invite-Code ein.' });
+    }
+
+    let finalEmail = null;
+    let requiresVerification = false;
+
+    if (email && typeof email === 'string' && email.trim() !== '') {
+        finalEmail = email.toLowerCase().trim();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(finalEmail)) {
+            return res.status(400).json({ error: 'Die angegebene E-Mail-Adresse ist ungültig.' });
+        }
+        requiresVerification = true;
     }
 
     const usernameRegex = /^[a-zA-Z0-9_äöüÄÖÜß]+$/;
-    if (!usernameRegex.test(username)) {
-        return res.status(400).json({ error: 'Der Name darf keine Emojis, Leerzeichen oder komischen Sonderzeichen enthalten!' });
-    }
-    
-    if (containsForbiddenWords(username)) {
-        return res.status(400).json({ error: 'Netter Versuch, aber dieser Name steht auf der schwarzen Liste des Einwohnermeldeamtes.' });
-    }
+    if (!usernameRegex.test(username)) return res.status(400).json({ error: 'Sonderzeichen im Namen sind verboten!' });
+    if (containsForbiddenWords(username)) return res.status(400).json({ error: 'Name ist blockiert.' });
 
     const sessionMongo = client.startSession();
 
     try {
         await sessionMongo.withTransaction(async () => {
-            // 1. Code prüfen (muss in Transaktion passieren, damit er nicht doppelt genutzt wird)
             const validCode = await inviteCodesCollection.findOne({ code: inviteCode.trim(), isUsed: false }, { session: sessionMongo });
-            if (!validCode) {
-                throw new Error('Der eingegebene Code ist ungültig oder wurde bereits verwendet.');
-            }
+            if (!validCode) throw new Error('Der Code ist ungültig oder verbraucht.');
 
-            const existingUser = await usersCollection.findOne({ username: username.toLowerCase() }, { session: sessionMongo });
+            const orConditions = [{ username: username.toLowerCase() }];
+            if (finalEmail) orConditions.push({ email: finalEmail });
+
+            const existingUser = await usersCollection.findOne({ $or: orConditions }, { session: sessionMongo });
+
             if (existingUser) {
-                throw new Error('Benutzername bereits vergeben.');
+                if (existingUser.username === username.toLowerCase()) throw new Error('Benutzername vergeben.');
+                else throw new Error('E-Mail-Adresse bereits registriert.');
             }
 
             const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
-            
+            let verificationToken = null;
+            if (requiresVerification) verificationToken = crypto.randomBytes(32).toString('hex');
+
             const newUser = {
-                username: username.toLowerCase(), 
-                password: hashedPassword, 
-                balance: 5000.00, 
-                tokens: DEFAULT_STARTING_TOKENS,
-                isAdmin: false, 
-                infinityMoney: false, 
-                unlockedInfinityMoney: false, 
-                createdAt: new Date(), 
-                productSellCooldowns: {}, 
-                schufaScore: 500, 
-                activeLoan: null,
-                lastDeviceId: deviceId,
-                lastFingerprint: fingerprint,
-                lastIp: clientIp,
-                knownFingerprints: fingerprint ? [fingerprint] : [],
-                knownDeviceIds: deviceId ? [deviceId] : []
+                username: username.toLowerCase(), password: hashedPassword, 
+                balance: 5000.00, tokens: DEFAULT_STARTING_TOKENS, isAdmin: false, 
+                infinityMoney: false, unlockedInfinityMoney: false, createdAt: new Date(), 
+                productSellCooldowns: {}, schufaScore: 500, activeLoan: null,
+                lastDeviceId: deviceId, lastFingerprint: fingerprint, lastIp: clientIp,
+                knownFingerprints: fingerprint ? [fingerprint] : [], knownDeviceIds: deviceId ? [deviceId] : []
             };
+
+            if (requiresVerification) {
+                newUser.email = finalEmail;
+                newUser.isVerified = false;
+                newUser.verificationToken = verificationToken;
+            } else {
+                newUser.isVerified = true;
+            }
             
             await usersCollection.insertOne(newUser, { session: sessionMongo });
-            
-            // 2. Code verbrennen
             await inviteCodesCollection.updateOne(
                 { _id: validCode._id },
                 { $set: { isUsed: true, usedBy: username.toLowerCase(), usedAt: new Date() } },
                 { session: sessionMongo }
             );
+
+            if (requiresVerification && mailTransporter) {
+                const frontendUrl = process.env.FRONTEND_URL || `${req.protocol}://${req.get('host')}`;
+                const verifyLink = `${frontendUrl}/api/auth/verify-email?token=${verificationToken}`;
+
+                const mailOptions = {
+                    from: `"Limazon Universe" <${process.env.SMTP_USER}>`,
+                    to: finalEmail,
+                    subject: 'Willkommen bei Limazon - E-Mail bestätigen',
+                    html: `
+                        <!DOCTYPE html>
+                        <html lang="de">
+                        <head>
+                            <meta charset="UTF-8">
+                            <link rel="icon" type="image/svg+xml" href="https://limazon.slimo.dev/favicon.svg">
+                            <style>
+                                body { background-color: #050505; color: #ffffff; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 0; }
+                                .wrapper { width: 100%; table-layout: fixed; background-color: #050505; padding: 40px 0; }
+                                .card { background: #141419; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 24px; max-width: 480px; margin: 0 auto; padding: 40px; box-shadow: 0 20px 40px rgba(0,0,0,0.8); }
+                                .logo { width: 36px; height: 36px; vertical-align: middle; margin-right: 10px; }
+                                h2 { font-size: 24px; font-weight: 900; letter-spacing: -0.5px; margin-top: 0; color: #ffffff; }
+                                p { color: #a3a3a3; font-size: 14px; line-height: 1.5; margin-bottom: 24px; }
+                                .btn { display: inline-block; padding: 14px 28px; background-color: #3b82f6; color: #ffffff !important; text-decoration: none; border-radius: 12px; font-weight: 700; font-size: 14px; box-shadow: 0 0 20px rgba(59, 130, 246, 0.4); text-align: center; }
+                                .btn:hover { background-color: #2563eb; }
+                                .footer { margin-top: 30px; font-size: 11px; color: #52525b; text-align: center; }
+                            </style>
+                        </head>
+                        <body>
+                            <center class="wrapper">
+                                <table class="card" width="100%" cellpadding="0" cellspacing="0">
+                                    <tr>
+                                        <td>
+                                            <div style="margin-bottom: 20px;">
+                                                <img src="https://limazon.slimo.dev/favicon.svg" class="logo" alt="Logo">
+                                                <span style="font-size: 20px; font-weight: 900; vertical-align: middle;">Limazon<span style="color: #3b82f6;">.</span></span>
+                                            </div>
+                                            <h2>E-Mail bestätigen</h2>
+                                            <p>Hallo <b>${username}</b>,</p>
+                                            <p>wir freuen uns, dass du in Limazon eingezogen bist. Bitte bestätige kurz deine E-Mail-Adresse, um deinen Account vollständig zu aktivieren.</p>
+                                            <p style="text-align: center; margin: 30px 0;">
+                                                <a href="${verifyLink}" class="btn">Account aktivieren</a>
+                                            </p>
+                                            <div class="footer">
+                                                Limazon.Universe • Ein geschlossenes System
+                                            </div>
+                                        </td>
+                                    </tr>
+                                </table>
+                            </center>
+                        </body>
+                        </html>
+                    `
+                };
+                await mailTransporter.sendMail(mailOptions);
+            }
         });
         
-        console.log(`${LOG_PREFIX_SERVER} User ${username.toLowerCase()} erfolgreich mit Code ${inviteCode.trim()} registriert.`);
-        res.status(201).json({ message: 'Registrierung erfolgreich!' });
+        if (requiresVerification) res.status(201).json({ message: 'Wir haben dir eine E-Mail geschickt. Bitte klicke auf den Link darin, um deinen Account zu aktivieren.' });
+        else res.status(201).json({ message: 'Registrierung erfolgreich! Du kannst dich jetzt einloggen.' });
         
     } catch (err) {
-        if (err.message === 'Der eingegebene Code ist ungültig oder wurde bereits verwendet.' || err.message === 'Benutzername bereits vergeben.') {
+        if (['Der eingegebene Code ist ungültig oder wurde bereits verwendet.', 'Benutzername ist bereits vergeben.', 'Diese E-Mail-Adresse ist bereits registriert.'].includes(err.message)) {
             return res.status(400).json({ error: err.message });
         }
-        console.error(`${LOG_PREFIX_SERVER} Fehler bei Registrierung für User ${username}:`, err);
-        res.status(500).json({ error: 'Fehler bei der Registrierung auf dem Server.' });
+        res.status(500).json({ error: 'Serverfehler.' });
     } finally {
         await sessionMongo.endSession();
     }
@@ -2499,29 +2554,38 @@ async function rateLimitLogin(req, res, next) {
 }
 
 app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
-    const { username, password, rememberMe } = req.body;
-
-    // IP Adresse ermitteln (hinter Proxies oder direkt)
+    const { username, password, rememberMe } = req.body; 
     const clientIp = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
 
-    console.log(`${LOG_PREFIX_SERVER} Login-Versuch für User: ${username ? username.substring(0, 3) + "***" : "LEER"} von IP: ${clientIp}`);
+    console.log(`${LOG_PREFIX_SERVER} Login-Versuch für: ${username ? username.substring(0, 3) + "***" : "LEER"} von IP: ${clientIp}`);
 
-    if (!username || !password) return res.status(400).json({ error: 'Benutzername und Passwort erforderlich.' });
+    if (!username || !password) return res.status(400).json({ error: 'Benutzername/E-Mail und Passwort erforderlich.' });
 
     try {
-        const user = await usersCollection.findOne({ username: username.toLowerCase() });
+        const searchStr = username.toLowerCase().trim();
+        const user = await usersCollection.findOne({ 
+            $or: [
+                { username: searchStr },
+                { email: searchStr }
+            ]
+        });
 
         if (!user) {
-            console.warn(`${LOG_PREFIX_SERVER} Login fehlgeschlagen: User ${username.toLowerCase()} nicht gefunden.`);
+            console.warn(`${LOG_PREFIX_SERVER} Login fehlgeschlagen: User/E-Mail ${username.toLowerCase()} nicht gefunden.`);
             return res.status(401).json({ error: 'Ungültige Anmeldedaten.' });
+        }
+        
+        if (user.email && user.isVerified === false) {
+            if (req.loginRateLimitKey && global.redisPub) {
+                global.redisPub.del(req.loginRateLimitKey).catch(() => {});
+            }
+            return res.status(403).json({ error: 'Bitte verifiziere zuerst deine E-Mail-Adresse! Prüfe dein Postfach (und den Spam-Ordner).' });
         }
 
         const match = await bcrypt.compare(password, user.password);
 
         if (match) {
-            // Check auf Deaktivierung VOR der Session-Erstellung
             if (user.isDeactivated) {
-                // Rate-Limit Key löschen, da Passwort ja stimmte
                 if (req.loginRateLimitKey && global.redisPub) {
                     global.redisPub.del(req.loginRateLimitKey).catch(e => console.error("Redis Del Error", e));
                 }
@@ -2531,17 +2595,14 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
                 });
             }
             
-            // Bei Erfolg den Rate-Limit Zähler für diese IP löschen!
             if (req.loginRateLimitKey && global.redisPub) {
                 global.redisPub.del(req.loginRateLimitKey).catch(e => console.error("Redis Del Error", e));
             }
             await logActivity(req, "USER_LOGIN", { status: "success" });
 
-            // 1. Hole Cookie und Fingerprint aus dem Request
             const deviceId = req.deviceId || null;
             const fingerprint = req.headers['x-device-fingerprint'] || null;
 
-            // 2. Ban-Check (IP-frei!)
             let isDeviceBanned = null;
             const queryConditions = [];
             if (deviceId) queryConditions.push({ deviceId: deviceId });
@@ -2552,7 +2613,6 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
             }
 
             if (isDeviceBanned) {
-                // Wenn das Gerät gebannt ist, prüfen wir: Ist es trotzdem ein Admin?
                 if (user.isAdmin) {
                     console.log(`${LOG_PREFIX_SERVER} ⚠️ ADMIN BYPASS: Gebanntes Gerät loggt sich als Admin ${user.username} ein.`);
                 } else {
@@ -2561,7 +2621,6 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
                 }
             }
 
-            // 3. Spuren für zukünftige Bans abspeichern
             const updateData = { 
                 $set: { 
                     lastDeviceId: deviceId, 
@@ -2571,7 +2630,6 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
                 } 
             };
 
-            // Füge neue Fingerprints/Cookies lückenlos zur Akte hinzu ($addToSet vermeidet Duplikate)
             const addToSetData = {};
             if (fingerprint) addToSetData.knownFingerprints = fingerprint;
             if (deviceId) addToSetData.knownDeviceIds = deviceId;
@@ -2604,8 +2662,8 @@ app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
                     user: {
                         userId: user._id.toString(),
                         username: user.username,
-                        balance: IS_APRIL_FOOLS ? 0 : user.balance, // FAKE GUTHABEN
-                        tokens: IS_APRIL_FOOLS ? 0 : (user.tokens || 0), // FAKE TOKENS
+                        balance: IS_APRIL_FOOLS ? 0 : user.balance,
+                        tokens: IS_APRIL_FOOLS ? 0 : (user.tokens || 0),
                         isAdmin: user.isAdmin || false,
                         infinityMoney: effectiveInfinityMoney,
                         unlockedInfinityMoney: user.unlockedInfinityMoney || false,
@@ -22516,12 +22574,84 @@ app.post('/api/account/recovery-email', isAuthenticated, async (req, res) => {
         return res.status(400).json({ error: "Bitte eine gültige E-Mail-Adresse angeben." });
     }
 
+    const finalEmail = email.trim().toLowerCase();
+
     try {
+        const existing = await usersCollection.findOne({ recoveryEmail: finalEmail, _id: { $ne: userId } });
+        if (existing) {
+            return res.status(409).json({ error: "Diese E-Mail wird bereits von einem anderen Account genutzt." });
+        }
+
+        const verificationToken = crypto.randomBytes(32).toString('hex');
+
         await usersCollection.updateOne(
             { _id: userId }, 
-            { $set: { recoveryEmail: email.trim().toLowerCase() } }
+            { 
+                $set: { 
+                    recoveryEmail: finalEmail,
+                    isRecoveryVerified: false,
+                    recoveryVerificationToken: verificationToken
+                } 
+            }
         );
-        res.json({ message: "Wiederherstellungs-E-Mail erfolgreich gespeichert!" });
+
+        if (mailTransporter) {
+            const frontendUrl = process.env.FRONTEND_URL || `${req.protocol}://${req.get('host')}`;
+            const verifyLink = `${frontendUrl}/api/auth/verify-email?token=${verificationToken}`;
+
+            const mailOptions = {
+                from: `"Limazon Universe" <${process.env.SMTP_USER}>`,
+                to: finalEmail,
+                subject: 'Wiederherstellungs-E-Mail bestätigen - Limazon',
+                html: `
+                    <!DOCTYPE html>
+                    <html lang="de">
+                    <head>
+                        <meta charset="UTF-8">
+                        <link rel="icon" type="image/svg+xml" href="https://limazon.slimo.dev/favicon.svg">
+                        <style>
+                            body { background-color: #050505; color: #ffffff; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 0; }
+                            .wrapper { width: 100%; table-layout: fixed; background-color: #050505; padding: 40px 0; }
+                            .card { background: #141419; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 24px; max-width: 480px; margin: 0 auto; padding: 40px; box-shadow: 0 20px 40px rgba(0,0,0,0.8); }
+                            .logo { width: 36px; height: 36px; vertical-align: middle; margin-right: 10px; }
+                            h2 { font-size: 24px; font-weight: 900; letter-spacing: -0.5px; margin-top: 0; color: #ffffff; }
+                            p { color: #a3a3a3; font-size: 14px; line-height: 1.5; margin-bottom: 24px; }
+                            .btn { display: inline-block; padding: 14px 28px; background-color: #3b82f6; color: #ffffff !important; text-decoration: none; border-radius: 12px; font-weight: 700; font-size: 14px; box-shadow: 0 0 20px rgba(59, 130, 246, 0.4); text-align: center; }
+                            .btn:hover { background-color: #2563eb; }
+                            .footer { margin-top: 30px; font-size: 11px; color: #52525b; text-align: center; }
+                        </style>
+                    </head>
+                    <body>
+                        <center class="wrapper">
+                            <table class="card" width="100%" cellpadding="0" cellspacing="0">
+                                <tr>
+                                    <td>
+                                        <div style="margin-bottom: 20px;">
+                                            <img src="https://limazon.slimo.dev/favicon.svg" class="logo" alt="Logo">
+                                            <span style="font-size: 20px; font-weight: 900; vertical-align: middle;">Limazon<span style="color: #3b82f6;">.</span></span>
+                                        </div>
+                                        <h2>Sicherheits-Update</h2>
+                                        <p>Hallo <b>${req.session.username}</b>,</p>
+                                        <p>du hast soeben eine neue E-Mail-Adresse für die Kontowiederherstellung hinterlegt. Bitte klicke auf den Button, um sie zu bestätigen.</p>
+                                        <p style="text-align: center; margin: 30px 0;">
+                                            <a href="${verifyLink}" class="btn">Adresse bestätigen</a>
+                                        </p>
+                                        <p><i>Falls du das nicht warst, kannst du diese E-Mail ignorieren.</i></p>
+                                        <div class="footer">
+                                            Limazon.Universe • Ein geschlossenes System
+                                        </div>
+                                    </td>
+                                </tr>
+                            </table>
+                        </center>
+                    </body>
+                    </html>
+                `
+            };
+            await mailTransporter.sendMail(mailOptions);
+        }
+
+        res.json({ message: "Wiederherstellungs-E-Mail gespeichert! Bitte prüfe dein Postfach zur Verifizierung." });
     } catch (e) {
         console.error(`${LOG_PREFIX_SERVER} Fehler beim Speichern der E-Mail:`, e);
         res.status(500).json({ error: "Fehler beim Speichern der E-Mail." });
@@ -22537,9 +22667,9 @@ app.post('/api/auth/forgot-password', rateLimitLogin, async (req, res) => {
     try {
         const user = await usersCollection.findOne({ username: username.toLowerCase() });
         
-        // Anti-Enumeration: Verrate nicht, ob der User existiert oder eine E-Mail hat.
-        if (!user || !user.recoveryEmail) {
-            return res.json({ message: "Falls ein Account mit einer hinterlegten E-Mail existiert, haben wir einen Link gesendet." });
+        // Anti-Enumeration: Verrate nicht, ob der User existiert, eine E-Mail hat oder verifiziert ist.
+        if (!user || !user.recoveryEmail || !user.isRecoveryVerified) {
+            return res.json({ message: "Falls ein Account mit einer verifizierten E-Mail existiert, haben wir einen Link gesendet." });
         }
 
         if (!mailTransporter) {
@@ -22547,7 +22677,6 @@ app.post('/api/auth/forgot-password', rateLimitLogin, async (req, res) => {
             return res.status(500).json({ error: "Das E-Mail-System ist derzeit offline." });
         }
 
-        // Token generieren (gültig für 1 Stunde)
         const resetToken = crypto.randomBytes(32).toString('hex');
         const tokenExpires = new Date(Date.now() + 60 * 60 * 1000);
 
@@ -22559,9 +22688,8 @@ app.post('/api/auth/forgot-password', rateLimitLogin, async (req, res) => {
         const frontendUrl = process.env.FRONTEND_URL || `${req.protocol}://${req.get('host')}`;
         const resetLink = `${frontendUrl}/themes/reset-password.html?token=${resetToken}&username=${encodeURIComponent(user.username)}`;
 
-        // E-Mail senden mit schickem Dark-Mode-Style & Favicon
         const mailOptions = {
-            from: `"Limazon Universe" <${smtpUser}>`,
+            from: `"Limazon Universe" <${process.env.SMTP_USER}>`,
             to: user.recoveryEmail,
             subject: 'Passwort zurücksetzen - Limazon',
             html: `
@@ -22586,7 +22714,6 @@ app.post('/api/auth/forgot-password', rateLimitLogin, async (req, res) => {
                     <center class="wrapper">
                         <table class="card" width="100%" cellpadding="0" cellspacing="0">
                             <tr>
-                                ____
                                 <td>
                                     <div style="margin-bottom: 20px;">
                                         <img src="https://limazon.slimo.dev/favicon.svg" class="logo" alt="Logo">
@@ -22614,7 +22741,7 @@ app.post('/api/auth/forgot-password', rateLimitLogin, async (req, res) => {
         await mailTransporter.sendMail(mailOptions);
         console.log(`${LOG_PREFIX_SERVER} 📧 Reset-Link an ${user.username} (${user.recoveryEmail}) gesendet.`);
 
-        res.json({ message: "Falls ein Account mit einer hinterlegten E-Mail existiert, haben wir einen Link gesendet." });
+        res.json({ message: "Falls ein Account mit einer verifizierten E-Mail existiert, haben wir einen Link gesendet." });
 
     } catch (e) {
         console.error(`${LOG_PREFIX_SERVER} Fehler beim Passwort-Reset:`, e);
@@ -22623,44 +22750,97 @@ app.post('/api/auth/forgot-password', rateLimitLogin, async (req, res) => {
 });
 
 // 3. Neues Passwort setzen (Public)
-app.post('/api/auth/reset-password', async (req, res) => {
-    const { username, token, newPassword } = req.body;
+app.post('/api/auth/reset-password', rateLimitLogin, async (req, res) => {
+    const { token, newPassword } = req.body;
 
-    if (!username || !token || !newPassword || newPassword.length < 6) {
-        return res.status(400).json({ error: "Ungültige Daten oder Passwort zu kurz (min. 6 Zeichen)." });
+    if (!token || !newPassword || newPassword.length < 6) {
+        return res.status(400).json({ error: "Ungültiger Token oder Passwort zu kurz (min. 6 Zeichen)." });
     }
 
     try {
         const user = await usersCollection.findOne({ 
-            username: username.toLowerCase(),
-            resetToken: token
+            resetToken: token,
+            resetTokenExpires: { $gt: new Date() } 
         });
 
         if (!user) {
-            return res.status(400).json({ error: "Ungültiger oder bereits genutzter Token." });
-        }
-
-        if (new Date() > new Date(user.resetTokenExpires)) {
-            return res.status(400).json({ error: "Der Token ist abgelaufen. Bitte fordere einen neuen an." });
+            return res.status(400).json({ error: "Der Wiederherstellungs-Link ist ungültig oder bereits abgelaufen." });
         }
 
         const hashedPassword = await bcrypt.hash(newPassword, SALT_ROUNDS);
 
-        // Neues Passwort speichern und Token sofort vernichten
         await usersCollection.updateOne(
             { _id: user._id },
             { 
-                $set: { password: hashedPassword },
-                $unset: { resetToken: "", resetTokenExpires: "" }
+                $set: { password: hashedPassword },$unset: { resetToken: "", resetTokenExpires: "" }
             }
         );
 
-        console.log(`${LOG_PREFIX_SERVER} 🔐 User ${user.username} hat sein Passwort über E-Mail zurückgesetzt.`);
         res.json({ message: "Dein Passwort wurde erfolgreich geändert! Du kannst dich jetzt einloggen." });
-
-    } catch (e) {
-        console.error(`${LOG_PREFIX_SERVER} Fehler beim Speichern des neuen Passworts:`, e);
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler beim Zurücksetzen des Passworts:`, err);
         res.status(500).json({ error: "Fehler beim Zurücksetzen des Passworts." });
+    }
+});
+
+app.get('/api/auth/verify-email', async (req, res) => {
+    const { token } = req.query;
+    
+    const renderHtml = (title, message, isError = false) => `
+        <!DOCTYPE html>
+        <html lang="de">
+        <head>
+            <meta charset="UTF-8">
+            <title>Limazon - E-Mail Verifizierung</title>
+            <link rel="icon" type="image/svg+xml" href="https://limazon.slimo.dev/favicon.svg">
+            <style>
+                body { background-color: #050505; color: #ffffff; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 0; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+                .card { background: #141419; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 24px; max-width: 480px; width: 100%; padding: 40px; box-shadow: 0 20px 40px rgba(0,0,0,0.8); text-align: center; }
+                .logo { width: 48px; height: 48px; margin-bottom: 20px; }
+                h2 { font-size: 24px; font-weight: 900; letter-spacing: -0.5px; margin-top: 0; color: ${isError ? '#ef4444' : '#2ecc71'}; }
+                p { color: #a3a3a3; font-size: 15px; line-height: 1.6; margin-bottom: 0; }
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <img src="https://limazon.slimo.dev/favicon.svg" class="logo" alt="Logo">
+                <h2>${title}</h2>
+                <p>${message}</p>
+            </div>
+        </body>
+        </html>
+    `;
+
+    if (!token) return res.status(400).send(renderHtml("Fehler", "Kein Verifizierungs-Token angegeben.", true));
+
+    try {
+        const user = await usersCollection.findOne({
+            $or: [
+                { verificationToken: token },
+                { recoveryVerificationToken: token }
+            ]
+        });
+
+        if (!user) {
+            return res.status(400).send(renderHtml("Fehler", "Der Link ist ungültig oder deine E-Mail wurde bereits verifiziert.", true));
+        }
+
+        if (user.verificationToken === token) {
+            await usersCollection.updateOne(
+                { _id: user._id },
+                { $set: { isVerified: true },$unset: { verificationToken: "" } }
+            );
+        } else if (user.recoveryVerificationToken === token) {
+            await usersCollection.updateOne(
+                { _id: user._id },
+                { $set: { isRecoveryVerified: true },$unset: { recoveryVerificationToken: "" } }
+            );
+        }
+
+        res.send(renderHtml("Erfolgreich!", "Deine E-Mail-Adresse wurde verifiziert.<br><br>Du kannst diesen Tab nun schließen."));
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} Fehler bei Verifizierung:`, err);
+        res.status(500).send(renderHtml("Serverfehler", "Ein Fehler ist bei der Verifizierung aufgetreten.", true));
     }
 });
 
