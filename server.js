@@ -22996,7 +22996,7 @@ app.get('/api/limazondb/search', isAuthenticated, async (req, res) => {
     } catch (e) { res.status(500).json({ error: "Suchfehler." }); }
 });
 
-// Detail: User (Datenschutzfreundlich!)
+// Detail: User
 app.get('/api/limazondb/details/user/:id', isAuthenticated, async (req, res) => {
     try {
         const userId = new ObjectId(req.params.id);
@@ -23008,12 +23008,21 @@ app.get('/api/limazondb/details/user/:id', isAuthenticated, async (req, res) => 
 
         const [houses, pets, gang] = await Promise.all([
             ownedPropertiesCollection.find({ ownerId: userId }, { projection: { name: 1, img: 1 } }).toArray(),
-            petsCollection.find({ userId: userId }, { projection: { name: 1, icon: 1 } }).toArray(),
+            petsCollection.find({ userId: userId }, { projection: { name: 1, icon: 1, inPension: 1 } }).toArray(),
             db.collection('gangs').findOne({ members: userId }, { projection: { name: 1, tag: 1 } })
         ]);
 
+        if (!user.crimeStats) user.crimeStats = { successfulRobberies: 0, failedRobberies: 0 };
+        if (!user.tokens) user.tokens = 0;
+        if (!user.schufaScore) user.schufaScore = 500;
+        if (!user.job) user.job = "Arbeitslos";
+        if (!user.jobLevel) user.jobLevel = 1;
+
         res.json({ user, assets: { houses, pets, gang } });
-    } catch (e) { res.status(500).json({ error: "Fehler beim Laden." }); }
+    } catch (e) { 
+        console.error(`${LOG_PREFIX_LDB} Fehler bei User-Details:`, e);
+        res.status(500).json({ error: "Fehler beim Laden." }); 
+    }
 });
 
 // Detail: Tinda Ehe
@@ -23052,9 +23061,12 @@ app.get('/api/limazondb/details/pet/:id', isAuthenticated, async (req, res) => {
         const pet = await petsCollection.findOne({ _id: petId });
         if (!pet) return res.status(404).json({ error: "Tier nicht gefunden." });
         
-        // Hunger berechnen (wie im Tamagotchi Backend)
-        const hoursPassed = (Date.now() - new Date(pet.lastFedAt).getTime()) / (1000 * 60 * 60);
-        let hungerPercent = 100 - ((hoursPassed / pet.starvationTimeHours) * 100);
+        // Hunger berechnen (100% wenn in Pension!)
+        let hungerPercent = 100;
+        if (!pet.inPension) {
+            const hoursPassed = (Date.now() - new Date(pet.lastFedAt).getTime()) / (1000 * 60 * 60);
+            hungerPercent = 100 - ((hoursPassed / pet.starvationTimeHours) * 100);
+        }
         
         res.json({ pet: { ...pet, currentHunger: Math.max(0, Math.round(hungerPercent)) } });
     } catch (e) { res.status(500).json({ error: "Fehler." }); }
