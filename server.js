@@ -22841,6 +22841,281 @@ app.get('/api/auth/verify-email', async (req, res) => {
     }
 });
 
+// =========================================================
+// === 📊 LIMAZON DB (STATISTIK-AGGREGATOR & API) ===
+// =========================================================
+const LOG_PREFIX_LDB = "[LimazonDB]";
+
+// RAM-Cache für die LimazonDB (Damit Requests 0ms dauern)
+let limazonDbCache = null;
+
+// Diese Funktion sammelt alle Daten ressourcenschonend zusammen
+async function generateLimazonDbStats() {
+    console.log(`${LOG_PREFIX_LDB} 🔄 Generiere neue LimazonDB Statistiken...`);
+    try {
+        const now = new Date();
+        const activeTimeframe = new Date(Date.now() - 24 * 60 * 60 * 1000); // 24h
+
+        // 1. Zählungen (relativ schnell in MongoDB)
+        const [
+            totalUsers,
+            activeUsers24h,
+            totalPets,
+            totalTindaMatches,
+            totalQuizzes,
+            totalHouses,
+            totalGangs
+        ] = await Promise.all([
+            usersCollection.countDocuments({}),
+            usersCollection.countDocuments({ lastLogin: { $gte: activeTimeframe } }),
+            petsCollection.countDocuments({}),
+            limChatsCollection.countDocuments({ type: 'tinda' }),
+            db.collection('quizzes').countDocuments({}),
+            ownedPropertiesCollection.countDocuments({}),
+            db.collection('gangs').countDocuments({})
+        ]);
+
+        // 2. Wirtschafts-Volumen (Summen)
+        const economyStats = await usersCollection.aggregate([
+            { $group: { _id: null, totalMoney: { $sum: "$balance" }, totalTokens: { $sum: "$tokens" } } }
+        ]).toArray();
+        const totalMoney = economyStats[0]?.totalMoney || 0;
+
+        const treasury = await systemSettingsCollection.findOne({ id: 'state_treasury' });
+        const stateMoney = treasury ? treasury.balance : 0;
+
+        // 3. Performantes Stonks/Produkt-Ranking (AUS DEM RAM, NICHT AUS DER DB!)
+        let trendingProducts = [];
+        let loserProducts = [];
+        
+        if (globalProductCache && globalProductCache.length > 0) {
+            // Nur echte Produkte filtern
+            const stonks = globalProductCache.filter(p => !p.isTokenCard);
+            
+            // Prozentuale Änderung berechnen (Simuliert für das Frontend)
+            const withChange = stonks.map(s => {
+                const cPrice = parseFloat(s.currentPrice || s.price.replace(/[^0-9.]/g, '')) || 0;
+                const bPrice = parseFloat(s.basePrice || cPrice);
+                const percentChange = bPrice > 0 ? ((cPrice - bPrice) / bPrice) * 100 : 0;
+                return { ...s, currentPriceNum: cPrice, percentChange };
+            });
+
+            // Top Gewinner (Aufsteigend sortieren und Top 5 nehmen)
+            trendingProducts = [...withChange].sort((a, b) => b.percentChange - a.percentChange).slice(0, 5);
+            // Top Verlierer
+            loserProducts = [...withChange].sort((a, b) => a.percentChange - b.percentChange).slice(0, 5);
+        }
+
+        // 4. Das finale Objekt zusammenbauen
+        const dbStats = {
+            lastUpdated: now.toISOString(),
+            population: {
+                total: totalUsers,
+                active24h: activeUsers24h
+            },
+            economy: {
+                totalCirculation: totalMoney + stateMoney,
+                userMoney: totalMoney,
+                stateMoney: stateMoney
+            },
+            social: {
+                tindaMatches: totalTindaMatches,
+                petsAdopted: totalPets,
+                quizzesCreated: totalQuizzes,
+                gangsFormed: totalGangs,
+                housesOwned: totalHouses
+            },
+            markets: {
+                trending: trendingProducts.map(p => ({ id: p.id, name: p.name, price: p.currentPriceNum, change: p.percentChange, img: p.image_url })),
+                crashing: loserProducts.map(p => ({ id: p.id, name: p.name, price: p.currentPriceNum, change: p.percentChange, img: p.image_url }))
+            }
+        };
+
+        // Cache aktualisieren
+        limazonDbCache = dbStats;
+
+        // Historie in DB speichern (Für die Sparkline-Graphen im Frontend: 1 Eintrag pro Tag)
+        // Setzt das Datum auf 00:00 Uhr des aktuellen Tages
+        const todayDateStr = now.toISOString().split('T')[0]; 
+        await db.collection('limazondb_history').updateOne(
+            { dateStr: todayDateStr },
+            { 
+                $set: { 
+                    dateStr: todayDateStr, 
+                    activeUsers: activeUsers24h,
+                    totalMoney: totalMoney,
+                    timestamp: now 
+                } 
+            },
+            { upsert: true }
+        );
+
+        console.log(`${LOG_PREFIX_LDB} ✅ Update abgeschlossen.`);
+    } catch (e) {
+        console.error(`${LOG_PREFIX_LDB} ❌ Fehler bei Aggregation:`, e);
+    }
+}
+
+// Den Job auf dem Master-Kern alle 15 Minuten laufen lassen
+if (cluster.isPrimary) {
+    // Sofort beim Start einmal ausführen
+    setTimeout(generateLimazonDbStats, 10000); 
+    // Dann alle 15 Minuten
+    setInterval(generateLimazonDbStats, 15 * 60 * 1000);
+}
+
+// API ENDPUNKT FÜR DAS FRONTEND
+app.get('/api/limazondb/overview', async (req, res) => {
+    // Wenn der Cache leer ist (Server gerade erst gestartet), kurz Live-Daten berechnen
+    if (!limazonDbCache && cluster.isPrimary) {
+        await generateLimazonDbStats();
+    }
+    
+    // Historien-Daten für die Graphen laden (letzte 14 Tage)
+    try {
+        const history = await db.collection('limazondb_history')
+            .find({})
+            .sort({ dateStr: -1 })
+            .limit(14)
+            .toArray();
+
+        res.json({
+            current: limazonDbCache || { status: "Wird berechnet..." },
+            history: history.reverse() // Älteste zuerst für den Graphen
+        });
+    } catch (e) {
+        res.status(500).json({ error: "LimazonDB offline." });
+    }
+});
+
+// 1. Globale Suche (Extrem performant durch Limitierung & RAM)
+app.get('/api/limazondb/search', async (req, res) => {
+    const { q } = req.query;
+    if (!q || q.length < 2) return res.json({ users: [], products: [], pets: [], tinda: [] });
+
+    const searchRegex = new RegExp(q, 'i');
+
+    try {
+        // A) Produkte (AUS DEM RAM CACHE = 0ms!)
+        const products = globalProductCache
+            .filter(p => p.name.toLowerCase().includes(q.toLowerCase()) || String(p.id) === q)
+            .slice(0, 10);
+
+        // B) User (DB Search mit Limit & Projection)
+        const users = await usersCollection.find(
+            { username: searchRegex },
+            { projection: { username: 1, role: 1, isMayor: 1, isChancellor: 1, _id: 1 } }
+        ).limit(10).toArray();
+
+        // C) Haustiere
+        const pets = await petsCollection.find(
+            { name: searchRegex },
+            { projection: { name: 1, icon: 1, typeName: 1, ownerName: 1, _id: 1 } }
+        ).limit(10).toArray();
+
+        // D) Öffentliche Tinda-Ehen / Familien (Nur Metadaten!)
+        const tindaFamilies = await limChatsCollection.find(
+            { 
+                type: 'tinda', 
+                isMarried: true,
+                // Suche nach einem der Partner
+                $or: [
+                    { tindaPartnerName: searchRegex },
+                    { participantNames: searchRegex } // Angenommen, du speicherst participantNames im Tinda Chat
+                ]
+            },
+            { projection: { tindaPartnerName: 1, isMarried: 1, children: 1, participants: 1, createdAt: 1, _id: 1 } }
+        ).limit(5).toArray();
+
+        res.json({ products, users, pets, tinda: tindaFamilies });
+    } catch (e) {
+        console.error(`${LOG_PREFIX_LDB} Such-Fehler:`, e);
+        res.status(500).json({ error: "Datenbank-Suche fehlgeschlagen." });
+    }
+});
+
+// 2. User Detail-Akte abrufen
+app.get('/api/limazondb/details/user/:id', async (req, res) => {
+    try {
+        const userId = new ObjectId(req.params.id);
+        
+        // 1. Grunddaten (Stripping sensibler Daten)
+        const user = await usersCollection.findOne(
+            { _id: userId },
+            { projection: { 
+                password: 0, email: 0, resetToken: 0, verificationToken: 0, 
+                lastIp: 0, knownIps: 0, deviceId: 0, fingerprint: 0, passkeys: 0 
+            }}
+        );
+
+        if (!user) return res.status(404).json({ error: "Userakte nicht gefunden." });
+
+        // 2. Schnelle Metriken aggregieren
+        const [houses, pets, gang] = await Promise.all([
+            ownedPropertiesCollection.find({ ownerId: userId }, { projection: { name: 1, img: 1 } }).toArray(),
+            petsCollection.find({ userId: userId }, { projection: { name: 1, icon: 1 } }).toArray(),
+            db.collection('gangs').findOne({ members: userId }, { projection: { name: 1, tag: 1 } })
+        ]);
+
+        res.json({ 
+            user: {
+                username: user.username,
+                balance: user.balance,
+                tokens: user.tokens || 0,
+                schufaScore: user.schufaScore || 500,
+                job: user.job || "Arbeitslos",
+                jobLevel: user.jobLevel || 1,
+                role: user.role || (user.isAdmin ? 'Admin' : 'Bürger'),
+                joinDate: user.createdAt || user._id.getTimestamp(),
+                achievements: (user.achievements || []).length,
+                crimeStats: user.crimeStats || { successfulRobberies: 0, failedRobberies: 0 }
+            },
+            assets: { houses, pets, gang }
+        });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der Akte." });
+    }
+});
+
+// 3. Tinda Ehe/Familien Details (Ohne Nachrichten!)
+app.get('/api/limazondb/details/tinda/:id', async (req, res) => {
+    try {
+        const chatId = new ObjectId(req.params.id);
+        const chat = await limChatsCollection.findOne(
+            { _id: chatId, type: 'tinda' },
+            { projection: { participants: 1, tindaPartnerName: 1, isMarried: 1, children: 1, createdAt: 1 } }
+        );
+
+        if (!chat) return res.status(404).json({ error: "Beziehung existiert nicht mehr." });
+
+        // Den Namen des echten Users holen
+        const realUser = await usersCollection.findOne({ _id: chat.participants[0] }, { projection: { username: 1 } });
+
+        // Kinder-Details holen (falls vorhanden)
+        let childrenDetails = [];
+        if (chat.children && chat.children.length > 0) {
+            // Lade die tinda_child Chats, um den Hunger/Spaß-Status zu sehen!
+            childrenDetails = await limChatsCollection.find(
+                { type: 'tinda_child', participants: chat.participants[0], tindaPartnerName: chat.tindaPartnerName },
+                { projection: { childName: 1, hunger: 1, fun: 1, lastFedAt: 1 } }
+            ).toArray();
+        }
+
+        res.json({
+            marriage: {
+                partner1: realUser ? realUser.username : "Unbekannt",
+                partner2: chat.tindaPartnerName,
+                isMarried: chat.isMarried,
+                matchedAt: chat.createdAt,
+                childCount: (chat.children || []).length
+            },
+            childrenStats: childrenDetails
+        });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der Familienakte." });
+    }
+});
+
 app.use((req, res) => {
     console.warn(`${LOG_PREFIX_SERVER} Unbekannter Endpoint aufgerufen: ${req.method} ${req.originalUrl} von IP ${req.ip}`);
     res.status(404).send('Endpoint nicht gefunden');
