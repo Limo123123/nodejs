@@ -1996,6 +1996,15 @@ MongoClient.connect(mongoUri)
 					console.error("Fehler beim Synchronisieren des Krypto-Marktes:", e);
 				}
 			});
+			
+			// LimazonDB Cache Empfänger
+            redisSub.subscribe('sync-limazondb', (message) => {
+                try {
+                    limazonDbCache = JSON.parse(message);
+                } catch (e) {
+                    console.error("Fehler beim Synchronisieren der LimazonDB:", e);
+                }
+            });
 
             // Teachermon-Cache auf allen Kernen leeren
             redisSub.subscribe('sync-teachermon-cache', () => {
@@ -22895,7 +22904,7 @@ async function generateLimazonDbStats() {
         }
 
         // 4. Objekt zusammenbauen
-        limazonDbCache = {
+        const dbStats = {
             lastUpdated: now.toISOString(),
             population: { total: totalUsers, active24h: activeUsers24h },
             economy: { totalCirculation: totalMoney + stateMoney, userMoney: totalMoney, stateMoney: stateMoney },
@@ -22905,6 +22914,15 @@ async function generateLimazonDbStats() {
                 crashing: loserProducts.map(p => ({ id: p.id, name: p.name, price: p.currentPriceNum, change: p.percentChange, img: p.image_url }))
             }
         };
+
+        limazonDbCache = dbStats;
+
+        if (global.redisPub) {
+            // Für Worker, die neu starten:
+            await global.redisPub.set('limazondb_cache', JSON.stringify(dbStats));
+            // Für Worker, die gerade live sind:
+            global.redisPub.publish('sync-limazondb', JSON.stringify(dbStats));
+        }
 
         // Historie in DB speichern (Für Sparkline Graphen)
         const todayDateStr = now.toISOString().split('T')[0]; 
@@ -22928,11 +22946,27 @@ if (cluster.isPrimary) {
 
 // Overview & History
 app.get('/api/limazondb/overview', isAuthenticated, async (req, res) => {
-    if (!limazonDbCache && cluster.isPrimary) await generateLimazonDbStats();
+    // Wenn der lokale Worker-Cache leer ist, holen wir es aus Redis
+    if (!limazonDbCache && global.redisPub) {
+        try {
+            const cachedStr = await global.redisPub.get('limazondb_cache');
+            if (cachedStr) {
+                limazonDbCache = JSON.parse(cachedStr);
+            }
+        } catch (e) {
+            console.error(`${LOG_PREFIX_LDB} Fehler beim Lesen aus Redis:`, e);
+        }
+    }
+
     try {
         const history = await db.collection('limazondb_history').find({}).sort({ dateStr: -1 }).limit(14).toArray();
-        res.json({ current: limazonDbCache || { status: "Wird berechnet..." }, history: history.reverse() });
-    } catch (e) { res.status(500).json({ error: "LimazonDB offline." }); }
+        res.json({ 
+            current: limazonDbCache || { status: "Wird berechnet..." }, 
+            history: history.reverse() 
+        });
+    } catch (e) { 
+        res.status(500).json({ error: "LimazonDB offline." }); 
+    }
 });
 
 // Deep Search (Performant & Limitiert)
