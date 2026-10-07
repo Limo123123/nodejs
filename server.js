@@ -195,7 +195,8 @@ const publicPaths = [
 	'/api/auth/google',
 	'/api/auth/google/callback',
 	'/api/auth/github',
-	'/api/auth/github/callback'
+	'/api/auth/github/callback',
+	'/api/auth/oauth-complete'
 ];
 
 app.use((req, res, next) => {
@@ -2823,8 +2824,7 @@ app.get('/api/auth/me', isAuthenticated, async (req, res) => {
         
         // FAKE ADMIN FÜR FRONTEND: Wenn er eine Rolle ungleich 'user' hat, sagen wir dem UI "Er ist Admin"
         const showAdminUI = user.isAdmin === true || (user.role && user.role !== 'user') || (user.permissions && user.permissions.length > 0);
-
-				// In app.get('/api/auth/me', ...)
+		
 				res.json({ 
     				userId: user._id.toString(), 
     				username: user.username, 
@@ -2835,8 +2835,10 @@ app.get('/api/auth/me', isAuthenticated, async (req, res) => {
     				infinityMoney: effectiveInfinityMoney, 
     				unlockedInfinityMoney: user.unlockedInfinityMoney || false, 
     				productSellCooldowns: user.productSellCooldowns || {},
-    				schufaScore: user.schufaScore || 500, // <--- NEU
-    				hasActiveLoan: !!user.activeLoan      // <--- NEU (hilft dem Frontend für Warn-Badges)
+    				schufaScore: user.schufaScore || 500,
+    				hasActiveLoan: !!user.activeLoan,
+					hasGoogle: !!user.googleId,
+					hasGithub: !!user.githubId
 				});
     } catch (err) { 
         console.error(`${LOG_PREFIX_SERVER} Fehler /api/auth/me ${req.session.username}:`, err); 
@@ -23101,67 +23103,66 @@ async function generateValidOAuthUsername(baseName) {
 async function handleOAuthUser(req, res, provider, profile) {
     const sessionMongo = client.startSession();
     try {
+        // SZENARIO 1: USER IST BEREITS EINGELOGGT -> ACCOUNT VERKNÜPFEN (Settings)
+        if (req.session && req.session.userId) {
+            // Checken ob dieser Provider-Account evtl. schon wem anders gehört
+            const existingLink = await usersCollection.findOne({ [`${provider}Id`]: profile.id });
+            if (existingLink && existingLink._id.toString() !== req.session.userId) {
+                return res.redirect(`${process.env.FRONTEND_URL}/themes/account.html?error=already_linked`);
+            }
+
+            await usersCollection.updateOne(
+                { _id: new ObjectId(req.session.userId) },
+                { $set: { [`${provider}Id`]: profile.id } }
+            );
+            return res.redirect(`${process.env.FRONTEND_URL}/themes/account.html?success=linked`);
+        }
+
+        // SZENARIO 2: LOGIN ODER REGISTRIEREN
         let user;
         await sessionMongo.withTransaction(async () => {
-            // 1. Suchen wir den User anhand der Provider-ID oder E-Mail
             user = await usersCollection.findOne({
                 $or: [
-                    { [`${provider}Id`]: profile.id }, // z.B. googleId: "12345"
-                    { email: profile.email }
+                    { [`${provider}Id`]: profile.id }, // Finden per ID
+                    { email: profile.email }           // Oder per Mail (falls er es vorher mit PW erstellt hat)
                 ]
             }, { session: sessionMongo });
+        });
 
-            // 2. Wenn der User nicht existiert -> AUTOMATISCH REGISTRIEREN!
-            if (!user) {
-                const validUsername = await generateValidOAuthUsername(profile.name);
-                const randomPassword = await bcrypt.hash(crypto.randomBytes(16).toString('hex'), SALT_ROUNDS);
-
-                user = {
-                    username: validUsername,
-                    password: randomPassword, // Sie loggen sich eh über OAuth ein
-                    email: profile.email,
-                    isVerified: true, // OAuth Emails sind immer verifiziert
-                    balance: 5000.00,
-                    tokens: DEFAULT_STARTING_TOKENS,
-                    isAdmin: false,
-                    infinityMoney: false,
-                    unlockedInfinityMoney: false,
-                    createdAt: new Date(),
-                    schufaScore: 500,
-                    [`${provider}Id`]: profile.id, // Verknüpfung speichern
-                    authProvider: provider
-                };
-                
-                const result = await usersCollection.insertOne(user, { session: sessionMongo });
-                user._id = result.insertedId;
-                console.log(`${LOG_PREFIX_SERVER} 🌟 Neuer OAuth-User registriert: ${user.username} via ${provider}`);
-            } else {
-                // 3. User existiert, aber hat dieses OAuth vielleicht noch nicht verknüpft
-                if (!user[`${provider}Id`]) {
-                    await usersCollection.updateOne(
-                        { _id: user._id },
-                        { $set: { [`${provider}Id`]: profile.id, isVerified: true } },
-                        { session: sessionMongo }
-                    );
-                }
+        if (user) {
+            // Falls er über Mail gefunden wurde, aber die ID noch fehlt -> eintragen!
+            if (!user[`${provider}Id`]) {
+                await usersCollection.updateOne(
+                    { _id: user._id }, 
+                    { $set: { [`${provider}Id`]: profile.id, isVerified: true } }
+                );
             }
-        });
-
-        // 4. Session erstellen (Login)
-        req.session.userId = user._id.toString();
-        req.session.username = user.username;
-        req.session.isAdmin = user.isAdmin === true;
-        
-        req.session.save(err => {
-            if (err) throw err;
-            // Nach erfolgreichem Login zurück zum Frontend leiten!
-            const frontendUrl = process.env.FRONTEND_URL || `${req.protocol}://${req.get('host')}`;
-            res.redirect(`${frontendUrl}/index.html`); // Leitet ins Dashboard!
-        });
+            
+            // Einloggen!
+            req.session.userId = user._id.toString();
+            req.session.username = user.username;
+            req.session.isAdmin = user.isAdmin === true;
+            
+            req.session.save(err => {
+                res.redirect(`${process.env.FRONTEND_URL}/index.html`);
+            });
+        } else {
+            // SZENARIO 3: NEUER USER -> UMLEITUNG ZUR INVITE/USERNAME SEITE
+            // Wir speichern die verifizierten Daten sicher in der Session, damit der User sie nicht fälschen kann!
+            req.session.pendingOAuth = {
+                provider: provider,
+                providerId: profile.id,
+                email: profile.email,
+                suggestedName: profile.name
+            };
+            req.session.save(() => {
+                res.redirect(`${process.env.FRONTEND_URL}/themes/oauth-register.html`);
+            });
+        }
 
     } catch (err) {
-        console.error(`${LOG_PREFIX_SERVER} OAuth DB Fehler:`, err);
-        res.redirect(`${process.env.FRONTEND_URL}/themes/login.html?error=oauth_failed`);
+        console.error(`${LOG_PREFIX_SERVER} OAuth Fehler:`, err);
+        res.redirect(`${process.env.FRONTEND_URL}/index.html?error=oauth_failed`);
     } finally {
         await sessionMongo.endSession();
     }
@@ -23259,6 +23260,106 @@ app.get('/api/auth/github/callback', async (req, res) => {
     } catch (error) {
         console.error(`${LOG_PREFIX_SERVER} GitHub OAuth Error:`, error.response?.data || error.message);
         res.redirect(`${process.env.FRONTEND_URL}/themes/login.html?error=github_failed`);
+    }
+});
+
+app.post('/api/auth/oauth-complete', async (req, res) => {
+    const { username, inviteCode } = req.body;
+    const pending = req.session.pendingOAuth;
+
+    if (!pending) return res.status(400).json({ error: "Keine ausstehende OAuth-Anmeldung gefunden. Bitte starte den Login erneut." });
+    if (!username || username.length < 3 || username.length > 30) return res.status(400).json({ error: "Benutzername ungültig (3-30 Zeichen)." });
+    if (!inviteCode) return res.status(400).json({ error: "MISSING_INVITE", message: "Invite Code erforderlich." });
+
+    const usernameRegex = /^[a-zA-Z0-9_äöüÄÖÜß]+$/;
+    if (!usernameRegex.test(username)) return res.status(400).json({ error: 'Sonderzeichen im Namen sind verboten!' });
+
+    const sessionMongo = client.startSession();
+    try {
+        let userToLogin = null;
+
+        await sessionMongo.withTransaction(async () => {
+            // 1. Ist der Name noch frei?
+            const nameTaken = await usersCollection.findOne({ username: username.toLowerCase() }, { session: sessionMongo });
+            if (nameTaken) throw new Error("Dieser Benutzername ist bereits vergeben.");
+
+            // 2. Invite Code validieren
+            const validCode = await inviteCodesCollection.findOne({ code: inviteCode.trim(), isUsed: false }, { session: sessionMongo });
+            if (!validCode) {
+                throw new Error("INVALID_INVITE");
+            }
+
+            // 3. Dummy-Passwort generieren (Der User loggt sich ja eh über Google/GitHub ein)
+            const randomPassword = await bcrypt.hash(crypto.randomBytes(16).toString('hex'), SALT_ROUNDS);
+
+            const newUser = {
+                username: username.toLowerCase(),
+                password: randomPassword,
+                email: pending.email,
+                isVerified: true,
+                balance: 5000.00,
+                tokens: DEFAULT_STARTING_TOKENS,
+                isAdmin: false,
+                infinityMoney: false,
+                unlockedInfinityMoney: false,
+                createdAt: new Date(),
+                schufaScore: 500,
+                [`${pending.provider}Id`]: pending.providerId,
+                authProvider: pending.provider
+            };
+
+            const insertResult = await usersCollection.insertOne(newUser, { session: sessionMongo });
+            userToLogin = { _id: insertResult.insertedId, username: newUser.username };
+
+            // 4. Invite Code verbrennen
+            await inviteCodesCollection.updateOne(
+                { _id: validCode._id },
+                { $set: { isUsed: true, usedBy: newUser.username, usedAt: new Date() } },
+                { session: sessionMongo }
+            );
+        });
+
+        // 5. Session aufräumen & Einloggen
+        delete req.session.pendingOAuth;
+        
+        req.session.userId = userToLogin._id.toString();
+        req.session.username = userToLogin.username;
+        req.session.isAdmin = false;
+
+        req.session.save(() => {
+            res.status(201).json({ message: "Willkommen bei Limazon!" });
+        });
+
+    } catch (err) {
+        if (err.message === "INVALID_INVITE") {
+            return res.status(400).json({ error: "INVALID_INVITE", message: "Ungültiger oder benutzter Invite Code." });
+        }
+        res.status(400).json({ error: err.message });
+    } finally {
+        await sessionMongo.endSession();
+    }
+});
+
+app.post('/api/auth/oauth-unlink', isAuthenticated, async (req, res) => {
+    const { provider } = req.body;
+    if (!['google', 'github'].includes(provider)) return res.status(400).json({ error: "Ungültiger Provider." });
+
+    const userId = new ObjectId(req.session.userId);
+
+    try {
+        const user = await usersCollection.findOne({ _id: userId });
+        
+        // Verhindern, dass er sich aussperrt (Wenn er kein PW hat und das sein einziger Login ist)
+        if (!user.password && !user.passkeys?.length && provider === user.authProvider) {
+            return res.status(400).json({ error: "Du kannst deinen einzigen Anmelde-Dienst nicht entfernen, bevor du ein Passwort gesetzt hast!" });
+        }
+
+        const unsetField = `${provider}Id`;
+        await usersCollection.updateOne({ _id: userId }, { $unset: { [unsetField]: "" } });
+
+        res.json({ message: `${provider.charAt(0).toUpperCase() + provider.slice(1)} erfolgreich getrennt.` });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Trennen." });
     }
 });
 
