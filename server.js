@@ -191,7 +191,11 @@ const publicPaths = [
 	'/api/oauth/token',
 	'/api/auth/forgot-password',
     '/api/auth/reset-password',
-	'/api/auth/verify-email'
+	'/api/auth/verify-email',
+	'/api/auth/google',
+	'/api/auth/google/callback',
+	'/api/auth/github',
+	'/api/auth/github/callback'
 ];
 
 app.use((req, res, next) => {
@@ -23070,6 +23074,192 @@ app.get('/api/limazondb/details/pet/:id', isAuthenticated, async (req, res) => {
         
         res.json({ pet: { ...pet, currentHunger: Math.max(0, Math.round(hungerPercent)) } });
     } catch (e) { res.status(500).json({ error: "Fehler." }); }
+});
+
+// =========================================================
+// === 🔑 OAUTH 2.0 LOGIN (GOOGLE & GITHUB) ===
+// =========================================================
+
+// Hilfsfunktion: Namen für die Limazon-Regeln säubern
+async function generateValidOAuthUsername(baseName) {
+    // Entfernt Leerzeichen und verbotene Zeichen
+    let cleanName = baseName.replace(/[^a-zA-Z0-9_äöüÄÖÜß]/g, '').toLowerCase();
+    if (cleanName.length < 3) cleanName = "user_" + cleanName;
+    if (cleanName.length > 25) cleanName = cleanName.substring(0, 25);
+
+    // Prüfen, ob der Name schon existiert. Wenn ja, Nummer anhängen.
+    let finalName = cleanName;
+    let counter = 1;
+    while (await usersCollection.findOne({ username: finalName })) {
+        finalName = `${cleanName}_${counter}`;
+        counter++;
+    }
+    return finalName;
+}
+
+// Hilfsfunktion: Den User einloggen (oder neu erstellen)
+async function handleOAuthUser(req, res, provider, profile) {
+    const sessionMongo = client.startSession();
+    try {
+        let user;
+        await sessionMongo.withTransaction(async () => {
+            // 1. Suchen wir den User anhand der Provider-ID oder E-Mail
+            user = await usersCollection.findOne({
+                $or: [
+                    { [`${provider}Id`]: profile.id }, // z.B. googleId: "12345"
+                    { email: profile.email }
+                ]
+            }, { session: sessionMongo });
+
+            // 2. Wenn der User nicht existiert -> AUTOMATISCH REGISTRIEREN!
+            if (!user) {
+                const validUsername = await generateValidOAuthUsername(profile.name);
+                const randomPassword = await bcrypt.hash(crypto.randomBytes(16).toString('hex'), SALT_ROUNDS);
+
+                user = {
+                    username: validUsername,
+                    password: randomPassword, // Sie loggen sich eh über OAuth ein
+                    email: profile.email,
+                    isVerified: true, // OAuth Emails sind immer verifiziert
+                    balance: 5000.00,
+                    tokens: DEFAULT_STARTING_TOKENS,
+                    isAdmin: false,
+                    infinityMoney: false,
+                    unlockedInfinityMoney: false,
+                    createdAt: new Date(),
+                    schufaScore: 500,
+                    [`${provider}Id`]: profile.id, // Verknüpfung speichern
+                    authProvider: provider
+                };
+                
+                const result = await usersCollection.insertOne(user, { session: sessionMongo });
+                user._id = result.insertedId;
+                console.log(`${LOG_PREFIX_SERVER} 🌟 Neuer OAuth-User registriert: ${user.username} via ${provider}`);
+            } else {
+                // 3. User existiert, aber hat dieses OAuth vielleicht noch nicht verknüpft
+                if (!user[`${provider}Id`]) {
+                    await usersCollection.updateOne(
+                        { _id: user._id },
+                        { $set: { [`${provider}Id`]: profile.id, isVerified: true } },
+                        { session: sessionMongo }
+                    );
+                }
+            }
+        });
+
+        // 4. Session erstellen (Login)
+        req.session.userId = user._id.toString();
+        req.session.username = user.username;
+        req.session.isAdmin = user.isAdmin === true;
+        
+        req.session.save(err => {
+            if (err) throw err;
+            // Nach erfolgreichem Login zurück zum Frontend leiten!
+            const frontendUrl = process.env.FRONTEND_URL || `${req.protocol}://${req.get('host')}`;
+            res.redirect(`${frontendUrl}/index.html`); // Leitet ins Dashboard!
+        });
+
+    } catch (err) {
+        console.error(`${LOG_PREFIX_SERVER} OAuth DB Fehler:`, err);
+        res.redirect(`${process.env.FRONTEND_URL}/themes/login.html?error=oauth_failed`);
+    } finally {
+        await sessionMongo.endSession();
+    }
+}
+
+// ---------------------------------------------------------
+// --- GOOGLE OAUTH
+// ---------------------------------------------------------
+app.get('/api/auth/google', (req, res) => {
+    if (!process.env.GOOGLE_CLIENT_ID) return res.status(400).send("Google Login ist nicht konfiguriert.");
+    const redirectUri = `${process.env.FRONTEND_URL}/api/auth/google/callback`;
+    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${process.env.GOOGLE_CLIENT_ID}&redirect_uri=${redirectUri}&response_type=code&scope=email profile`;
+    res.redirect(authUrl);
+});
+
+app.get('/api/auth/google/callback', async (req, res) => {
+    const { code } = req.query;
+    const redirectUri = `${process.env.FRONTEND_URL}/api/auth/google/callback`;
+
+    try {
+        // 1. Code gegen Token tauschen
+        const tokenRes = await axios.post('https://oauth2.googleapis.com/token', {
+            client_id: process.env.GOOGLE_CLIENT_ID,
+            client_secret: process.env.GOOGLE_CLIENT_SECRET,
+            code,
+            grant_type: 'authorization_code',
+            redirect_uri: redirectUri
+        });
+
+        // 2. User Profil mit Token abrufen
+        const userRes = await axios.get('https://www.googleapis.com/oauth2/v2/userinfo', {
+            headers: { Authorization: `Bearer ${tokenRes.data.access_token}` }
+        });
+
+        const profile = {
+            id: userRes.data.id,
+            email: userRes.data.email.toLowerCase(),
+            name: userRes.data.given_name || userRes.data.name
+        };
+
+        await handleOAuthUser(req, res, 'google', profile);
+
+    } catch (error) {
+        console.error(`${LOG_PREFIX_SERVER} Google OAuth Error:`, error.response?.data || error.message);
+        res.redirect(`${process.env.FRONTEND_URL}/themes/login.html?error=google_failed`);
+    }
+});
+
+// ---------------------------------------------------------
+// --- GITHUB OAUTH
+// ---------------------------------------------------------
+app.get('/api/auth/github', (req, res) => {
+    if (!process.env.GITHUB_CLIENT_ID) return res.status(400).send("GitHub Login ist nicht konfiguriert.");
+    const redirectUri = `${process.env.FRONTEND_URL}/api/auth/github/callback`;
+    const authUrl = `https://github.com/login/oauth/authorize?client_id=${process.env.GITHUB_CLIENT_ID}&redirect_uri=${redirectUri}&scope=user:email`;
+    res.redirect(authUrl);
+});
+
+app.get('/api/auth/github/callback', async (req, res) => {
+    const { code } = req.query;
+    const redirectUri = `${process.env.FRONTEND_URL}/api/auth/github/callback`;
+
+    try {
+        // 1. Code gegen Token tauschen
+        const tokenRes = await axios.post('https://github.com/login/oauth/access_token', {
+            client_id: process.env.GITHUB_CLIENT_ID,
+            client_secret: process.env.GITHUB_CLIENT_SECRET,
+            code,
+            redirect_uri: redirectUri
+        }, { headers: { Accept: 'application/json' } });
+
+        const accessToken = tokenRes.data.access_token;
+
+        // 2. Profil abrufen
+        const userRes = await axios.get('https://api.github.com/user', {
+            headers: { Authorization: `Bearer ${accessToken}` }
+        });
+
+        // 3. GitHub versteckt Emails oft, wir müssen sie extra abrufen
+        const emailRes = await axios.get('https://api.github.com/user/emails', {
+            headers: { Authorization: `Bearer ${accessToken}` }
+        });
+        
+        const primaryEmailObj = emailRes.data.find(e => e.primary) || emailRes.data[0];
+        const email = primaryEmailObj ? primaryEmailObj.email.toLowerCase() : `${userRes.data.login}@github.com`;
+
+        const profile = {
+            id: userRes.data.id.toString(),
+            email: email,
+            name: userRes.data.login // Wir nehmen den GitHub Usernamen als Basis
+        };
+
+        await handleOAuthUser(req, res, 'github', profile);
+
+    } catch (error) {
+        console.error(`${LOG_PREFIX_SERVER} GitHub OAuth Error:`, error.response?.data || error.message);
+        res.redirect(`${process.env.FRONTEND_URL}/themes/login.html?error=github_failed`);
+    }
 });
 
 app.use((req, res) => {
