@@ -196,7 +196,9 @@ const publicPaths = [
 	'/api/auth/google/callback',
 	'/api/auth/github',
 	'/api/auth/github/callback',
-	'/api/auth/oauth-complete'
+	'/api/auth/oauth-complete',
+	'/api/auth/discord',
+    '/api/auth/discord/callback'
 ];
 
 app.use((req, res, next) => {
@@ -2838,7 +2840,8 @@ app.get('/api/auth/me', isAuthenticated, async (req, res) => {
     				schufaScore: user.schufaScore || 500,
     				hasActiveLoan: !!user.activeLoan,
 					hasGoogle: !!user.googleId,
-					hasGithub: !!user.githubId
+					hasGithub: !!user.githubId,
+					hasDiscord: !!user.discordId
 				});
     } catch (err) { 
         console.error(`${LOG_PREFIX_SERVER} Fehler /api/auth/me ${req.session.username}:`, err); 
@@ -23360,6 +23363,59 @@ app.post('/api/auth/oauth-unlink', isAuthenticated, async (req, res) => {
         res.json({ message: `${provider.charAt(0).toUpperCase() + provider.slice(1)} erfolgreich getrennt.` });
     } catch (e) {
         res.status(500).json({ error: "Fehler beim Trennen." });
+    }
+});
+
+// DISCORD OAUTH
+app.get('/api/auth/discord', (req, res) => {
+    if (!process.env.DISCORD_CLIENT_ID) return res.status(400).send("Discord Login ist nicht konfiguriert.");
+    const redirectUri = `${process.env.FRONTEND_URL}/api/auth/discord/callback`;
+    // scope=identify email -> Wir wollen die ID, den Namen und die E-Mail
+    const authUrl = `https://discord.com/api/oauth2/authorize?client_id=${process.env.DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=identify%20email`;
+    res.redirect(authUrl);
+});
+
+app.get('/api/auth/discord/callback', async (req, res) => {
+    const { code } = req.query;
+    const redirectUri = `${process.env.FRONTEND_URL}/api/auth/discord/callback`;
+
+    try {
+        // 1. Code gegen Token tauschen (Discord braucht x-www-form-urlencoded!)
+        const params = new URLSearchParams({
+            client_id: process.env.DISCORD_CLIENT_ID,
+            client_secret: process.env.DISCORD_CLIENT_SECRET,
+            grant_type: 'authorization_code',
+            code: code,
+            redirect_uri: redirectUri
+        });
+
+        const tokenRes = await axios.post('https://discord.com/api/oauth2/token', params, {
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+        });
+
+        const accessToken = tokenRes.data.access_token;
+
+        // 2. Profil abrufen
+        const userRes = await axios.get('https://discord.com/api/users/@me', {
+            headers: { Authorization: `Bearer ${accessToken}` }
+        });
+
+        // 3. Profil für Limazon normieren
+        const profile = {
+            id: userRes.data.id,
+            email: userRes.data.email, // E-Mail ist Pflicht für uns
+            // Discord hat 'global_name' (Anzeigename) oder 'username'
+            name: userRes.data.global_name || userRes.data.username 
+        };
+
+        if (!profile.email) throw new Error("Keine E-Mail von Discord erhalten.");
+
+        // An unser bestehendes, universelles System übergeben!
+        await handleOAuthUser(req, res, 'discord', profile);
+
+    } catch (error) {
+        console.error(`${LOG_PREFIX_SERVER} Discord OAuth Error:`, error.response?.data || error.message);
+        res.redirect(`${process.env.FRONTEND_URL}/index.html?error=discord_failed`);
     }
 });
 
