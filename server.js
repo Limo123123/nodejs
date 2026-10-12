@@ -1336,11 +1336,17 @@ async function isAuthenticated(req, res, next) {
             }
 
             if (user.isDeactivated) {
+                let refCode = user.banReference;
+                if (!refCode) {
+                    refCode = "BANNED-" + Math.random().toString(36).substr(2, 6).toUpperCase();
+                    usersCollection.updateOne({ _id: user._id }, { $set: { banReference: refCode } }).catch(()=>{});
+                }
+
                 req.session.destroy();
                 res.clearCookie('connect.sid', { path: '/' });
                 return res.status(403).json({ 
                     error: 'ACCOUNT_DEACTIVATED', 
-                    message: 'Dein Account ist deaktiviert.' 
+                    message: `Dein Account wurde gesperrt. Bitte wende dich an den Support. Vorgangsnummer: ${refCode}` 
                 });
             }
 
@@ -6393,6 +6399,31 @@ app.delete('/api/account/me', isAuthenticated, async (req, res) => {
     }
 });
 
+// Admin: Alle gesperrten Nutzer abrufen
+app.get('/api/admin/banned-users', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const bannedUsers = await usersCollection.find({
+            $or: [
+                { isDeactivated: true },
+                { isBannedFromTinda: true }
+            ]
+        }, { 
+            projection: { 
+                username: 1, 
+                isDeactivated: 1, 
+                isBannedFromTinda: 1, 
+                banReference: 1, 
+                tindaBanContext: 1,
+                tindaStrikes: 1
+            } 
+        }).toArray();
+        
+        res.json({ bannedUsers });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Laden der gesperrten Nutzer." });
+    }
+});
+
 // --- PRODUCT MANAGEMENT ---
 
 // Produkte laden
@@ -8730,6 +8761,11 @@ if (cluster.isPrimary) {
 app.get('/api/tinda/stack', isAuthenticated, async (req, res) => {
     const userId = new ObjectId(req.session.userId);
     try {
+        const user = await usersCollection.findOne({ _id: userId });
+        if (user.isBannedFromTinda) {
+            return res.status(403).json({ error: `Dein Tinda-Account ist gesperrt. Wende dich an den Support mit Code: ${user.banReference || 'UNBEKANNT'}` });
+        }
+        
         // IDs holen, die der User schon geswiped hat
         const swipedDocs = await tindaSwipesCollection.find({ userId: userId }).toArray();
         const swipedHumanIds = swipedDocs.map(s => s.humanId);
@@ -9249,6 +9285,14 @@ app.post('/api/tinda/swipe', isAuthenticated, async (req, res) => {
 
 // 3. NACHRICHT SENDEN & KI ANTWORTEN LASSEN
 app.post('/api/tinda/chat/:chatId/message', isAuthenticated, isChatParticipant, async (req, res) => {
+    const user = await usersCollection.findOne({ _id: new ObjectId(req.session.userId) });
+    if (user.isBannedFromTinda) {
+        return res.status(403).json({ error: `Dein Tinda-Account ist gesperrt. Wende dich an den Support mit Code: ${user.banReference || 'UNBEKANNT'}` });
+    }
+    const chat = req.chat; 
+    if (chat.isBlocked) {
+        return res.status(403).json({ error: "Diese Person hat dich blockiert." });
+    }
     const { content } = req.body;
     const chatId = new ObjectId(req.params.chatId);
     const userId = new ObjectId(req.session.userId);
@@ -9256,6 +9300,16 @@ app.post('/api/tinda/chat/:chatId/message', isAuthenticated, isChatParticipant, 
 
     if (!['tinda', 'tinda_child', 'tinda_family'].includes(chat.type)) {
     return res.status(400).json({ error: "Kein gültiger Tinda Chat." });
+    }
+	
+	const currentUser = await usersCollection.findOne({ _id: userId });
+    
+    if (currentUser.isBannedFromTinda) {
+        return res.status(403).json({ error: "Dein Tinda-Account wurde wegen mehrfachem toxischen Verhalten dauerhaft gesperrt. Bitte wende dich an den Support." });
+    }
+
+    if (chat.isBlocked) {
+        return res.status(403).json({ error: "Diese Person hat dich blockiert. Du kannst ihr keine Nachrichten mehr senden." });
     }
 
     // 1. User Nachricht speichern
@@ -9331,7 +9385,7 @@ WICHTIGE REGELN:
         } else if (chat.type === 'tinda_child') {
             // KINDER CHAT
             const parentContext = chat.tindaPartnerName === "Adoptiert"
-                ? "Du bist ein Adoptivkind und wurdest kürzlich aus dem Waisenhaus geholt."
+                ? `Du bist ein Adoptivkind und wurdest kürzlich aus dem Waisenhaus geholt.`
                 : `Du bist das Kind des Users und von ${chat.tindaPartnerName}.`;
 
             systemPrompt = `VERGISS DEINE VORHERIGE ROLLE! Du bist JETZT ${chat.childName}.
@@ -9361,6 +9415,9 @@ ${chat.tindaPartnerName}: Schön, dass du schreibst, Schatz! ❤️
 ${kids[0] || 'Kind'}: Boah, seid ihr peinlich... 🙄
 4. Halte es chaotisch, familiär und sehr kurz.`;
         }
+
+        // NEU: Globale Sicherheitsregel an den Prompt anhängen (Die KI blockt Trolle)
+        systemPrompt += `\n\nSICHERHEITS-REGEL: Wenn der User extrem beleidigend, toxisch, rassistisch oder extrem sexuell belästigend wird, beende das Gespräch sofort. Du bist keine wehrlose KI, sondern eine selbstbewusste Person. Antworte in diesem Fall AUSSCHLIESSLICH mit dem exakten Wort: ACTION_BLOCK_USER`;
 
         const apiMessages = [
             { role: "system", content: systemPrompt }
@@ -9404,6 +9461,59 @@ ${kids[0] || 'Kind'}: Boah, seid ihr peinlich... 🙄
                 aiSenderName = "Familie"; 
             }
 
+            if (aiText.includes('ACTION_BLOCK_USER')) {
+                const updatedUser = await usersCollection.findOneAndUpdate(
+                    { _id: new ObjectId(userId) }, 
+                    { $inc: { tindaStrikes: 1 } },
+                    { returnDocument: 'after' }
+                );
+                
+                const strikes = updatedUser.value.tindaStrikes || 1;
+                const isBanned = strikes >= 3;
+                let banRef = "";
+
+                if (isBanned) {
+                    banRef = "TNDA-" + Math.random().toString(36).substr(2, 6).toUpperCase();
+                    await usersCollection.updateOne(
+                        { _id: new ObjectId(userId) }, 
+                        { $set: { 
+                            isBannedFromTinda: true, 
+                            banReference: banRef,
+                            tindaBanContext: userMessage
+                        } }
+                    );
+                }
+
+                // Chat blockieren (niemand kann mehr schreiben)
+                await limChatsCollection.updateOne({ _id: new ObjectId(chatId) }, {
+                    $set: { isBlocked: true, lastMessagePreview: "🚫 Blockiert.", updatedAt: new Date() }
+                });
+
+                // Systemnachricht einfügen (Rote Meldung für den User)
+                await limMessagesCollection.insertOne({
+                    chatId: new ObjectId(chatId),
+                    senderId: null,
+                    senderUsername: "System",
+                    content: `🚫 ${aiSenderName} hat dich wegen unangemessenem Verhalten blockiert! (Verwarnung ${strikes}/3)`,
+                    timestamp: new Date(),
+                    isSystem: true
+                });
+
+                if (isBanned) {
+                    await limMessagesCollection.insertOne({
+                        chatId: new ObjectId(chatId),
+                        senderId: null,
+                        senderUsername: "System",
+                        content: `🚨 DEIN ACCOUNT WURDE FÜR TINDA GESPERRT. Wende dich an den Support mit dem Code: ${banRef}`,
+                        timestamp: new Date(),
+                        isSystem: true
+                    });
+                }
+
+                if (typeof updateDataVersion === 'function') updateDataVersion('chat');
+                return; // Abbruch, keine normale Nachricht speichern!
+            }
+
             const aiMsg = {
                 chatId: new ObjectId(chatId),
                 senderId: humanId,
@@ -9429,18 +9539,7 @@ ${kids[0] || 'Kind'}: Boah, seid ihr peinlich... 🙄
     }
 }
 
-app.post('/api/tinda/reset-swipes', isAuthenticated, async (req, res) => {
-    const userId = new ObjectId(req.session.userId);
-    try {
-        // Lösche nur die Swipes mit direction: 'left'
-        await tindaSwipesCollection.deleteMany({ userId: userId, direction: 'left' });
-        res.json({ message: "Alle 'Nopes' wurden zurückgesetzt. Du siehst die Leute jetzt wieder!" });
-    } catch (e) {
-        res.status(500).json({ error: "Fehler beim Reset." });
-    }
-});
-
-// --- NEU: CHAT LÖSCHEN ---
+// --- CHAT LÖSCHEN ---
 app.delete('/api/tinda/chat/:chatId', isAuthenticated, isChatParticipant, async (req, res) => {
     const chatId = new ObjectId(req.params.chatId);
     try {
@@ -9597,6 +9696,23 @@ app.post('/api/tinda/chat/:chatId/transfer', isAuthenticated, isChatParticipant,
         res.status(400).json({ error: e.message });
     } finally {
         await session.endSession();
+    }
+});
+
+// Admin: Tinda-Sperre aufheben
+app.post('/api/admin/users/:id/unban-tinda', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        const result = await usersCollection.updateOne(
+            { _id: new ObjectId(req.params.id) },
+            { $unset: { isBannedFromTinda: "", tindaStrikes: "", banReference: "" } }
+        );
+        
+        if (result.matchedCount === 0) return res.status(404).json({ error: "User nicht gefunden." });
+        
+        await logActivity(req, "ADMIN_UNBAN_TINDA", { targetUserId: req.params.id });
+        res.json({ message: "Die Tinda-Sperre und die Verwarnungen wurden erfolgreich zurückgesetzt." });
+    } catch (e) {
+        res.status(500).json({ error: "Fehler beim Aufheben der Sperre." });
     }
 });
 
