@@ -9296,7 +9296,6 @@ app.post('/api/tinda/chat/:chatId/message', isAuthenticated, isChatParticipant, 
     const { content } = req.body;
     const chatId = new ObjectId(req.params.chatId);
     const userId = new ObjectId(req.session.userId);
-    const chat = req.chat; // Kommt aus Middleware
 
     if (!['tinda', 'tinda_child', 'tinda_family'].includes(chat.type)) {
     return res.status(400).json({ error: "Kein gültiger Tinda Chat." });
