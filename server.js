@@ -9467,12 +9467,18 @@ WICHTIGE REGELN:
             normalizedText.includes("tut mir leid, aber ich kann");
 
         if (isBlockTriggered) {
+            // Zuerst prüfen, ob der User nicht eh schon gebannt ist (verhindert Spam/Race Conditions)
+            const currentUser = await usersCollection.findOne({ _id: new ObjectId(userId) });
+            if (currentUser.isBannedFromTinda) return; // Ist schon gebannt, mach nichts mehr!
+
             await usersCollection.updateOne(
                 { _id: new ObjectId(userId) }, 
                 { $inc: { tindaStrikes: 1 } }
             );
             const updatedUser = await usersCollection.findOne({ _id: new ObjectId(userId) });
+            
             const strikes = updatedUser.tindaStrikes || 1;
+            const displayStrikes = Math.min(strikes, 3); // Deckelt die Anzeige auf max 3/3
             const isBanned = strikes >= 3;
             let banRef = "";
 
@@ -9494,10 +9500,11 @@ WICHTIGE REGELN:
 
             await limMessagesCollection.insertOne({
                 chatId: new ObjectId(chatId), senderId: null, senderUsername: "System",
-                content: `🚫 ${aiSenderName} hat dich wegen unangemessenem Verhalten blockiert! (Verwarnung ${strikes}/3)`,
+                content: `🚫 ${aiSenderName} hat dich wegen unangemessenem Verhalten blockiert! (Verwarnung ${displayStrikes}/3)`,
                 timestamp: new Date(), isSystem: true
             });
 
+            // Die rote Bann-Meldung kommt nur exakt beim Erreichen der Grenze!
             if (isBanned) {
                 await limMessagesCollection.insertOne({
                     chatId: new ObjectId(chatId), senderId: null, senderUsername: "System",
