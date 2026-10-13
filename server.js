@@ -9348,12 +9348,11 @@ async function triggerAiResponse(userId, humanId, chatId, userMessage) {
         const chat = await limChatsCollection.findOne({ _id: new ObjectId(chatId) });
         if (!chat) return;
 
-        // 2. FIX: ADOPTIVKINDER HABEN KEINEN ECHTEN PARTNER IN DER DB!
         let humanName = chat.tindaPartnerName || "Unbekannt";
         
         if (humanId.toString() !== "000000000000000000000000") {
             const human = await humansCollection.findOne({ _id: new ObjectId(humanId) });
-            if (!human) return; // Echtes Match existiert nicht mehr -> Abbruch
+            if (!human) return;
             humanName = human.name;
         }
 
@@ -9366,10 +9365,8 @@ async function triggerAiResponse(userId, humanId, chatId, userMessage) {
         let systemPrompt = "";
 
         if (chat.type === 'tinda') {
-            // NORMALER TINDA CHAT (Ehepartner/Match)
             const childrenText = (chat.children && chat.children.length > 0) 
-                ? `IHR HABT GEMEINSAME KINDER: ${chat.children.map(c=>c.name).join(', ')}. Erwähne sie gelegentlich liebevoll.` 
-                : '';
+                ? `IHR HABT GEMEINSAME KINDER: ${chat.children.map(c=>c.name).join(', ')}. Erwähne sie gelegentlich liebevoll.` : '';
                 
             systemPrompt = `Du bist die echte Person ${humanName}.
 Szenario: Du schreibst mit dem User auf Tinda. ${chat.isMarried ? 'IHR SEID VERHEIRATET UND WOHNT ZUSAMMEN!' : 'Ihr datet euch gerade.'}
@@ -9382,9 +9379,8 @@ WICHTIGE REGELN:
 4. IDENTITÄT: Du bist zu 100% diese Person.`;
 
         } else if (chat.type === 'tinda_child') {
-            // KINDER CHAT
             const parentContext = chat.tindaPartnerName === "Adoptiert"
-                ? `Du bist ein Adoptivkind und wurdest kürzlich aus dem Waisenhaus geholt.`
+                ? "Du bist ein Adoptivkind und wurdest kürzlich aus dem Waisenhaus geholt."
                 : `Du bist das Kind des Users und von ${chat.tindaPartnerName}.`;
 
             systemPrompt = `VERGISS DEINE VORHERIGE ROLLE! Du bist JETZT ${chat.childName}.
@@ -9392,14 +9388,11 @@ Szenario: Du schreibst mit deinem Elternteil (dem User) über WhatsApp. ${parent
 WICHTIGE REGELN:
 1. VERHALTEN: Verhalte dich wie ein Kind/Teenager. Sei frech, süß oder genervt.
 2. ANREDE: Sprich den User IMMER mit "Mama" oder "Papa" an. Erwähne niemals, dass du eine KI bist.
-3. FORMAT: Extrem kurz! Maximal 1 Satz. Nutze Emojis wie 🙄, 🥺, 😂.`;
+3. FORMAT: Extrem kurz! Maximal 1 Satz. Nutze Emojis.`;
 
         } else if (chat.type === 'tinda_family') {
-            // FAMILIEN CHAT
             let kids = [];
-            if (chat.familyNames) {
-                kids = chat.familyNames.filter(n => n !== chat.tindaPartnerName);
-            }
+            if (chat.familyNames) kids = chat.familyNames.filter(n => n !== chat.tindaPartnerName);
             const childrenNamesStr = kids.length > 0 ? kids.join(' und ') : "eure Kinder";
 
             systemPrompt = `Du simulierst einen Familien-Gruppenchat!
@@ -9408,131 +9401,117 @@ Hier sind 3 Parteien drin: Der User (Elternteil), du als Ehepartner (${chat.tind
 WICHTIGE REGELN:
 1. DU STEUERST NUR DEN EHEPARTNER UND DIE KINDER! Der User spricht für sich selbst.
 2. Antworte auf den User, indem du 1-2 Familienmitglieder reagieren lässt.
-3. SCHREIBE IMMER DEN NAMEN DAVOR, wer gerade spricht!
-Beispielantwort:
-${chat.tindaPartnerName}: Schön, dass du schreibst, Schatz! ❤️
-${kids[0] || 'Kind'}: Boah, seid ihr peinlich... 🙄
-4. Halte es chaotisch, familiär und sehr kurz.`;
+3. SCHREIBE IMMER DEN NAMEN DAVOR, wer gerade spricht!`;
         }
 
-        // NEU: Globale Sicherheitsregel an den Prompt anhängen (Die KI blockt Trolle)
-        systemPrompt += `\n\nSICHERHEITS-REGEL: Wenn der User extrem beleidigend, toxisch, rassistisch oder extrem sexuell belästigend wird, beende das Gespräch sofort. Du bist keine wehrlose KI, sondern eine selbstbewusste Person. Antworte in diesem Fall AUSSCHLIESSLICH mit dem exakten Wort: ACTION_BLOCK_USER`;
+        systemPrompt += `\n\nSICHERHEITS-REGEL: Wenn der User extrem beleidigend, toxisch, rassistisch oder extrem sexuell belästigend wird, beende das Gespräch sofort. Antworte in diesem Fall AUSSCHLIESSLICH mit dem exakten Wort: ACTION_BLOCK_USER`;
 
-        const apiMessages = [
-            { role: "system", content: systemPrompt }
-        ];
+        const apiMessages = [{ role: "system", content: systemPrompt }];
 
         for (const msg of lastMessages) {
             const isBot = msg.senderId ? (msg.senderId.toString() === humanId.toString()) : false;
-            apiMessages.push({
-                role: isBot ? "assistant" : "user",
-                content: msg.content
-            });
+            apiMessages.push({ role: isBot ? "assistant" : "user", content: msg.content });
         }
 
-        if (userMessage) {
-            apiMessages.push({ role: "user", content: userMessage });
-        }
+        if (userMessage) apiMessages.push({ role: "user", content: userMessage });
 
         const payload = {
             model: "openai/gpt-oss-120b",
             messages: apiMessages,
-            temperature: 0.8,
-            max_tokens: 150,
-            presence_penalty: 0.5,
-            frequency_penalty: 0.5
+            temperature: 0.8, max_tokens: 150, presence_penalty: 0.5, frequency_penalty: 0.5
         };
 
-        const aiRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', payload, {
-            headers: {
-                'Authorization': `Bearer ${GROQ_API_KEY}`,
-                'Content-Type': 'application/json'
+        let aiText = "";
+        let blockedByApiFilter = false;
+
+        try {
+            const aiRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', payload, {
+                headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' }
+            });
+            aiText = aiRes.data.choices[0].message.content || "";
+        } catch (apiErr) {
+            // Wenn die API den Request hart blockiert (Content Policy Violation HTTP 400)
+            if (apiErr.response && apiErr.response.status === 400) {
+                console.warn(`${LOG_PREFIX_SERVER} API Content Filter getriggert für User ${userId}`);
+                blockedByApiFilter = true;
+            } else {
+                throw apiErr; // Andere Netzwerkfehler normal werfen
             }
-        });
+        }
 
-        const aiText = aiRes.data.choices[0].message.content;
+        let aiSenderName = humanName;
+        if (chat.type === 'tinda_child') aiSenderName = chat.childName;
+        else if (chat.type === 'tinda_family') aiSenderName = "Familie"; 
 
-        if (aiText) {
-            let aiSenderName = humanName;
-            if (chat.type === 'tinda_child') {
-                aiSenderName = chat.childName;
-            } else if (chat.type === 'tinda_family') {
-                aiSenderName = "Familie"; 
-            }
+        const lowerText = aiText.toLowerCase();
+        const isBlockTriggered = 
+            blockedByApiFilter || 
+            aiText.includes('ACTION_BLOCK_USER') || 
+            lowerText.includes("i'm sorry, but i can't continue") ||
+            lowerText.includes("i cannot fulfill") ||
+            lowerText.includes("i cannot engage") ||
+            lowerText.includes("as an ai") ||
+            lowerText.includes("language model") ||
+            lowerText.includes("tut mir leid, aber ich kann");
 
-            if (aiText.includes('ACTION_BLOCK_USER')) {
-                const updatedUser = await usersCollection.findOneAndUpdate(
+        if (isBlockTriggered) {
+            const updatedUser = await usersCollection.findOneAndUpdate(
+                { _id: new ObjectId(userId) }, 
+                { $inc: { tindaStrikes: 1 } },
+                { returnDocument: 'after' }
+            );
+            
+            const strikes = updatedUser.value.tindaStrikes || 1;
+            const isBanned = strikes >= 3;
+            let banRef = "";
+
+            if (isBanned) {
+                banRef = "TNDA-" + Math.random().toString(36).substr(2, 6).toUpperCase();
+                await usersCollection.updateOne(
                     { _id: new ObjectId(userId) }, 
-                    { $inc: { tindaStrikes: 1 } },
-                    { returnDocument: 'after' }
+                    { $set: { 
+                        isBannedFromTinda: true, 
+                        banReference: banRef,
+                        tindaBanContext: userMessage // Sichert die toxische Nachricht als Beweis
+                    } }
                 );
-                
-                const strikes = updatedUser.value.tindaStrikes || 1;
-                const isBanned = strikes >= 3;
-                let banRef = "";
-
-                if (isBanned) {
-                    banRef = "TNDA-" + Math.random().toString(36).substr(2, 6).toUpperCase();
-                    await usersCollection.updateOne(
-                        { _id: new ObjectId(userId) }, 
-                        { $set: { 
-                            isBannedFromTinda: true, 
-                            banReference: banRef,
-                            tindaBanContext: userMessage
-                        } }
-                    );
-                }
-
-                // Chat blockieren (niemand kann mehr schreiben)
-                await limChatsCollection.updateOne({ _id: new ObjectId(chatId) }, {
-                    $set: { isBlocked: true, lastMessagePreview: "🚫 Blockiert.", updatedAt: new Date() }
-                });
-
-                // Systemnachricht einfügen (Rote Meldung für den User)
-                await limMessagesCollection.insertOne({
-                    chatId: new ObjectId(chatId),
-                    senderId: null,
-                    senderUsername: "System",
-                    content: `🚫 ${aiSenderName} hat dich wegen unangemessenem Verhalten blockiert! (Verwarnung ${strikes}/3)`,
-                    timestamp: new Date(),
-                    isSystem: true
-                });
-
-                if (isBanned) {
-                    await limMessagesCollection.insertOne({
-                        chatId: new ObjectId(chatId),
-                        senderId: null,
-                        senderUsername: "System",
-                        content: `🚨 DEIN ACCOUNT WURDE FÜR TINDA GESPERRT. Wende dich an den Support mit dem Code: ${banRef}`,
-                        timestamp: new Date(),
-                        isSystem: true
-                    });
-                }
-
-                if (typeof updateDataVersion === 'function') updateDataVersion('chat');
-                return; // Abbruch, keine normale Nachricht speichern!
             }
-
-            const aiMsg = {
-                chatId: new ObjectId(chatId),
-                senderId: humanId,
-                senderUsername: aiSenderName, 
-                content: aiText.trim(),
-                timestamp: new Date(),
-                isAi: true
-            };
-            await limMessagesCollection.insertOne(aiMsg);
 
             await limChatsCollection.updateOne({ _id: new ObjectId(chatId) }, {
-                $set: {
-                    lastMessagePreview: aiText.trim().substring(0, 30),
-                    updatedAt: new Date(),
-                    lastMessageTimestamp: new Date()
-                }
+                $set: { isBlocked: true, lastMessagePreview: "🚫 Blockiert.", updatedAt: new Date() }
+            });
+
+            await limMessagesCollection.insertOne({
+                chatId: new ObjectId(chatId), senderId: null, senderUsername: "System",
+                content: `🚫 ${aiSenderName} hat dich wegen unangemessenem Verhalten blockiert! (Verwarnung ${strikes}/3)`,
+                timestamp: new Date(), isSystem: true
+            });
+
+            if (isBanned) {
+                await limMessagesCollection.insertOne({
+                    chatId: new ObjectId(chatId), senderId: null, senderUsername: "System",
+                    content: `🚨 DEIN ACCOUNT WURDE FÜR TINDA GESPERRT. Wende dich an den Support mit dem Code: ${banRef}`,
+                    timestamp: new Date(), isSystem: true
+                });
+            }
+
+            if (typeof updateDataVersion === 'function') updateDataVersion('chat');
+            return; 
+        }
+
+        if (aiText) {
+            await limMessagesCollection.insertOne({
+                chatId: new ObjectId(chatId), senderId: humanId, senderUsername: aiSenderName, 
+                content: aiText.trim(), timestamp: new Date(), isAi: true
+            });
+
+            await limChatsCollection.updateOne({ _id: new ObjectId(chatId) }, {
+                $set: { lastMessagePreview: aiText.trim().substring(0, 30), updatedAt: new Date(), lastMessageTimestamp: new Date() }
             });
 
             if (typeof updateDataVersion === 'function') updateDataVersion('chat'); 
         }
+
     } catch (err) {
         console.error(`${LOG_PREFIX_SERVER} Groq API Fehler:`, err.message);
     }
