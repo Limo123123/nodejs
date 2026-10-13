@@ -2847,7 +2847,10 @@ app.get('/api/auth/me', isAuthenticated, async (req, res) => {
     				hasActiveLoan: !!user.activeLoan,
 					hasGoogle: !!user.googleId,
 					hasGithub: !!user.githubId,
-					hasDiscord: !!user.discordId
+					hasDiscord: !!user.discordId,
+					tindaStrikes: user.tindaStrikes || 0,
+            		isBannedFromTinda: user.isBannedFromTinda || false,
+            		banReference: user.banReference || null
 				});
     } catch (err) { 
         console.error(`${LOG_PREFIX_SERVER} Fehler /api/auth/me ${req.session.username}:`, err); 
@@ -9464,13 +9467,12 @@ WICHTIGE REGELN:
             normalizedText.includes("tut mir leid, aber ich kann");
 
         if (isBlockTriggered) {
-            const updatedUser = await usersCollection.findOneAndUpdate(
+            await usersCollection.updateOne(
                 { _id: new ObjectId(userId) }, 
-                { $inc: { tindaStrikes: 1 } },
-                { returnDocument: 'after' }
+                { $inc: { tindaStrikes: 1 } }
             );
-            
-            const strikes = updatedUser.value.tindaStrikes || 1;
+            const updatedUser = await usersCollection.findOne({ _id: new ObjectId(userId) });
+            const strikes = updatedUser.tindaStrikes || 1;
             const isBanned = strikes >= 3;
             let banRef = "";
 
