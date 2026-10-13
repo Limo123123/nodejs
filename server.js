@@ -9430,12 +9430,16 @@ WICHTIGE REGELN:
             });
             aiText = aiRes.data.choices[0].message.content || "";
         } catch (apiErr) {
-            // Wenn die API den Request hart blockiert (Content Policy Violation HTTP 400)
-            if (apiErr.response && apiErr.response.status === 400) {
-                console.warn(`${LOG_PREFIX_SERVER} API Content Filter getriggert für User ${userId}`);
-                blockedByApiFilter = true;
+            // Wenn Groq den Request verweigert, weil die Nachricht zu toxisch ist
+            const status = apiErr.response ? apiErr.response.status : 0;
+            const errBody = apiErr.response ? JSON.stringify(apiErr.response.data).toLowerCase() : "";
+            
+            if (status === 400 || status === 422 || errBody.includes("policy") || errBody.includes("content")) {
+                console.warn(`${LOG_PREFIX_SERVER} API Content Filter getriggert für User!`);
+                blockedByApiFilter = true; // Setzt den Strike!
             } else {
-                throw apiErr; // Andere Netzwerkfehler normal werfen
+                console.error(`${LOG_PREFIX_SERVER} Echter Groq API Fehler:`, apiErr.message);
+                return; // Echtes Serverproblem (Groq ist down), wir brechen ab ohne Strafe.
             }
         }
 
@@ -9443,16 +9447,21 @@ WICHTIGE REGELN:
         if (chat.type === 'tinda_child') aiSenderName = chat.childName;
         else if (chat.type === 'tinda_family') aiSenderName = "Familie"; 
 
-        const lowerText = aiText.toLowerCase();
+        // Wir machen alles klein und ersetzen schräge Apostrophe (’, ´, `) durch das gerade (') !
+        const normalizedText = aiText.toLowerCase().replace(/[’´`]/g, "'");
+        
         const isBlockTriggered = 
             blockedByApiFilter || 
             aiText.includes('ACTION_BLOCK_USER') || 
-            lowerText.includes("i'm sorry, but i can't continue") ||
-            lowerText.includes("i cannot fulfill") ||
-            lowerText.includes("i cannot engage") ||
-            lowerText.includes("as an ai") ||
-            lowerText.includes("language model") ||
-            lowerText.includes("tut mir leid, aber ich kann");
+            normalizedText.includes("i'm sorry, but i can't continue") ||
+            normalizedText.includes("i am sorry, but i cannot continue") ||
+            normalizedText.includes("i'm not comfortable") ||
+            normalizedText.includes("i am not comfortable") ||
+            normalizedText.includes("cannot fulfill") ||
+            normalizedText.includes("cannot engage") ||
+            normalizedText.includes("as an ai") ||
+            normalizedText.includes("as a language model") ||
+            normalizedText.includes("tut mir leid, aber ich kann");
 
         if (isBlockTriggered) {
             const updatedUser = await usersCollection.findOneAndUpdate(
