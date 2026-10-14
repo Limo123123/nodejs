@@ -2850,7 +2850,8 @@ app.get('/api/auth/me', isAuthenticated, async (req, res) => {
 					hasDiscord: !!user.discordId,
 					tindaStrikes: user.tindaStrikes || 0,
             		isBannedFromTinda: user.isBannedFromTinda || false,
-            		banReference: user.banReference || null
+            		banReference: user.banReference || null,
+					lzbBalance: parseFloat(user.lzbBalance || 0)
 				});
     } catch (err) { 
         console.error(`${LOG_PREFIX_SERVER} Fehler /api/auth/me ${req.session.username}:`, err); 
