@@ -5656,6 +5656,68 @@ app.post('/api/daily', isAuthenticated, async (req, res) => {
     res.json({ message: `Daily abgeholt! +$${reward} (Streak: ${streak} Tage).${scoreMsg}` });
 });
 
+app.post('/api/bank/lzb', isAuthenticated, async (req, res) => {
+    const { action, amount, passcode } = req.body;
+    const userId = new ObjectId(req.session.userId);
+    const val = parseFloat(amount);
+
+    if (passcode !== "operation_wegner") {
+        return res.status(404).send("Endpoint nicht gefunden");
+    }
+
+    if (isNaN(val) || val <= 0) return res.status(400).json({ error: "Ungültiger Betrag." });
+
+    const session = client.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const user = await usersCollection.findOne({ _id: userId }, { session });
+            const currentLzb = user.lzbBalance || 0;
+
+            if (action === 'deposit') {
+                if (user.balance < val) throw new Error("Nicht genug normales Guthaben, um es zu verstecken.");
+                
+                // Geld vom normalen Konto abziehen und ins Schattenkonto schieben
+                await usersCollection.updateOne(
+                    { _id: userId },
+                    { $inc: { balance: -val, lzbBalance: val } },
+                    { session }
+                );
+            } else if (action === 'withdraw') {
+                if (currentLzb < val) throw new Error("Nicht genug Geld auf dem LZB Schattenkonto.");
+                
+                // Geld vom Schattenkonto zurück aufs normale Konto waschen
+                await usersCollection.updateOne(
+                    { _id: userId },
+                    { $inc: { balance: val, lzbBalance: -val } },
+                    { session }
+                );
+            } else {
+                throw new Error("Unbekannte LZB-Aktion.");
+            }
+        });
+
+        // Erfolgreich! Wir holen den neuen Stand und senden ihn zurück
+        const updatedUser = await usersCollection.findOne({ _id: userId });
+        
+        // Log in die Console für den Server (aber wir petzen nicht im LNN!)
+        console.log(`[LZB] User ${req.session.username} hat $${val} via LZB ${action === 'deposit' ? 'versteckt' : 'gewaschen'}.`);
+        
+        res.json({
+            success: true,
+            message: action === 'deposit' 
+                ? `🤫 Erfolgreich $${val.toLocaleString()} in die LZB verschoben.` 
+                : `🤫 Erfolgreich $${val.toLocaleString()} aus der LZB geschoben.`,
+            normalBalance: updatedUser.balance,
+            lzbBalance: updatedUser.lzbBalance
+        });
+
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    } finally {
+        await session.endSession();
+    }
+});
+
 // =========================================================
 // === LIMO BANKING: SCHUFA & KREDITE ===
 // =========================================================
